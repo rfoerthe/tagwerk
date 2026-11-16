@@ -1,0 +1,25 @@
+[package]
+name = "tagwerk"
+version = "1.0.0"
+edition = "2021"
+description = "Tagwerk – erfasst die Arbeitszeit anhand der Zeit, in der der Mac entsperrt ist"
+
+[[bin]]
+name = "Tagwerk"
+path = "src/main.rs"
+
+[dependencies]
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+eframe = "0.37"
+winit = "0.30"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+[target.'cfg(target_os = "macos")'.dependencies]
+objc2 = "0.6"
+objc2-foundation = "0.3"
+objc2-app-kit = "0.3"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true
