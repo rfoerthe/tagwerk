@@ -3,9 +3,14 @@
 //! Korrigieren eines Tages (Arbeitsbeginn, Pausen, Feierabend) und Export als Markdown
 //! über den Sichern-Dialog.
 //!
-//! Das Fenster läuft als eigener Prozess (`Tagwerk --records`), den die Menüleisten-App
-//! startet. Änderungen gehen direkt in die Datenbank; die Menüleisten-App übernimmt sie.
+//! Die Menüleisten-App öffnet das Fenster in ihrem eigenen Prozess ([`show`]). Solange es
+//! offen ist, hat Tagwerk ein Symbol im Dock und ein Hauptmenü. Das Fenster liest und
+//! schreibt über eine eigene Datenbankverbindung und meldet Änderungen sofort an die
+//! Menüleisten-App; den Zustand der Erfassung bekommt es von ihr ([`set_status`]).
+//!
+//! `Tagwerk --records` öffnet das Fenster ohne Menüleisten-App ([`run`]).
 
+use crate::about;
 use crate::day::{fmt_clock, secs_of, Break, Day, DayRecord, Span, DAY_END};
 use crate::rules::{self, Settings, Warning};
 use crate::settings_window;
@@ -252,7 +257,7 @@ impl Model {
         }
     }
 
-    /// Liest Datenbank und Status neu und baut die Tabellenzeilen auf.
+    /// Liest die Datenbank neu und baut die Tabellenzeilen auf.
     fn load(&mut self) {
         if let Some(db) = self.db.as_ref() {
             match db.load().and_then(|d| Ok((d, db.load_settings()?))) {
@@ -264,7 +269,6 @@ impl Model {
                 Err(e) => self.error = Some(format!("Die Datenbank konnte nicht gelesen werden: {e}")),
             }
         }
-        self.status = store::read_status();
         self.build_rows();
     }
 
@@ -324,6 +328,23 @@ thread_local! {
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
     static TICKS: Cell<u64> = const { Cell::new(0) };
     static SCREENSHOT: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
+    /// Rückmeldung an die Menüleisten-App nach einer Änderung (`None`: eigenständig
+    /// über `--records` gestartet).
+    static ON_CHANGE: Cell<Option<fn()>> = const { Cell::new(None) };
+    /// Fenster ist offen (auch im Dock abgelegt).
+    static OPEN: Cell<bool> = const { Cell::new(false) };
+    static TIMER: RefCell<Option<Retained<NSTimer>>> = const { RefCell::new(None) };
+}
+
+fn embedded() -> bool {
+    ON_CHANGE.with(|c| c.get().is_some())
+}
+
+/// Meldet der Menüleisten-App, dass sich die Datenbank geändert hat.
+fn notify_change() {
+    if let Some(f) = ON_CHANGE.with(|c| c.get()) {
+        f();
+    }
 }
 
 fn ui() -> Ui {
@@ -445,11 +466,17 @@ define_class!(
     unsafe impl NSWindowDelegate for Controller {
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, _n: &NSNotification) {
-            NSApplication::sharedApplication(mtm()).terminate(None);
+            closed();
         }
     }
 
     impl Controller {
+        /// ⌘Q schließt nur das Fenster, die Erfassung läuft weiter.
+        #[unsafe(method(closeRecords:))]
+        fn close_records(&self, _sender: Option<&AnyObject>) {
+            ui().window.performClose(None);
+        }
+
         #[unsafe(method(reload:))]
         fn reload_action(&self, _sender: Option<&AnyObject>) {
             reload();
@@ -472,9 +499,14 @@ define_class!(
             ui.split.adjustSubviews();
         }
 
+        #[unsafe(method(showAbout:))]
+        fn show_about(&self, _sender: Option<&AnyObject>) {
+            about::show();
+        }
+
         #[unsafe(method(showSettings:))]
         fn show_settings(&self, _sender: Option<&AnyObject>) {
-            settings_window::show(reload);
+            settings_window::show(settings_changed);
         }
 
         #[unsafe(method(revealDatabase:))]
@@ -770,6 +802,12 @@ fn reload() {
     refresh_inspector(false);
 }
 
+/// Einstellungen wurden im Fenster „Einstellungen“ geändert.
+fn settings_changed() {
+    reload();
+    notify_change();
+}
+
 // ---------- Inspektor ----------
 
 /// Was im Inspektor geändert wurde.
@@ -814,6 +852,7 @@ fn apply(edit: Edit, rebuild: bool) {
             reload_table();
             refresh_summary();
             refresh_inspector(rebuild);
+            notify_change();
         }
     }
 }
@@ -1421,7 +1460,7 @@ fn build_main_menu(app: &NSApplication, target: &Controller) {
     submenu(
         "Tagwerk",
         vec![
-            Some(menu_item("Über Tagwerk", Some(sel!(orderFrontStandardAboutPanel:)), "", cmd, None)),
+            Some(menu_item("Über Tagwerk", Some(sel!(showAbout:)), "", cmd, Some(target))),
             None,
             Some(menu_item("Einstellungen …", Some(sel!(showSettings:)), ",", cmd, Some(target))),
             None,
@@ -1429,7 +1468,7 @@ fn build_main_menu(app: &NSApplication, target: &Controller) {
             Some(menu_item("Andere ausblenden", Some(sel!(hideOtherApplications:)), "h", cmd | NSEventModifierFlags::Option, None)),
             Some(menu_item("Alle einblenden", Some(sel!(unhideAllApplications:)), "", cmd, None)),
             None,
-            Some(menu_item("Aufzeichnungen schließen", Some(sel!(terminate:)), "q", cmd, None)),
+            Some(menu_item("Aufzeichnungen schließen", Some(sel!(closeRecords:)), "q", cmd, Some(target))),
         ],
     );
     submenu(
@@ -1712,16 +1751,44 @@ fn tick() {
         return;
     }
 
-    // Änderungen von außen (Menüleisten-App) übernehmen, sonst regelmäßig die
-    // laufenden Zahlen von heute auffrischen.
+    // Änderungen von außen (Menüleisten-App, `--import`) übernehmen, sonst regelmäßig die
+    // laufenden Zahlen von heute auffrischen. Eigenständig gestartet, gibt es den
+    // Zustand der Erfassung nur über die Statusdatei.
     if n.is_multiple_of(3) {
+        let embedded = embedded();
         let changed = model(|m| {
             let db_changed = m.db.as_mut().is_some_and(|db| db.changed_externally());
-            db_changed || store::read_status() != m.status
+            let status_changed = !embedded && {
+                let status = store::read_status();
+                std::mem::replace(&mut m.status, status) != status
+            };
+            db_changed || status_changed
         });
         if changed || n.is_multiple_of(30) {
             reload();
         }
+    }
+}
+
+fn start_timer(controller: &Controller, interval: f64) {
+    if TIMER.with(|t| t.borrow().is_some()) {
+        return;
+    }
+    let timer = unsafe {
+        NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
+            interval,
+            controller,
+            sel!(tick:),
+            None,
+            true,
+        )
+    };
+    TIMER.with(|t| *t.borrow_mut() = Some(timer));
+}
+
+fn stop_timer() {
+    if let Some(timer) = TIMER.with(|t| t.borrow_mut().take()) {
+        timer.invalidate();
     }
 }
 
@@ -1745,23 +1812,15 @@ fn save_screenshot(path: &std::path::Path) -> Result<(), String> {
 
 // ---------- Start ----------
 
-/// Öffnet das Fenster „Aufzeichnungen“. Mit `screenshot` wird ein Bild des Fensters
-/// gespeichert und das Programm danach beendet.
-pub fn run(screenshot: Option<PathBuf>) -> Result<(), String> {
-    let mtm = MainThreadMarker::new().ok_or("Das Fenster muss im Hauptthread laufen.")?;
-    let shot = screenshot.is_some();
-    SCREENSHOT.with(|s| *s.borrow_mut() = screenshot);
-
-    let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
-    // Zum Testen/für Screenshots: TAGWERK_APPEARANCE=dark|light
-    if let Ok(a) = std::env::var("TAGWERK_APPEARANCE") {
-        let name = if a == "dark" { unsafe { NSAppearanceNameDarkAqua } } else { unsafe { NSAppearanceNameAqua } };
-        app.setAppearance(NSAppearance::appearanceNamed(name).as_deref());
+/// Baut Hauptmenü, Modell und Fenster beim ersten Öffnen auf. Danach bleibt das Fenster
+/// erhalten und wird beim nächsten Öffnen wieder gezeigt.
+fn build(shot: bool) -> Ui {
+    if let Some(ui) = UI.with(|u| u.borrow().clone()) {
+        return ui;
     }
-
+    let mtm = mtm();
     let controller = Controller::new(mtm);
-    build_main_menu(&app, &controller);
+    build_main_menu(&NSApplication::sharedApplication(mtm), &controller);
 
     let (db, error) = match store::Db::open() {
         Ok(db) => (Some(db), None),
@@ -1777,6 +1836,87 @@ pub fn run(screenshot: Option<PathBuf>) -> Result<(), String> {
     UI.with(|u| *u.borrow_mut() = Some(ui.clone()));
     reload_table();
     refresh_summary();
+    refresh_inspector(true);
+    ui
+}
+
+/// Öffnet das Fenster „Aufzeichnungen“ in der Menüleisten-App oder holt es nach vorn,
+/// auf Wunsch mit ausgewähltem Tag. `status` ist der Zustand der Erfassung; `on_change`
+/// wird nach jeder Änderung an der Datenbank aufgerufen.
+pub fn show(select: Option<NaiveDate>, status: Status, on_change: fn()) {
+    ON_CHANGE.with(|c| c.set(Some(on_change)));
+    // Mit Fenster gehört Tagwerk ins Dock und in den App-Umschalter (⌘⇥), und die
+    // Menüleiste zeigt das Hauptmenü des Fensters.
+    NSApplication::sharedApplication(mtm()).setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    let fresh = !OPEN.with(|o| o.replace(true));
+    let ui = build(false);
+    model(|m| m.status = Some(status));
+    reload();
+    if let Some(d) = select {
+        go_to(d);
+    }
+    ui.window.makeKeyAndOrderFront(None);
+    if fresh {
+        ui.window.makeFirstResponder(Some(&ui.table));
+    }
+    activate();
+    start_timer(&ui.controller, 1.0);
+}
+
+/// Ob das Fenster gerade offen ist.
+pub fn is_open() -> bool {
+    OPEN.with(|o| o.get())
+}
+
+/// Neuer Zustand der Erfassung (von der Menüleisten-App).
+pub fn set_status(status: Status) {
+    if !is_open() {
+        return;
+    }
+    if model(|m| m.status.replace(status) != Some(status)) {
+        reload();
+    }
+}
+
+/// Die Datenbank wurde anderswo geändert (z. B. im Fenster „Einstellungen“).
+pub fn reload_if_open() {
+    if is_open() {
+        reload();
+    }
+}
+
+/// Das Fenster wird geschlossen: eigenständig gestartet beenden, sonst das Dock-Symbol
+/// und das Hauptmenü wieder abgeben – die Erfassung läuft weiter.
+fn closed() {
+    let app = NSApplication::sharedApplication(mtm());
+    if !embedded() {
+        app.terminate(None);
+        return;
+    }
+    OPEN.with(|o| o.set(false));
+    stop_timer();
+    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+}
+
+/// Öffnet das Fenster „Aufzeichnungen“ ohne Menüleisten-App (`Tagwerk --records`). Mit
+/// `screenshot` wird ein Bild des Fensters gespeichert und das Programm danach beendet.
+pub fn run(screenshot: Option<PathBuf>) -> Result<(), String> {
+    let mtm = MainThreadMarker::new().ok_or("Das Fenster muss im Hauptthread laufen.")?;
+    let shot = screenshot.is_some();
+    SCREENSHOT.with(|s| *s.borrow_mut() = screenshot);
+
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
+    // Zum Testen/für Screenshots: TAGWERK_APPEARANCE=dark|light
+    if let Ok(a) = std::env::var("TAGWERK_APPEARANCE") {
+        let name = if a == "dark" { unsafe { NSAppearanceNameDarkAqua } } else { unsafe { NSAppearanceNameAqua } };
+        app.setAppearance(NSAppearance::appearanceNamed(name).as_deref());
+    }
+
+    // Ohne Menüleisten-App gibt es den Zustand der Erfassung nur über die Statusdatei.
+    model(|m| m.status = store::read_status());
+    OPEN.with(|o| o.set(true));
+    let ui = build(shot);
 
     // Zum Testen/für Screenshots: TAGWERK_SELECT=latest oder =TT.MM.JJJJ
     let select = std::env::var("TAGWERK_SELECT").ok().and_then(|sel| {
@@ -1786,9 +1926,8 @@ pub fn run(screenshot: Option<PathBuf>) -> Result<(), String> {
             store::parse_date(&sel)
         }
     });
-    match select {
-        Some(d) => go_to(d),
-        None => refresh_inspector(true),
+    if let Some(d) = select {
+        go_to(d);
     }
 
     if shot {
@@ -1799,16 +1938,7 @@ pub fn run(screenshot: Option<PathBuf>) -> Result<(), String> {
         activate();
     }
 
-    let timer = unsafe {
-        NSTimer::scheduledTimerWithTimeInterval_target_selector_userInfo_repeats(
-            if shot { 0.8 } else { 1.0 },
-            &controller,
-            sel!(tick:),
-            None,
-            true,
-        )
-    };
-    let _ = timer;
+    start_timer(&ui.controller, if shot { 0.8 } else { 1.0 });
     app.run();
     Ok(())
 }

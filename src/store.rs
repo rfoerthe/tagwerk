@@ -87,7 +87,9 @@ pub fn db_file() -> PathBuf {
     data_dir().join(DB_FILE)
 }
 
-/// Kleine Statusdatei, damit das Fenster "Aufzeichnungen" weiß, ob gerade erfasst wird.
+/// Kleine Statusdatei mit dem Zustand der Erfassung: Damit setzt die Menüleisten-App nach
+/// einem Neustart eine offene Pause fort, und eigenständig gestartete Fenster
+/// (`--records`, Screenshots) wissen, ob gerade erfasst wird.
 pub fn status_file() -> PathBuf {
     data_dir().join(".status")
 }
@@ -96,8 +98,9 @@ fn date_key(d: NaiveDate) -> String {
     d.format("%Y-%m-%d").to_string()
 }
 
-/// Verbindung zur Datenbank. Menüleisten-App und Fenster „Aufzeichnungen“ haben je eine
-/// eigene; Änderungen der anderen erkennt man mit [`Db::changed_externally`].
+/// Verbindung zur Datenbank. Menüleisten-App und die Fenster „Aufzeichnungen“ und
+/// „Einstellungen“ haben je eine eigene; Änderungen über andere Verbindungen (auch aus
+/// anderen Prozessen wie `--import`) erkennt man mit [`Db::changed_externally`].
 pub struct Db {
     conn: Connection,
     dir: PathBuf,

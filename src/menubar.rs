@@ -3,8 +3,10 @@
 //! Pausen ergeben sich aus den Sperrzeiten und aus „Arbeit unterbrechen“ (jeweils ab der
 //! eingestellten Mindestdauer).
 
+use crate::about;
 use crate::day::{self, fmt_clock, Mode};
 use crate::glyphs;
+use crate::records;
 use crate::rules::{self, IconSet};
 use crate::settings_window;
 use crate::store;
@@ -15,11 +17,11 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationOptions,
+    NSAlert, NSAlertFirstButtonReturn, NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
     NSApplicationActivationPolicy, NSAttributedStringAttachmentConveniences, NSColor, NSDatePicker,
     NSDatePickerElementFlags, NSDatePickerStyle, NSFont, NSFontAttributeName, NSFontWeightRegular,
     NSFontWeightSemibold, NSForegroundColorAttributeName, NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuDelegate, NSMenuItem,
-    NSRunningApplication, NSStatusBar, NSStatusItem, NSTextAttachment, NSVariableStatusItemLength,
+    NSStatusBar, NSStatusItem, NSTextAttachment, NSVariableStatusItemLength,
     NSWorkspace,
 };
 use objc2_foundation::{
@@ -28,7 +30,6 @@ use objc2_foundation::{
     NSTimer,
 };
 use std::cell::RefCell;
-use std::process::{Child, Command};
 use std::time::Instant;
 
 /// Menü-Tag: Uhrzeit im Dialog wählen.
@@ -79,7 +80,6 @@ struct AppState {
     tracker: Tracker,
     status_item: Retained<NSStatusItem>,
     items: MenuItems,
-    records_window: Option<Child>,
     last_save: Instant,
     last_icon: Option<IconKind>,
     /// Zuletzt gezeigtes Symbol in der Menüleiste (Zustand, Symbolsatz, Höhe).
@@ -187,24 +187,13 @@ define_class!(
 
         #[unsafe(method(showRecords:))]
         fn show_records(&self, _sender: Option<&AnyObject>) {
-            with_state(|s| {
-                // Vorher speichern, damit das Fenster den aktuellen Stand zeigt.
-                let t = now();
-                s.sync_from_db(t);
-                s.persist(t);
-                s.open_records_window();
-            });
+            open_records(None);
         }
 
         /// Klick auf einen Hinweis: heutigen Tag im Fenster „Aufzeichnungen“ zeigen.
         #[unsafe(method(showToday:))]
         fn show_today(&self, _sender: Option<&AnyObject>) {
-            with_state(|s| {
-                let t = now();
-                s.sync_from_db(t);
-                s.persist(t);
-                s.open_records_window_at(Some(t.date()));
-            });
+            open_records(Some(now().date()));
         }
 
         #[unsafe(method(showWeek:))]
@@ -225,6 +214,11 @@ define_class!(
         #[unsafe(method(showSettings:))]
         fn show_settings(&self, _sender: Option<&AnyObject>) {
             settings_window::show(settings_changed);
+        }
+
+        #[unsafe(method(showAbout:))]
+        fn show_about(&self, _sender: Option<&AnyObject>) {
+            about::show();
         }
 
         #[unsafe(method(toggleLogin:))]
@@ -351,16 +345,32 @@ fn resume_auto() {
 
 /// Doppelklick auf einen Tag in der Wochenansicht: im Fenster „Aufzeichnungen“ zeigen.
 fn open_day_in_records(date: chrono::NaiveDate) {
-    with_state(|s| {
+    open_records(Some(date));
+}
+
+/// Öffnet das Fenster „Aufzeichnungen“ (oder holt es nach vorn), auf Wunsch mit
+/// ausgewähltem Tag. Vorher speichern, damit es den aktuellen Stand zeigt.
+fn open_records(select: Option<chrono::NaiveDate>) {
+    let status = with_state(|s| {
         let t = now();
         s.sync_from_db(t);
         s.persist(t);
-        s.open_records_window_at(Some(date));
+        s.tracker.status(t)
     });
+    // Außerhalb von `with_state`: Das Fenster meldet Änderungen über `records_changed`.
+    if let Some(status) = status {
+        records::show(select, status, records_changed);
+    }
 }
 
 /// Einstellungen wurden im Fenster „Einstellungen“ geändert.
 fn settings_changed() {
+    records_changed();
+    records::reload_if_open();
+}
+
+/// Das Fenster „Aufzeichnungen“ hat die Datenbank geändert: sofort übernehmen.
+fn records_changed() {
     with_state(|s| {
         let t = now();
         s.sync_from_db(t);
@@ -375,9 +385,6 @@ fn shutdown() {
         s.sync_from_db(t);
         s.tracker.stop(t, PauseReason::Manual);
         s.persist(t);
-        if let Some(mut child) = s.records_window.take() {
-            let _ = child.kill();
-        }
     });
 }
 
@@ -555,6 +562,7 @@ impl AppState {
         if week_window::is_open() {
             week_window::update(self.week_snapshot(t));
         }
+        records::set_status(status);
 
         if let Some(button) = self.status_item.button(mtm) {
             let state = match icon {
@@ -587,39 +595,6 @@ impl AppState {
             settings: self.tracker.settings,
             now: t,
             running: self.tracker.is_running(),
-        }
-    }
-
-    fn open_records_window(&mut self) {
-        self.open_records_window_at(None);
-    }
-
-    /// Öffnet das Fenster „Aufzeichnungen“, auf Wunsch mit ausgewähltem Tag
-    /// (nur beim Öffnen; ein offenes Fenster wird nach vorn geholt).
-    fn open_records_window_at(&mut self, select: Option<chrono::NaiveDate>) {
-        if let Some(child) = self.records_window.as_mut() {
-            if matches!(child.try_wait(), Ok(None)) {
-                let pid = child.id() as i32;
-                if let Some(app) = NSRunningApplication::runningApplicationWithProcessIdentifier(pid) {
-                    #[allow(deprecated)]
-                    app.activateWithOptions(NSApplicationActivationOptions::ActivateIgnoringOtherApps);
-                }
-                return;
-            }
-        }
-        match std::env::current_exe() {
-            Ok(exe) => {
-                let mut cmd = Command::new(exe);
-                cmd.arg("--records");
-                if let Some(d) = select {
-                    cmd.env("TAGWERK_SELECT", store::fmt_date_short(d));
-                }
-                match cmd.spawn() {
-                    Ok(child) => self.records_window = Some(child),
-                    Err(e) => eprintln!("Tagwerk: Fenster konnte nicht geöffnet werden: {e}"),
-                }
-            }
-            Err(e) => eprintln!("Tagwerk: {e}"),
         }
     }
 }
@@ -1012,6 +987,7 @@ pub fn run() {
     let records = menu_item(mtm, "Aufzeichnungen …", Some(sel!(showRecords:)), "a", &controller);
     let week = menu_item(mtm, "Wochenansicht …", Some(sel!(showWeek:)), "w", &controller);
     let settings = menu_item(mtm, "Einstellungen …", Some(sel!(showSettings:)), ",", &controller);
+    let about = menu_item(mtm, "Über Tagwerk", Some(sel!(showAbout:)), "", &controller);
     let quit = menu_item(mtm, "Tagwerk beenden", Some(sel!(quit:)), "q", &controller);
 
     for (item, symbol, desc) in [
@@ -1025,6 +1001,7 @@ pub fn run() {
         (&records, "tablecells", "Aufzeichnungen"),
         (&week, "calendar", "Wochenansicht"),
         (&settings, "gearshape", "Einstellungen"),
+        (&about, "info.circle", "Über Tagwerk"),
         (&quit, "power", "Beenden"),
     ] {
         set_item_symbol(item, symbol, desc);
@@ -1055,6 +1032,7 @@ pub fn run() {
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&settings);
     menu.addItem(&items.login);
+    menu.addItem(&about);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&quit);
 
@@ -1097,7 +1075,6 @@ pub fn run() {
         tracker,
         status_item,
         items,
-        records_window: None,
         last_save: Instant::now(),
         last_icon: None,
         button_icon: None,

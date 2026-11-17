@@ -74,6 +74,7 @@ im Fenster „Aufzeichnungen“.
   Perioden und lassen sich jederzeit zurücknehmen.
 - **Bei Anmeldung starten** – per Menüpunkt als Anmeldeobjekt eintragen (nur in der
   installierten App).
+- **Über Tagwerk** – Version, Lizenz und Link zum Projekt.
 
 ### Aufzeichnungen
 

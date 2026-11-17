@@ -6,6 +6,17 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt
+- Fenster „Über Tagwerk“ mit Version, Lizenz und Link zum Projekt – im Menü der
+  Menüleiste unter „Bei Anmeldung starten“ und im Menü „Tagwerk“ des Fensters
+  „Aufzeichnungen“.
+
+### Geändert
+- Das Fenster „Aufzeichnungen“ öffnet sich in der laufenden App statt in einem zweiten
+  Prozess. Es erscheint schneller, und Korrekturen gelten in der Menüleiste sofort.
+  Solange es offen ist, hat Tagwerk ein Symbol im Dock; ⌘Q schließt weiterhin nur das
+  Fenster.
+
 ## [1.0.0] - 2026-11-17
 
 ### Zusammenfassung

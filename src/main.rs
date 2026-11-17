@@ -2,7 +2,7 @@
 //!
 //! Aufruf:
 //!   Tagwerk                       Menüleisten-App (Standard)
-//!   Tagwerk --records             Fenster "Aufzeichnungen"
+//!   Tagwerk --records             nur das Fenster "Aufzeichnungen" (ohne Menüleisten-App)
 //!   Tagwerk --export [--from TT.MM.JJJJ] [--to TT.MM.JJJJ] [-o datei.md]
 //!                                 Aufzeichnungen als Markdown exportieren
 //!                                 (Standard: die letzten 28 Tage, Ausgabe auf stdout)
@@ -13,6 +13,8 @@
 //!   Tagwerk --settings-screenshot <png>
 //!                                 Fenster "Einstellungen" öffnen, Bild speichern, beenden
 
+#[cfg(target_os = "macos")]
+mod about;
 mod day;
 #[cfg(target_os = "macos")]
 mod glyphs;
