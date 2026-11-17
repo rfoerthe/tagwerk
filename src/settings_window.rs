@@ -5,10 +5,14 @@
 //! Mindestdauer einer Pause und der Symbolsatz der Menüleiste. Gespeichert wird in der Datenbank; die jeweils andere
 //! Tagwerk-Instanz (Menüleiste bzw. Fenster „Aufzeichnungen“) übernimmt die Werte.
 //!
+//! „Bei Anmeldung starten“ steht nicht in der Datenbank, sondern ist das Anmeldeobjekt
+//! von macOS; „Standardwerte“ lässt es unverändert.
+//!
 //! Rechts in der Symbolleiste öffnet ein Ordner-Knopf den Datenordner im Finder.
 
 use crate::day::{secs_of, DAY_END};
 use crate::glyphs;
+use crate::login_item;
 use crate::rules::{self, IconSet, Settings, MIN_PAUSE_RANGE, WEEKLY_RANGE};
 use crate::store;
 use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, TimeZone};
@@ -48,6 +52,7 @@ struct State {
     _controller: Retained<Controller>,
     db: Option<store::Db>,
     settings: Settings,
+    login: Retained<NSButton>,
     frame_from: Retained<NSDatePicker>,
     frame_to: Retained<NSDatePicker>,
     weekly: Retained<NSTextField>,
@@ -183,6 +188,19 @@ define_class!(
             save();
         }
 
+        /// Anmeldeobjekt sofort ein- oder austragen (nicht in der Datenbank).
+        #[unsafe(method(loginChanged:))]
+        fn login_changed(&self, _sender: Option<&AnyObject>) {
+            with_state(|s| {
+                let enable = s.login.state() == NSControlStateValueOn;
+                match login_item::set(enable) {
+                    Ok(()) => s.error.setHidden(true),
+                    Err(e) => s.show_error(&e),
+                }
+                s.fill();
+            });
+        }
+
         #[unsafe(method(resetDefaults:))]
         fn reset_defaults(&self, _sender: Option<&AnyObject>) {
             with_state(|s| {
@@ -205,6 +223,7 @@ impl State {
     /// Alle Felder aus `self.settings` neu befüllen.
     fn fill(&self) {
         let s = &self.settings;
+        self.login.setState(if login_item::enabled() { NSControlStateValueOn } else { NSControlStateValueOff });
         self.frame_from.setDateValue(&to_nsdate(s.frame_from));
         self.frame_to.setDateValue(&to_nsdate(s.frame_to));
         self.weekly.setStringValue(&ns(&rules::fmt_hours(s.weekly_target)));
@@ -425,6 +444,9 @@ fn build(on_change: fn()) -> State {
     let controller = Controller::new(mtm);
     let target = &*controller;
 
+    let login = unsafe {
+        NSButton::checkboxWithTitle_target_action(&ns("Bei Anmeldung starten"), Some(target), Some(sel!(loginChanged:)), mtm)
+    };
     let frame_from = time_picker(target);
     let frame_to = time_picker(target);
     let weekly = number_field(target, sel!(weeklyChanged:));
@@ -463,6 +485,7 @@ fn build(on_change: fn()) -> State {
     let pause_row = hstack(&[&pause, &pause_stepper, &label("Minuten")]);
     let empty = || NSGridCell::emptyContentView(mtm);
     let rows: Vec<Retained<NSArray<NSView>>> = vec![
+        NSArray::from_retained_slice(&[view(&label("Allgemein:")), view(&login)]),
         NSArray::from_retained_slice(&[view(&label("Arbeitszeitrahmen:")), view(&frame_row)]),
         NSArray::from_retained_slice(&[
             empty(),
@@ -494,13 +517,13 @@ fn build(on_change: fn()) -> State {
     grid.setColumnSpacing(8.0);
     grid.setRowSpacing(4.0);
     grid.columnAtIndex(0).setXPlacement(NSGridCellPlacement::Trailing);
-    for r in [2, 4, 6, 10] {
+    for r in [1, 3, 5, 7, 11] {
         grid.rowAtIndex(r).setTopPadding(14.0);
     }
     // Bilder haben keine Grundlinie
-    grid.rowAtIndex(7).setRowAlignment(NSGridRowAlignment::None);
-    grid.rowAtIndex(7).setTopPadding(6.0);
-    grid.rowAtIndex(7).setBottomPadding(2.0);
+    grid.rowAtIndex(8).setRowAlignment(NSGridRowAlignment::None);
+    grid.rowAtIndex(8).setTopPadding(6.0);
+    grid.rowAtIndex(8).setBottomPadding(2.0);
     grid.setTranslatesAutoresizingMaskIntoConstraints(false);
 
     let size = grid.fittingSize();
@@ -545,6 +568,7 @@ fn build(on_change: fn()) -> State {
         _controller: controller,
         db,
         settings,
+        login,
         frame_from,
         frame_to,
         weekly,

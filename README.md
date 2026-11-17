@@ -72,8 +72,6 @@ im Fenster „Aufzeichnungen“.
 - **Arbeitsbeginn und Feierabend festlegen** – „jetzt“, „vor N Minuten“ oder zu einer
   frei gewählten Uhrzeit. Korrekturen liegen als eigene Schicht über den erfassten
   Perioden und lassen sich jederzeit zurücknehmen.
-- **Bei Anmeldung starten** – per Menüpunkt als Anmeldeobjekt eintragen (nur in der
-  installierten App).
 - **Über Tagwerk** – Version, Lizenz und Link zum Projekt.
 
 ### Aufzeichnungen
@@ -125,6 +123,7 @@ Titelleiste zeigt den Datenordner im Finder.
 
 | Einstellung           | Bedeutung                                                              | Standard        |
 |-----------------------|------------------------------------------------------------------------|-----------------|
+| Bei Anmeldung starten | Tagwerk als Anmeldeobjekt eintragen (nur in der installierten App)     | ein             |
 | Arbeitszeitrahmen     | Nur Mo–Fr in diesem Zeitraum wird Arbeitszeit bzw. Pause gezählt        | 07:00–22:00 Uhr |
 | Regelarbeitszeit      | Wochenarbeitszeit, daraus ergibt sich das Tagessoll                     | 39 Std. (7:48 h/Tag) |
 | Mindestpause          | Ab dieser Sperrdauer gilt eine Unterbrechung als Pause                 | 15 Min.         |

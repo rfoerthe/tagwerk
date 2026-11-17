@@ -6,6 +6,7 @@
 use crate::about;
 use crate::day::{self, fmt_clock, Mode};
 use crate::glyphs;
+use crate::login_item;
 use crate::records;
 use crate::rules::{self, IconSet};
 use crate::settings_window;
@@ -14,7 +15,7 @@ use crate::tracker::{PauseReason, Tracker};
 use crate::week_window;
 use chrono::{DateTime, Duration, Local, NaiveDateTime, TimeZone};
 use objc2::rc::Retained;
-use objc2::runtime::{AnyClass, AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
@@ -62,7 +63,6 @@ struct MenuItems {
     start_reset: Retained<NSMenuItem>,
     close: Retained<NSMenuItem>,
     reopen: Retained<NSMenuItem>,
-    login: Retained<NSMenuItem>,
     /// Untermenü-Einträge „vor N Min.“, deren Titel die Uhrzeit zeigen.
     relative: Vec<(Retained<NSMenuItem>, i64)>,
 }
@@ -219,13 +219,6 @@ define_class!(
         #[unsafe(method(showAbout:))]
         fn show_about(&self, _sender: Option<&AnyObject>) {
             about::show();
-        }
-
-        #[unsafe(method(toggleLogin:))]
-        fn toggle_login(&self, _sender: Option<&AnyObject>) {
-            let enable = !login_item_enabled();
-            set_login_item(enable);
-            with_state(|s| s.refresh());
         }
 
         #[unsafe(method(quit:))]
@@ -558,7 +551,6 @@ impl AppState {
         }
         self.items.close.setHidden(closed);
         self.items.reopen.setHidden(!closed);
-        self.items.login.setState(if login_item_enabled() { 1 } else { 0 });
         if week_window::is_open() {
             week_window::update(self.week_snapshot(t));
         }
@@ -823,40 +815,6 @@ pub fn screen_locked() -> bool {
     }
 }
 
-// ---------- Bei Anmeldung starten (SMAppService, macOS 13+) ----------
-
-#[link(name = "ServiceManagement", kind = "framework")]
-extern "C" {}
-
-fn login_service() -> Option<Retained<AnyObject>> {
-    let cls = AnyClass::get(c"SMAppService")?;
-    unsafe { msg_send![cls, mainAppService] }
-}
-
-fn login_item_enabled() -> bool {
-    login_service()
-        .map(|svc| {
-            let status: isize = unsafe { msg_send![&*svc, status] };
-            status == 1 // SMAppServiceStatusEnabled
-        })
-        .unwrap_or(false)
-}
-
-fn set_login_item(enable: bool) {
-    let Some(svc) = login_service() else { return };
-    let err: *mut *mut AnyObject = std::ptr::null_mut();
-    let ok: bool = unsafe {
-        if enable {
-            msg_send![&*svc, registerAndReturnError: err]
-        } else {
-            msg_send![&*svc, unregisterAndReturnError: err]
-        }
-    };
-    if !ok {
-        eprintln!("Tagwerk: Anmeldeobjekt konnte nicht geändert werden (nur in der installierten App möglich).");
-    }
-}
-
 fn running_from_bundle() -> bool {
     std::env::current_exe()
         .map(|p| p.to_string_lossy().contains(".app/Contents/MacOS/"))
@@ -981,7 +939,6 @@ pub fn run() {
         start_reset,
         close,
         reopen: menu_item(mtm, "Feierabend aufheben", Some(sel!(reopenDay:)), "", &controller),
-        login: menu_item(mtm, "Bei Anmeldung starten", Some(sel!(toggleLogin:)), "", &controller),
         relative,
     };
     let records = menu_item(mtm, "Aufzeichnungen …", Some(sel!(showRecords:)), "a", &controller);
@@ -1031,7 +988,6 @@ pub fn run() {
     menu.addItem(&week);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&settings);
-    menu.addItem(&items.login);
     menu.addItem(&about);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&quit);
@@ -1087,9 +1043,10 @@ pub fn run() {
     // Erster Start der installierten App: automatisch bei Anmeldung starten.
     let marker = store::data_dir().join(".login-item-set");
     if running_from_bundle() && !marker.exists() {
-        set_login_item(true);
+        if let Err(e) = login_item::set(true) {
+            eprintln!("Tagwerk: {e}");
+        }
         let _ = std::fs::write(&marker, "1");
-        with_state(|s| s.refresh());
     }
 
     // Sperren / Entsperren
