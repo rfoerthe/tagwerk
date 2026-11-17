@@ -18,8 +18,10 @@ Mittagspause und Feierabend lassen sich zusätzlich von Hand festlegen oder korr
 - **Hinweis zum Arbeitszeitgesetz** – warnt, wenn die Pausen nach § 4 ArbZG nicht
   reichen (30 Minuten ab 6 Stunden, 45 Minuten ab 9 Stunden Arbeit; gezählt werden
   Pausen ab 15 Minuten).
-- **Fenster „Aufzeichnungen“** – Übersicht aller Tage, in der sich einzelne Tage
-  nachträglich bearbeiten lassen.
+- **Fenster „Aufzeichnungen“** – natives macOS-Fenster mit Kennzahlen (heute, Woche,
+  Monat, Durchschnitt), einer Tabelle aller Tage mit Wochensummen und einem Inspektor,
+  in dem sich Arbeitsbeginn, Pausen und Feierabend eines Tages korrigieren lassen –
+  auch für Tage ohne Aufzeichnung. Hell- und Dunkelmodus folgen dem System.
 - **Export als Markdown** – für einen frei wählbaren Zeitraum (Standard: die letzten
   vier Wochen) über das Fenster, das Menü oder die Kommandozeile.
 - **Bei Anmeldung starten** – per Menüpunkt als Anmeldeobjekt eintragen

@@ -101,6 +101,7 @@ cat > "$APP/Contents/Info.plist" <<PLIST
   <key>CFBundleShortVersionString</key>   <string>$VERSION</string>
   <key>CFBundleVersion</key>              <string>$VERSION</string>
   <key>CFBundleDevelopmentRegion</key>    <string>de</string>
+  <key>CFBundleLocalizations</key>        <array><string>de</string></array>
   <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
   <key>CFBundleSupportedPlatforms</key>   <array><string>MacOSX</string></array>
   <key>DTPlatformName</key>               <string>macosx</string>

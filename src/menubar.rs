@@ -471,20 +471,23 @@ impl AppState {
         let midnight = t.date().and_hms_opt(0, 0, 0).unwrap();
 
         let (status, icon) = match info.mode {
-            Mode::Closed(at) => (format!("✓  Feierabend um {} Uhr", fmt_clock(at)), IconKind::Closed),
-            Mode::Break(from) => (format!("☕  Mittagspause seit {} Uhr", fmt_clock(from)), IconKind::Break),
-            Mode::Auto if running => ("▶︎  Zeiterfassung läuft".to_string(), IconKind::Running),
+            Mode::Closed(at) => (format!("Feierabend um {} Uhr", fmt_clock(at)), IconKind::Closed),
+            Mode::Break(from) => (format!("Mittagspause seit {} Uhr", fmt_clock(from)), IconKind::Break),
+            Mode::Auto if running => ("Zeiterfassung läuft".to_string(), IconKind::Running),
             Mode::Auto => (
                 match self.tracker.paused_since {
                     Some(p) if p.date() == t.date() => {
-                        format!("⏸  Zeiterfassung pausiert seit {} Uhr", p.format("%H:%M"))
+                        format!("Zeiterfassung pausiert seit {} Uhr", p.format("%H:%M"))
                     }
-                    _ => "⏸  Zeiterfassung pausiert".to_string(),
+                    _ => "Zeiterfassung pausiert".to_string(),
                 },
                 IconKind::Paused,
             ),
         };
         self.items.status.setTitle(&ns(&status));
+        if self.last_icon != Some(icon) {
+            set_item_symbol(&self.items.status, icon.symbol().0, icon.symbol().2);
+        }
         self.items
             .worked
             .setTitle(&ns(&format!("Heute gearbeitet:  {}", store::fmt_hm(info.work_secs))));
@@ -499,7 +502,7 @@ impl AppState {
         self.items.first.setTitle(&ns(&first));
         match info.legal_hint {
             Some(h) => {
-                self.items.hint.setTitle(&ns(&format!("⚠︎  {h}")));
+                self.items.hint.setTitle(&ns(h));
                 self.items.hint.setHidden(false);
             }
             None => self.items.hint.setHidden(true),
@@ -583,13 +586,26 @@ impl AppState {
     }
 }
 
+impl IconKind {
+    /// SF-Symbol, Ersatzzeichen (falls das Symbol fehlt) und Beschreibung.
+    fn symbol(self) -> (&'static str, &'static str, &'static str) {
+        match self {
+            IconKind::Running => ("clock.fill", "◷", "Zeiterfassung läuft"),
+            IconKind::Paused => ("pause.circle", "⏸", "Zeiterfassung pausiert"),
+            IconKind::Break => ("cup.and.saucer.fill", "☕", "Mittagspause"),
+            IconKind::Closed => ("moon.zzz", "☾", "Feierabend"),
+        }
+    }
+}
+
+/// SF-Symbol vor einem Menüeintrag (wie in den Menüs von macOS).
+fn set_item_symbol(item: &NSMenuItem, symbol: &str, desc: &str) {
+    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(&ns(symbol), Some(&ns(desc)));
+    item.setImage(image.as_deref());
+}
+
 fn set_icon(button: &objc2_app_kit::NSStatusBarButton, kind: IconKind) {
-    let (symbol, fallback, desc) = match kind {
-        IconKind::Running => ("clock.fill", "◷", "Zeiterfassung läuft"),
-        IconKind::Paused => ("pause.circle", "⏸", "Zeiterfassung pausiert"),
-        IconKind::Break => ("cup.and.saucer.fill", "☕", "Mittagspause"),
-        IconKind::Closed => ("moon.zzz", "☾", "Feierabend"),
-    };
+    let (symbol, fallback, desc) = kind.symbol();
     let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(&ns(symbol), Some(&ns(desc)));
     match image {
         Some(img) => {
@@ -794,6 +810,24 @@ pub fn run() {
     let folder = menu_item(mtm, "Datenordner im Finder zeigen", Some(sel!(openFolder:)), "", &controller);
     let quit = menu_item(mtm, "Tagwerk beenden", Some(sel!(quit:)), "q", &controller);
 
+    for (item, symbol, desc) in [
+        (&items.worked, "clock", "Arbeitszeit"),
+        (&items.pauses, "cup.and.saucer", "Pausen"),
+        (&items.first, "sunrise", "Arbeitsbeginn"),
+        (&items.hint, "exclamationmark.triangle", "Hinweis"),
+        (&start_item, "sunrise", "Arbeitsbeginn"),
+        (&items.break_start, "cup.and.saucer", "Mittagspause"),
+        (&items.break_end, "play", "Weiterarbeiten"),
+        (&items.close, "moon", "Feierabend"),
+        (&items.reopen, "arrow.uturn.backward", "Feierabend aufheben"),
+        (&items.lunch_gap, "plus.circle", "Pause eintragen"),
+        (&records, "tablecells", "Aufzeichnungen"),
+        (&export, "square.and.arrow.up", "Exportieren"),
+        (&folder, "folder", "Datenordner"),
+        (&quit, "power", "Beenden"),
+    ] {
+        set_item_symbol(item, symbol, desc);
+    }
     menu.addItem(&items.status);
     menu.addItem(&items.worked);
     menu.addItem(&items.pauses);

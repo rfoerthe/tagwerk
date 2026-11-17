@@ -14,6 +14,7 @@ mod day;
 mod icon;
 #[cfg(target_os = "macos")]
 mod menubar;
+#[cfg(target_os = "macos")]
 mod records;
 mod store;
 mod tracker;
@@ -62,6 +63,7 @@ fn main() {
             eprintln!("Aufruf: Tagwerk --screenshot <datei.png>");
             std::process::exit(2);
         };
+        #[cfg(target_os = "macos")]
         if let Err(e) = records::run(Some(PathBuf::from(path))) {
             fail(e);
         }
@@ -69,6 +71,7 @@ fn main() {
     }
 
     if has("--records") {
+        #[cfg(target_os = "macos")]
         if let Err(e) = records::run(None) {
             fail(e);
         }
@@ -79,10 +82,7 @@ fn main() {
     menubar::run();
 
     #[cfg(not(target_os = "macos"))]
-    {
-        eprintln!("Die Menüleisten-App gibt es nur für macOS – zeige die Aufzeichnungen.");
-        let _ = records::run(None);
-    }
+    fail("Die Menüleisten-App und das Fenster „Aufzeichnungen“ gibt es nur für macOS.");
 }
 
 fn export(from: Option<String>, to: Option<String>, output: Option<String>) {
