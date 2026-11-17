@@ -38,7 +38,7 @@ done
 
 cd "$(dirname "$0")"
 VERSION="$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -n1)"
-DIST="dist"
+DIST="target/dist"
 WORK="$DIST/work"
 APP="$WORK/$APP_NAME.app"
 DMG="$DIST/$APP_NAME-$VERSION.dmg"
@@ -49,14 +49,15 @@ fail() { printf '\033[1;31mFehler:\033[0m %s\n' "$*" >&2; exit 1; }
 [[ "$(uname)" == "Darwin" ]] || fail "build.sh läuft nur auf macOS."
 command -v cargo >/dev/null || fail "cargo (Rust) wurde nicht gefunden – siehe https://rustup.rs"
 
-rm -rf "$WORK"
-mkdir -p "$WORK"
 export MACOSX_DEPLOYMENT_TARGET="$MIN_MACOS"
 
 # 1) Kompilieren ---------------------------------------------------------------
 BIN="$WORK/$APP_NAME"
 step "Räume alte Build-Ergebnisse auf (cargo clean)"
 cargo clean
+# erst nach cargo clean anlegen – das löscht target/ und damit auch $DIST
+rm -rf "$WORK"
+mkdir -p "$WORK"
 if command -v rustup >/dev/null; then
   rustup target add "$TARGET" >/dev/null 2>&1
 fi
