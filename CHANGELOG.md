@@ -6,6 +6,13 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+## [1.1.0] - 2026-11-17
+
+### Zusammenfassung
+Das Fenster „Aufzeichnungen“ öffnet sich jetzt direkt in der laufenden App – schneller,
+und Korrekturen erscheinen sofort in der Menüleiste. Neu ist das Fenster „Über
+Tagwerk“; „Bei Anmeldung starten“ ist in die Einstellungen umgezogen.
+
 ### Hinzugefügt
 - Fenster „Über Tagwerk“ mit Version, Lizenz und Link zum Projekt – im Menü der
   Menüleiste unter „Einstellungen …“ und im Menü „Tagwerk“ des Fensters
@@ -79,5 +86,6 @@ als Markdown. Alle Daten bleiben lokal auf dem Mac.
   notarisiert es und installiert sie auf Wunsch nach `/Applications`.
 - `github-release.sh` veröffentlicht ein geprüftes DMG als Release auf GitHub.
 
-[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.0.0...HEAD
+[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/rfoerthe/tagwerk/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/rfoerthe/tagwerk/releases/tag/v1.0.0
