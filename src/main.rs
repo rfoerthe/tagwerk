@@ -16,10 +16,13 @@ mod icon;
 mod menubar;
 #[cfg(target_os = "macos")]
 mod records;
+mod rules;
+#[cfg(target_os = "macos")]
+mod settings_window;
 mod store;
 mod tracker;
 
-use chrono::Local;
+use chrono::{Duration, Local};
 use std::path::PathBuf;
 
 fn fail(msg: impl std::fmt::Display) -> ! {
@@ -97,8 +100,10 @@ fn export(from: Option<String>, to: Option<String>, output: Option<String>) {
         fail("Der Beginn des Zeitraums liegt nach dem Ende.");
     }
     let db = store::Db::open().unwrap_or_else(|e| fail(e));
-    let days = db.load_range(from, to).unwrap_or_else(|e| fail(e));
-    let md = store::export_markdown(&days, from, to, now);
+    // Vortag für die Prüfung der Ruhezeit am ersten Tag
+    let days = db.load_range(from - Duration::days(1), to).unwrap_or_else(|e| fail(e));
+    let settings = db.load_settings().unwrap_or_else(|e| fail(e));
+    let md = store::export_markdown(&days, from, to, now, &settings);
     match output {
         None => print!("{md}"),
         Some(path) => {
@@ -107,7 +112,7 @@ fn export(from: Option<String>, to: Option<String>, output: Option<String>) {
             }
             eprintln!(
                 "{} Tag(e) vom {} bis {} nach {path} exportiert.",
-                days.len(),
+                days.iter().filter(|d| d.date >= from).count(),
                 store::fmt_date_short(from),
                 store::fmt_date_short(to)
             );

@@ -2,11 +2,19 @@
 //!
 //! Die automatisch erfassten Perioden (Mac entsperrt) bleiben unverändert erhalten.
 //! Manuelle Entscheidungen – Arbeitsbeginn, Pausen, Feierabend – liegen als eigene
-//! Schicht darüber; die Arbeitszeit wird aus beidem berechnet. So lässt sich jede
-//! Korrektur nachvollziehen und wieder zurücknehmen.
+//! Schicht darüber; die Arbeitszeit wird aus beidem und den Einstellungen berechnet:
+//!
+//! 1. Lücken zwischen Perioden, die kürzer als die Mindestpause sind, zählen als Arbeit.
+//! 2. Manueller Arbeitsbeginn und Feierabend verlängern bzw. kürzen den Tag.
+//! 3. Manuell eingetragene Pausen werden abgezogen.
+//! 4. Gezählt wird nur, was im Arbeitszeitrahmen liegt.
+//!
+//! So lässt sich jede Korrektur nachvollziehen und wieder zurücknehmen; geänderte
+//! Einstellungen wirken auch auf frühere Tage.
 //!
 //! Alle Uhrzeiten sind Sekunden seit Mitternacht (`0..=86_400`).
 
+use crate::rules::{Settings, LEGAL_BREAK_SEGMENT};
 use chrono::{NaiveDate, NaiveTime, Timelike};
 
 /// Mitternacht am Ende des Tages (24:00:00).
@@ -28,11 +36,11 @@ impl Span {
     }
 }
 
-/// Eine manuell eingetragene Pause; `to == None` heißt: läuft noch.
+/// Eine manuell eingetragene Pause.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Break {
     pub from: i64,
-    pub to: Option<i64>,
+    pub to: i64,
 }
 
 /// Ein Arbeitstag mit Rohdaten und Korrekturen.
@@ -54,8 +62,6 @@ pub struct Day {
 pub enum Mode {
     /// Normale, automatische Erfassung.
     Auto,
-    /// Pause läuft seit der angegebenen Uhrzeit.
-    Break(i64),
     /// Feierabend um die angegebene Uhrzeit.
     Closed(i64),
 }
@@ -64,9 +70,9 @@ pub enum Mode {
 #[derive(Clone, Debug, PartialEq)]
 pub struct DayRecord {
     pub date: NaiveDate,
-    /// Beginn (erstes Entsperren oder manuell festgelegt).
+    /// Beginn (erstes Entsperren oder manuell festgelegt, frühestens Beginn des Rahmens).
     pub first_start: i64,
-    /// Ende (letztes Sperren oder manuell festgelegt).
+    /// Ende (letztes Sperren oder manuell festgelegt, spätestens Ende des Rahmens).
     pub last_end: i64,
     /// Arbeitszeit in Sekunden.
     pub work_secs: i64,
@@ -101,28 +107,20 @@ impl Day {
         self.periods = union(std::mem::take(&mut self.periods));
     }
 
-    pub fn open_break(&self) -> Option<&Break> {
-        self.breaks.iter().find(|b| b.to.is_none())
-    }
-
     pub fn mode(&self) -> Mode {
-        if let Some(e) = self.end {
-            return Mode::Closed(e);
-        }
-        match self.open_break() {
-            Some(b) => Mode::Break(b.from),
+        match self.end {
+            Some(e) => Mode::Closed(e),
             None => Mode::Auto,
         }
     }
 
     pub fn sort_breaks(&mut self) {
-        self.breaks.sort_by_key(|b| (b.from, b.to.unwrap_or(DAY_END)));
+        self.breaks.sort_by_key(|b| (b.from, b.to));
     }
 
-    /// Effektive Arbeitsabschnitte. `open_until` ist das Ende für noch laufende Pausen
-    /// (heute: jetzt, vergangene Tage: Mitternacht).
-    pub fn spans(&self, open_until: i64) -> Vec<Span> {
-        let mut spans = self.periods.clone();
+    /// Arbeitsabschnitte ohne den Arbeitszeitrahmen (Schritte 1–3).
+    fn unframed_spans(&self, min_pause: i64) -> Vec<Span> {
+        let mut spans = fill_gaps(self.periods.clone(), min_pause);
         // Manuelle Angaben fügen nur vor dem ersten Entsperren bzw. nach dem letzten Sperren
         // Zeit hinzu – nie in Lücken dazwischen (das wäre z. B. die gesperrte Mittagszeit).
         if let Some(s) = self.start {
@@ -143,38 +141,50 @@ impl Day {
         }
         let mut spans = union(spans);
         for b in &self.breaks {
-            let to = b.to.unwrap_or(open_until.max(b.from));
-            spans = subtract(spans, Span::new(b.from, to));
+            spans = subtract(spans, Span::new(b.from, b.to));
         }
         spans
     }
 
+    /// Effektive Arbeitsabschnitte nach den Einstellungen `s`.
+    pub fn spans(&self, s: &Settings) -> Vec<Span> {
+        clip(self.unframed_spans(s.min_pause), s.frame_from, s.frame_to)
+    }
+
+    /// Arbeitszeit außerhalb des Arbeitszeitrahmens (wird nicht gezählt).
+    pub fn outside_frame_spans(&self, s: &Settings) -> Vec<Span> {
+        let all = self.unframed_spans(s.min_pause);
+        let mut out = clip(all.clone(), 0, s.frame_from);
+        out.extend(clip(all, s.frame_to, DAY_END));
+        out
+    }
+
+    /// Erstes Entsperren und letztes Sperren im Arbeitszeitrahmen (ohne manuelle Angaben;
+    /// kurze Sperren zählen wie überall zur Arbeitszeit).
+    pub fn auto_bounds_in_frame(&self, s: &Settings) -> Option<(i64, i64)> {
+        let spans = clip(fill_gaps(self.periods.clone(), s.min_pause), s.frame_from, s.frame_to);
+        Some((spans.first()?.from, spans.last()?.to))
+    }
+
     /// Tabellenzeile für diesen Tag (`None`, wenn es nichts anzuzeigen gibt).
-    pub fn record(&self, open_until: i64) -> Option<DayRecord> {
+    pub fn record(&self, s: &Settings) -> Option<DayRecord> {
         if self.is_empty() {
             return None;
         }
-        let spans = self.spans(open_until);
+        let spans = self.spans(s);
         let work: i64 = spans.iter().map(Span::len).sum();
         let (first, last) = match (spans.first(), spans.last()) {
-            // Eine laufende Pause zählt bis jetzt als Pause (nicht erst, wenn wieder gearbeitet wird).
-            (Some(f), Some(l)) if self.open_break().is_some() && self.end.is_none() => {
-                (f.from, l.to.max(open_until))
-            }
             (Some(f), Some(l)) => (f.from, l.to),
+            // Nichts im Rahmen: weder Arbeit noch Pause.
             _ => {
                 let first = self
                     .start
                     .or(self.periods.first().map(|p| p.from))
                     .or(self.end)
                     .or(self.breaks.first().map(|b| b.from))
-                    .unwrap_or(0);
-                let last = self
-                    .end
-                    .or(self.periods.last().map(|p| p.to))
-                    .unwrap_or(first)
-                    .max(first);
-                (first, last)
+                    .unwrap_or(0)
+                    .clamp(s.frame_from, s.frame_to);
+                (first, first)
             }
         };
         Some(DayRecord { date: self.date, first_start: first, last_end: last, work_secs: work })
@@ -182,39 +192,26 @@ impl Day {
 
     /// Summe der Pausen von mindestens 15 Minuten zwischen Arbeitsabschnitten
     /// (so zählt das Arbeitszeitgesetz).
-    pub fn long_pause_secs(spans: &[Span]) -> i64 {
+    pub fn legal_pause_secs(spans: &[Span]) -> i64 {
         spans
             .windows(2)
             .map(|w| w[1].from - w[0].to)
-            .filter(|g| *g >= 15 * 60)
+            .filter(|g| *g >= LEGAL_BREAK_SEGMENT)
             .sum()
     }
+}
 
-    /// Hinweis nach § 4 ArbZG, falls die Pausen nicht reichen.
-    pub fn legal_hint(spans: &[Span]) -> Option<&'static str> {
-        let work: i64 = spans.iter().map(Span::len).sum();
-        let pause = Self::long_pause_secs(spans);
-        if work > 9 * 3600 && pause < 45 * 60 {
-            Some("Ab 9 h Arbeit sind 45 Min. Pause vorgeschrieben")
-        } else if work > 6 * 3600 && pause < 30 * 60 {
-            Some("Ab 6 h Arbeit sind 30 Min. Pause vorgeschrieben")
-        } else {
-            None
+/// Schließt Lücken, die kürzer als `min_pause` sind: der Mac war nur kurz gesperrt,
+/// die Zeit zählt zum laufenden Arbeitsblock.
+pub fn fill_gaps(spans: Vec<Span>, min_pause: i64) -> Vec<Span> {
+    let mut out: Vec<Span> = Vec::with_capacity(spans.len());
+    for s in union(spans) {
+        match out.last_mut() {
+            Some(last) if s.from - last.to < min_pause => last.to = last.to.max(s.to),
+            _ => out.push(s),
         }
     }
-
-    /// Längste Lücke um die Mittagszeit (11:00–14:30, mindestens 20 Min.), die noch
-    /// nicht als Pause eingetragen ist – Vorschlag „als Mittagspause eintragen“.
-    pub fn lunch_gap(&self, spans: &[Span]) -> Option<Span> {
-        if !self.breaks.is_empty() {
-            return None;
-        }
-        spans
-            .windows(2)
-            .map(|w| Span::new(w[0].to, w[1].from))
-            .filter(|g| g.len() >= 20 * 60 && g.from < 14 * 3600 + 1800 && g.to > 11 * 3600)
-            .max_by_key(Span::len)
-    }
+    out
 }
 
 /// Holt (oder legt an) den Tag `date`; die Liste bleibt nach Datum sortiert.
@@ -315,6 +312,10 @@ mod tests {
         hh * 3600 + mm * 60
     }
 
+    fn st() -> Settings {
+        Settings::default()
+    }
+
     fn day() -> Day {
         let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 16).unwrap());
         d.add_period(h(8, 12), h(11, 58));
@@ -323,16 +324,57 @@ mod tests {
     }
 
     fn work(d: &Day) -> i64 {
-        d.record(DAY_END).unwrap().work_secs
+        d.record(&st()).unwrap().work_secs
     }
 
     #[test]
     fn automatic_only() {
         let d = day();
         assert_eq!(work(&d), h(3, 46) + h(4, 49));
-        let r = d.record(DAY_END).unwrap();
+        let r = d.record(&st()).unwrap();
         assert_eq!((r.first_start, r.last_end), (h(8, 12), h(17, 30)));
         assert_eq!(r.pause_secs(), h(0, 43));
+    }
+
+    #[test]
+    fn short_locks_count_as_work() {
+        let mut d = day();
+        d.periods = vec![Span::new(h(8, 0), h(10, 0)), Span::new(h(10, 14), h(12, 0)), Span::new(h(12, 15), h(16, 0))];
+        // 14 Min. gesperrt: Arbeit; 15 Min.: Pause
+        let r = d.record(&st()).unwrap();
+        assert_eq!((r.work_secs, r.pause_secs()), (h(7, 45), h(0, 15)));
+        // mit 20 Min. Mindestpause zählen beide Lücken als Arbeit
+        let s = Settings { min_pause: 20 * 60, ..st() };
+        let r = d.record(&s).unwrap();
+        assert_eq!((r.work_secs, r.pause_secs()), (h(8, 0), 0));
+        // Rohdaten bleiben unverändert
+        assert_eq!(d.periods.len(), 3);
+    }
+
+    #[test]
+    fn frame_clips_work_and_pause() {
+        let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 16).unwrap());
+        d.add_period(h(6, 0), h(8, 0));
+        d.add_period(h(21, 0), h(23, 30));
+        let r = d.record(&st()).unwrap();
+        assert_eq!((r.first_start, r.last_end), (h(7, 0), h(22, 0)));
+        assert_eq!(r.work_secs, h(2, 0));
+        assert_eq!(
+            d.outside_frame_spans(&st()),
+            vec![Span::new(h(6, 0), h(7, 0)), Span::new(h(22, 0), h(23, 30))]
+        );
+        assert_eq!(d.auto_bounds_in_frame(&st()), Some((h(7, 0), h(22, 0))));
+        // nur außerhalb: weder Arbeit noch Pause
+        let mut late = Day::new(d.date);
+        late.add_period(h(22, 30), h(23, 30));
+        let r = late.record(&st()).unwrap();
+        assert_eq!((r.work_secs, r.pause_secs()), (0, 0));
+        assert_eq!(late.auto_bounds_in_frame(&st()), None);
+        // manueller Beginn vor dem Rahmen zählt erst ab Rahmenbeginn
+        let mut early = day();
+        early.start = Some(h(6, 30));
+        assert_eq!(early.record(&st()).unwrap().first_start, h(7, 0));
+        assert_eq!(early.outside_frame_spans(&st()), vec![Span::new(h(6, 30), h(7, 0))]);
     }
 
     #[test]
@@ -340,7 +382,7 @@ mod tests {
         let mut d = day();
         d.start = Some(h(7, 30));
         assert_eq!(work(&d), h(3, 46) + h(4, 49) + h(0, 42));
-        assert_eq!(d.record(DAY_END).unwrap().first_start, h(7, 30));
+        assert_eq!(d.record(&st()).unwrap().first_start, h(7, 30));
     }
 
     #[test]
@@ -355,34 +397,21 @@ mod tests {
         // Beginn in der Mittagslücke (gesperrt 11:58–12:41): Arbeit ab 12:41
         let mut d = day();
         d.start = Some(h(12, 30));
-        let r = d.record(DAY_END).unwrap();
+        let r = d.record(&st()).unwrap();
         assert_eq!((r.first_start, r.work_secs), (h(12, 41), h(4, 49)));
         // Feierabend in der Mittagslücke: die gesperrte Zeit zählt nicht als Arbeit
         let mut d = day();
         d.end = Some(h(12, 20));
-        let r = d.record(DAY_END).unwrap();
+        let r = d.record(&st()).unwrap();
         assert_eq!((r.last_end, r.work_secs), (h(11, 58), h(3, 46)));
     }
 
     #[test]
     fn break_overlapping_lock_is_not_counted_twice() {
         let mut d = day();
-        d.breaks.push(Break { from: h(12, 0), to: Some(h(12, 45)) });
+        d.breaks.push(Break { from: h(12, 0), to: h(12, 45) });
         // gesperrt war ohnehin 11:58–12:41, zusätzlich entfällt nur 12:41–12:45
         assert_eq!(work(&d), h(3, 46) + h(4, 45));
-    }
-
-    #[test]
-    fn open_break_runs_until_now() {
-        let mut d = day();
-        d.breaks.push(Break { from: h(17, 0), to: None });
-        assert_eq!(d.mode(), Mode::Break(h(17, 0)));
-        let r = d.record(h(17, 30)).unwrap(); // jetzt = 17:30 (Ende der letzten Periode)
-        assert_eq!(r.work_secs, h(3, 46) + h(4, 19));
-        // die laufende Pause zählt schon jetzt bei den Pausen mit
-        let r = d.record(h(17, 50)).unwrap();
-        assert_eq!(r.last_end, h(17, 50));
-        assert_eq!(r.pause_secs(), h(0, 43) + h(0, 50));
     }
 
     #[test]
@@ -393,7 +422,7 @@ mod tests {
         assert_eq!(work(&d), h(3, 46) + h(4, 19));
         d.end = Some(h(18, 0));
         assert_eq!(work(&d), h(3, 46) + h(5, 19));
-        assert_eq!(d.record(DAY_END).unwrap().last_end, h(18, 0));
+        assert_eq!(d.record(&st()).unwrap().last_end, h(18, 0));
     }
 
     #[test]
@@ -401,22 +430,16 @@ mod tests {
         let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 13).unwrap());
         d.start = Some(h(8, 0));
         d.end = Some(h(16, 0));
-        d.breaks.push(Break { from: h(12, 0), to: Some(h(12, 30)) });
-        let r = d.record(DAY_END).unwrap();
+        d.breaks.push(Break { from: h(12, 0), to: h(12, 30) });
+        let r = d.record(&st()).unwrap();
         assert_eq!(r.work_secs, h(7, 30));
         assert_eq!(r.pause_secs(), h(0, 30));
     }
 
     #[test]
-    fn legal_hint_and_lunch_gap() {
-        let d = day();
-        let spans = d.spans(DAY_END);
-        assert_eq!(Day::legal_hint(&spans), None); // 8:35 h Arbeit, 43 Min. Pause
-        assert_eq!(d.lunch_gap(&spans), Some(Span::new(h(11, 58), h(12, 41))));
-        let mut long = Day::new(d.date);
-        long.add_period(h(8, 0), h(15, 0));
-        assert!(Day::legal_hint(&long.spans(DAY_END)).is_some());
-        assert_eq!(long.lunch_gap(&long.spans(DAY_END)), None);
+    fn legal_pause_counts_segments_from_15_minutes() {
+        let spans = vec![Span::new(h(8, 0), h(10, 0)), Span::new(h(10, 14), h(12, 0)), Span::new(h(12, 30), h(15, 0))];
+        assert_eq!(Day::legal_pause_secs(&spans), h(0, 30));
     }
 
     #[test]

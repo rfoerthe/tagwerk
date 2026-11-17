@@ -1,9 +1,13 @@
 //! Zeiterfassungs-Logik: automatische Perioden starten/stoppen, manuelle Entscheidungen
-//! (Arbeitsbeginn, Mittagspause, Feierabend) eintragen und alles auf Tage verteilen.
+//! (Arbeitsbeginn, Feierabend) eintragen und alles auf Tage verteilen.
+//!
+//! Pausen werden nicht von Hand begonnen oder beendet: Jede Sperre, die mindestens so lange
+//! dauert wie die eingestellte Mindestpause, ist eine Pause; kürzere zählen zur Arbeitszeit.
 
-use crate::day::{self, Break, Day, Mode, Span, DAY_END};
+use crate::day::{self, Day, Mode, DAY_END};
+use crate::rules::{self, Settings, Warning};
 use crate::store;
-use chrono::{Duration, NaiveDate, NaiveDateTime};
+use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime};
 
 /// Warum gerade nicht automatisch erfasst wird.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -23,6 +27,7 @@ pub struct Tracker {
     pub running_since: Option<NaiveDateTime>,
     pub paused_since: Option<NaiveDateTime>,
     pub pause_reason: PauseReason,
+    pub settings: Settings,
 }
 
 /// Kennzahlen für heute (inklusive laufender Periode).
@@ -33,11 +38,15 @@ pub struct TodayInfo {
     pub first_start: Option<i64>,
     /// Beginn wurde manuell festgelegt.
     pub start_manual: bool,
-    /// Erstes automatisches Entsperren heute.
+    /// Erstes automatisches Entsperren heute im Arbeitszeitrahmen.
     pub auto_first: Option<i64>,
     pub mode: Mode,
-    pub legal_hint: Option<&'static str>,
-    pub lunch_gap: Option<Span>,
+    /// Sollarbeitszeit heute.
+    pub target_secs: i64,
+    /// Saldo dieser Woche (Montag bis heute, nur Tage mit Arbeitszeit).
+    pub week_balance: i64,
+    /// Hinweise zu Verstößen gegen die Regeln.
+    pub warnings: Vec<Warning>,
 }
 
 fn secs(t: NaiveDateTime) -> i64 {
@@ -45,9 +54,21 @@ fn secs(t: NaiveDateTime) -> i64 {
 }
 
 impl Tracker {
-    pub fn new(days: Vec<Day>) -> Self {
+    pub fn new(days: Vec<Day>, settings: Settings) -> Self {
         let saved = days.clone();
-        Self { days, saved, running_since: None, paused_since: None, pause_reason: PauseReason::Startup }
+        Self {
+            days,
+            saved,
+            running_since: None,
+            paused_since: None,
+            pause_reason: PauseReason::Startup,
+            settings,
+        }
+    }
+
+    /// Liegt `now` im Arbeitszeitrahmen? Außerhalb wird nichts gezählt.
+    pub fn in_frame(&self, now: NaiveDateTime) -> bool {
+        self.settings.in_frame(secs(now))
     }
 
     pub fn is_running(&self) -> bool {
@@ -66,14 +87,12 @@ impl Tracker {
         self.days.retain(|d| !d.is_empty());
     }
 
-    /// Modus von heute (Feierabend, Mittagspause oder automatisch).
+    /// Modus von heute (Feierabend oder automatisch).
     pub fn mode(&self, now: NaiveDateTime) -> Mode {
         self.day(now.date()).map(Day::mode).unwrap_or(Mode::Auto)
     }
 
     /// Automatische Erfassung starten. Nach Feierabend passiert nichts.
-    /// Während einer Mittagspause wird weiter erfasst, die Pause wird aber abgezogen –
-    /// so kann ihr Ende auch nachträglich verschoben werden.
     pub fn start(&mut self, now: NaiveDateTime) -> bool {
         if self.running_since.is_some() || matches!(self.mode(now), Mode::Closed(_)) {
             return false;
@@ -97,7 +116,7 @@ impl Tracker {
         true
     }
 
-    /// Tageswechsel: laufende Periode an Mitternacht teilen, offene Pausen alter Tage schließen.
+    /// Tageswechsel: laufende Periode an Mitternacht teilen.
     /// Gibt `true` zurück, wenn sich etwas geändert hat (dann speichern).
     pub fn roll_over(&mut self, now: NaiveDateTime) -> bool {
         let mut changed = false;
@@ -106,12 +125,6 @@ impl Tracker {
                 let midnight = now.date().and_hms_opt(0, 0, 0).unwrap();
                 Self::commit(&mut self.days, since, midnight);
                 self.running_since = Some(midnight);
-                changed = true;
-            }
-        }
-        for d in self.days.iter_mut().filter(|d| d.date < now.date()) {
-            for b in d.breaks.iter_mut().filter(|b| b.to.is_none()) {
-                b.to = Some(DAY_END);
                 changed = true;
             }
         }
@@ -129,31 +142,32 @@ impl Tracker {
 
     pub fn today(&self, now: NaiveDateTime) -> TodayInfo {
         let snap = self.snapshot(now);
-        let Some(d) = snap.iter().find(|d| d.date == now.date()) else {
-            return TodayInfo {
-                work_secs: 0,
-                pause_secs: 0,
-                first_start: None,
-                start_manual: false,
-                auto_first: None,
-                mode: Mode::Auto,
-                legal_hint: None,
-                lunch_gap: None,
-            };
+        let s = &self.settings;
+        let date = now.date();
+        let monday = date - Duration::days(date.weekday().num_days_from_monday() as i64);
+        let (week_work, week_target) = rules::balance(&snap, monday, date, s);
+        let mut info = TodayInfo {
+            work_secs: 0,
+            pause_secs: 0,
+            first_start: None,
+            start_manual: false,
+            auto_first: None,
+            mode: Mode::Auto,
+            target_secs: s.daily_target(date),
+            week_balance: week_work - week_target,
+            warnings: Vec::new(),
         };
-        let spans = d.spans(secs(now));
-        let rec = d.record(secs(now));
-        let mode = d.mode();
-        TodayInfo {
-            work_secs: rec.as_ref().map(|r| r.work_secs).unwrap_or(0),
-            pause_secs: rec.as_ref().map(|r| r.pause_secs()).unwrap_or(0),
-            first_start: rec.as_ref().map(|r| r.first_start),
-            start_manual: d.start.is_some(),
-            auto_first: d.periods.first().map(|p| p.from),
-            mode,
-            legal_hint: if mode == Mode::Auto { Day::legal_hint(&spans) } else { None },
-            lunch_gap: d.lunch_gap(&spans),
+        let Some(d) = snap.iter().find(|d| d.date == date) else { return info };
+        if let Some(rec) = d.record(s) {
+            info.work_secs = rec.work_secs;
+            info.pause_secs = rec.pause_secs();
+            info.first_start = (rec.work_secs > 0 || d.start.is_some()).then_some(rec.first_start);
         }
+        info.start_manual = d.start.is_some();
+        info.auto_first = d.auto_bounds_in_frame(s).map(|(first, _)| first);
+        info.mode = d.mode();
+        info.warnings = rules::day_warnings(&snap, date, s);
+        info
     }
 
     /// Speichert nur die Tage, die sich seit dem letzten Laden/Speichern geändert haben,
@@ -190,48 +204,11 @@ impl Tracker {
         self.cleanup();
     }
 
-    /// Mittagspause ab `from` beginnen. Gibt `false` zurück, wenn schon eine läuft
-    /// oder Feierabend ist.
-    pub fn start_break(&mut self, now: NaiveDateTime, from: i64) -> bool {
-        if self.mode(now) != Mode::Auto {
-            return false;
-        }
-        let from = from.min(secs(now));
-        let d = self.day_mut(now.date());
-        d.breaks.push(Break { from, to: None });
-        d.sort_breaks();
-        true
-    }
-
-    /// Laufende Mittagspause jetzt beenden.
-    pub fn end_break(&mut self, now: NaiveDateTime) -> bool {
-        let t = secs(now);
-        let Some(d) = self.days.iter_mut().find(|d| d.date == now.date()) else { return false };
-        match d.breaks.iter_mut().find(|b| b.to.is_none()) {
-            Some(b) => {
-                b.to = Some(t.max(b.from));
-                true
-            }
-            None => false,
-        }
-    }
-
-    /// Lücke nachträglich als Pause eintragen (Vorschlag aus dem Menü).
-    pub fn add_break(&mut self, now: NaiveDateTime, from: i64, to: i64) {
-        let d = self.day_mut(now.date());
-        d.breaks.push(Break { from, to: Some(to.max(from)) });
-        d.sort_breaks();
-    }
-
-    /// Feierabend um `at` (höchstens jetzt). Stoppt die Erfassung und beendet eine laufende Pause.
+    /// Feierabend um `at` (höchstens jetzt). Stoppt die Erfassung.
     pub fn close_day(&mut self, now: NaiveDateTime, at: i64) {
         let t = secs(now);
         self.stop(now, PauseReason::Manual);
-        let d = self.day_mut(now.date());
-        for b in d.breaks.iter_mut().filter(|b| b.to.is_none()) {
-            b.to = Some(t.max(b.from));
-        }
-        d.end = Some(at.min(t));
+        self.day_mut(now.date()).end = Some(at.min(t));
     }
 
     /// Feierabend zurücknehmen. Die Erfassung startet der Aufrufer (falls entsperrt).
@@ -244,9 +221,10 @@ impl Tracker {
 
     /// Nach einer Änderung der Datenbank von außen (Fenster „Aufzeichnungen“) neu einlesen.
     /// Die laufende Periode bleibt erhalten; doppelt gespeicherte Zeiten werden zusammengefasst.
-    pub fn replace_days(&mut self, days: Vec<Day>, now: NaiveDateTime) {
+    pub fn replace_days(&mut self, days: Vec<Day>, settings: Settings, now: NaiveDateTime) {
         self.saved = days.clone();
         self.days = days;
+        self.settings = settings;
         if self.running_since.is_some() && matches!(self.mode(now), Mode::Closed(_)) {
             self.stop(now, PauseReason::Manual);
         }
@@ -279,7 +257,7 @@ mod tests {
 
     #[test]
     fn work_and_pause() {
-        let mut t = Tracker::new(vec![]);
+        let mut t = Tracker::new(vec![], Settings::default());
         t.start(dt(16, 8, 0));
         t.stop(dt(16, 12, 0), PauseReason::Locked);
         t.start(dt(16, 12, 30));
@@ -291,34 +269,50 @@ mod tests {
 
     #[test]
     fn midnight_split() {
-        let mut t = Tracker::new(vec![]);
+        let all_day = Settings { frame_from: 0, frame_to: DAY_END, ..Settings::default() };
+        let mut t = Tracker::new(vec![], all_day);
         t.start(dt(16, 23, 0));
         t.roll_over(dt(17, 0, 30));
         t.stop(dt(17, 1, 0), PauseReason::Manual);
         assert_eq!(t.days.len(), 2);
-        assert_eq!(t.days[0].record(DAY_END).unwrap().work_secs, 3600);
-        assert_eq!(t.days[1].record(DAY_END).unwrap().work_secs, 3600);
+        assert_eq!(t.days[0].record(&all_day).unwrap().work_secs, 3600);
+        assert_eq!(t.days[1].record(&all_day).unwrap().work_secs, 3600);
+        // im Standard-Rahmen (07:00–22:00) zählt davon nichts
+        assert_eq!(t.days[0].record(&Settings::default()).unwrap().work_secs, 0);
     }
 
     #[test]
-    fn lunch_break_survives_lock_and_can_end_later() {
-        let mut t = Tracker::new(vec![]);
+    fn short_lock_counts_as_work_long_lock_as_pause() {
+        let mut t = Tracker::new(vec![], Settings::default());
         t.start(dt(16, 8, 0));
-        assert!(t.start_break(dt(16, 12, 0), hm(12, 0)));
-        assert!(!t.start_break(dt(16, 12, 1), hm(12, 1)));
-        t.stop(dt(16, 12, 2), PauseReason::Locked);
-        assert!(t.start(dt(16, 12, 40))); // entsperrt: Rohdaten laufen weiter
-        assert_eq!(t.mode(dt(16, 12, 40)), Mode::Break(hm(12, 0)));
-        assert_eq!(t.today(dt(16, 12, 50)).work_secs, hm(4, 0));
-        t.end_break(dt(16, 12, 50));
-        assert_eq!(t.mode(dt(16, 12, 50)), Mode::Auto);
-        assert_eq!(t.today(dt(16, 13, 0)).work_secs, hm(4, 10));
-        assert_eq!(t.today(dt(16, 13, 0)).pause_secs, hm(0, 50));
+        t.stop(dt(16, 10, 0), PauseReason::Locked);
+        t.start(dt(16, 10, 10)); // 10 Min. gesperrt
+        t.stop(dt(16, 12, 0), PauseReason::Locked);
+        t.start(dt(16, 12, 40)); // 40 Min. gesperrt
+        let info = t.today(dt(16, 13, 0));
+        assert_eq!(info.work_secs, hm(4, 20));
+        assert_eq!(info.pause_secs, hm(0, 40));
+        assert_eq!(info.target_secs, hm(7, 48));
+        assert_eq!(info.week_balance, hm(4, 20) - hm(7, 48));
+    }
+
+    #[test]
+    fn nothing_counted_outside_frame() {
+        let mut t = Tracker::new(vec![], Settings::default());
+        t.start(dt(16, 6, 30));
+        assert!(!t.in_frame(dt(16, 6, 59)));
+        assert!(t.in_frame(dt(16, 7, 0)));
+        let info = t.today(dt(16, 6, 50));
+        assert_eq!((info.work_secs, info.first_start), (0, None));
+        let info = t.today(dt(16, 8, 0));
+        assert_eq!((info.work_secs, info.first_start), (hm(1, 0), Some(hm(7, 0))));
+        assert!(matches!(&info.warnings[..], [Warning::OutsideFrame { spans, .. }] if spans.len() == 1));
+        assert_eq!(info.auto_first, Some(hm(7, 0)));
     }
 
     #[test]
     fn closed_day_blocks_auto_start_until_reopened() {
-        let mut t = Tracker::new(vec![]);
+        let mut t = Tracker::new(vec![], Settings::default());
         t.start(dt(16, 8, 0));
         t.close_day(dt(16, 17, 20), hm(17, 0));
         assert!(!t.is_running());
@@ -327,7 +321,7 @@ mod tests {
         t.reopen_day(dt(16, 20, 0));
         assert!(t.start(dt(16, 20, 0)));
         // nächster Tag: wieder automatisch
-        let mut t = Tracker::new(vec![]);
+        let mut t = Tracker::new(vec![], Settings::default());
         t.start(dt(16, 8, 0));
         t.close_day(dt(16, 17, 0), hm(17, 0));
         assert!(t.start(dt(17, 8, 0)));
@@ -335,7 +329,7 @@ mod tests {
 
     #[test]
     fn manual_start_earlier_and_reset() {
-        let mut t = Tracker::new(vec![]);
+        let mut t = Tracker::new(vec![], Settings::default());
         t.start(dt(16, 8, 12));
         t.set_start(dt(16, 9, 0), Some(hm(7, 30)));
         let info = t.today(dt(16, 9, 0));
@@ -350,7 +344,7 @@ mod tests {
     fn save_writes_only_changed_days() {
         let mut old = Day::new(NaiveDate::from_ymd_opt(2026, 11, 10).unwrap());
         old.add_period(hm(8, 0), hm(9, 0));
-        let mut t = Tracker::new(vec![old.clone()]);
+        let mut t = Tracker::new(vec![old.clone()], Settings::default());
         t.start(dt(16, 8, 0));
         let snap = t.snapshot(dt(16, 9, 0));
         let (changed, removed) = Tracker::diff(&t.saved, &snap);
@@ -360,16 +354,5 @@ mod tests {
         let (changed, removed) = Tracker::diff(&snap, &snap[1..]);
         assert!(changed.is_empty());
         assert_eq!(removed, vec![old.date]);
-    }
-
-    #[test]
-    fn open_break_closed_at_midnight() {
-        let mut t = Tracker::new(vec![]);
-        t.start(dt(16, 20, 0));
-        t.start_break(dt(16, 21, 0), hm(21, 0));
-        t.stop(dt(16, 21, 0), PauseReason::Locked);
-        t.roll_over(dt(17, 7, 0));
-        assert_eq!(t.days[0].breaks[0].to, Some(DAY_END));
-        assert_eq!(t.mode(dt(17, 7, 0)), Mode::Auto);
     }
 }

@@ -6,11 +6,15 @@
 #                              signieren, notarisieren
 #   ./build.sh --no-notarize   nur bauen und signieren
 #   ./build.sh --no-sign       nur bauen (ad-hoc signiert, ohne Notarisierung)
+#   ./build.sh --install       zusätzlich nach /Applications kopieren (eine laufende
+#                              Tagwerk-App wird beendet und danach neu gestartet);
+#                              lässt sich mit den anderen Optionen kombinieren
 #
 # Einstellungen über Umgebungsvariablen:
 #   SIGN_IDENTITY   "Developer ID Application: …" (Standard: erste gefundene Developer-ID)
 #   NOTARY_PROFILE  Schlüsselbund-Profil für notarytool (Standard: general-notary)
 #   BUNDLE_ID       Bundle-Kennung (Standard: com.tagwerk.app)
+#   INSTALL_DIR     Ziel für --install (Standard: /Applications)
 #
 # Das Notary-Profil wird einmalig angelegt mit:
 #   xcrun notarytool store-credentials general-notary --apple-id <id> --team-id <team>
@@ -25,13 +29,16 @@ MIN_MACOS="13.0"
 
 DO_SIGN=1
 DO_NOTARIZE=1
+DO_INSTALL=0
+INSTALL_DIR="${INSTALL_DIR:-/Applications}"
 TARGET="aarch64-apple-darwin"
 
 for arg in "$@"; do
   case "$arg" in
     --no-notarize) DO_NOTARIZE=0 ;;
     --no-sign)     DO_SIGN=0; DO_NOTARIZE=0 ;;
-    -h|--help)     sed -n '2,19p' "$0"; exit 0 ;;
+    --install)     DO_INSTALL=1 ;;
+    -h|--help)     sed -n '2,21p' "$0"; exit 0 ;;
     *) echo "Unbekannte Option: $arg" >&2; exit 2 ;;
   esac
 done
@@ -169,4 +176,45 @@ if [[ "$DO_NOTARIZE" == 1 ]]; then
   spctl --assess --type open --context context:primary-signature --verbose "$DMG" || true
 fi
 
+# 7) Installieren --------------------------------------------------------------
+if [[ "$DO_INSTALL" == 1 ]]; then
+  TARGET_APP="$INSTALL_DIR/$APP_NAME.app"
+  TARGET_BIN="$TARGET_APP/Contents/MacOS/$APP_NAME"
+  [[ -w "$INSTALL_DIR" ]] || fail "Keine Schreibrechte für $INSTALL_DIR."
+  if [[ "$DO_NOTARIZE" == 1 ]]; then
+    # Das Ticket der Notarisierung gilt auch für die App im DMG.
+    xcrun stapler staple "$APP" >/dev/null || echo "Hinweis: Ticket konnte nicht an die App geheftet werden." >&2
+  fi
+
+  WAS_RUNNING=0
+  if pgrep -xf "$TARGET_BIN" >/dev/null; then
+    WAS_RUNNING=1
+    step "Beende laufendes $APP_NAME"
+    # Regulär beenden, damit die laufende Erfassung gespeichert wird.
+    osascript -e "tell application id \"$BUNDLE_ID\" to quit" >/dev/null 2>&1 || true
+    for _ in $(seq 1 20); do
+      pgrep -f "$TARGET_BIN" >/dev/null || break
+      sleep 0.5
+    done
+    if pgrep -f "$TARGET_BIN" >/dev/null; then
+      pkill -TERM -f "$TARGET_BIN" || true
+      sleep 1
+    fi
+    pgrep -f "$TARGET_BIN" >/dev/null && fail "$APP_NAME läuft noch – bitte von Hand beenden."
+  fi
+
+  step "Installiere nach $TARGET_APP"
+  rm -rf "$TARGET_APP"
+  ditto "$APP" "$TARGET_APP"
+  codesign --verify --strict "$TARGET_APP" || fail "Die Signatur der installierten App ist ungültig."
+
+  if [[ "$WAS_RUNNING" == 1 ]]; then
+    step "Starte $APP_NAME neu"
+    open "$TARGET_APP"
+  fi
+fi
+
 step "Fertig: $DMG"
+if [[ "$DO_INSTALL" == 1 ]]; then
+  echo "Installiert: $INSTALL_DIR/$APP_NAME.app"
+fi

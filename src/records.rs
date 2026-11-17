@@ -7,6 +7,8 @@
 //! startet. Änderungen gehen direkt in die Datenbank; die Menüleisten-App übernimmt sie.
 
 use crate::day::{fmt_clock, secs_of, Break, Day, DayRecord, Span, DAY_END};
+use crate::rules::{self, Settings, Warning};
+use crate::settings_window;
 use crate::store::{self, Status};
 use block2::RcBlock;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, TimeZone};
@@ -192,7 +194,7 @@ fn pin_width(view: &NSView, to: &NSView, inset: f64) {
 /// Eine Tabellenzeile: Wochenüberschrift oder Arbeitstag.
 enum Row {
     Week { title: String, total: String },
-    Day { day: Day, rec: DayRecord },
+    Day { day: Day, rec: DayRecord, warnings: Vec<Warning> },
 }
 
 /// Steuerelemente des Inspektors, die Aktionen auslesen müssen.
@@ -219,11 +221,12 @@ struct Export {
 struct Model {
     db: Option<store::Db>,
     days: Vec<Day>,
+    settings: Settings,
     rows: Vec<Row>,
     status: Option<Status>,
     selected: Option<NaiveDate>,
     /// Stand, aus dem der Inspektor zuletzt aufgebaut wurde.
-    built: Option<(NaiveDate, Option<Day>)>,
+    built: Option<(NaiveDate, Option<Day>, Settings)>,
     inspector: Option<Inspector>,
     export: Option<Export>,
     error: Option<String>,
@@ -235,8 +238,7 @@ impl Model {
     }
 
     fn records(&self) -> Vec<DayRecord> {
-        let t = now();
-        self.days.iter().filter_map(|d| d.record(store::open_until(d.date, t))).collect()
+        self.days.iter().filter_map(|d| d.record(&self.settings)).collect()
     }
 
     fn row_of(&self, date: NaiveDate) -> Option<usize> {
@@ -253,9 +255,10 @@ impl Model {
     /// Liest Datenbank und Status neu und baut die Tabellenzeilen auf.
     fn load(&mut self) {
         if let Some(db) = self.db.as_ref() {
-            match db.load() {
-                Ok(d) => {
+            match db.load().and_then(|d| Ok((d, db.load_settings()?))) {
+                Ok((d, settings)) => {
                     self.days = d;
+                    self.settings = settings;
                     self.error = None;
                 }
                 Err(e) => self.error = Some(format!("Die Datenbank konnte nicht gelesen werden: {e}")),
@@ -266,12 +269,9 @@ impl Model {
     }
 
     fn build_rows(&mut self) {
-        let t = now();
-        let mut recs: Vec<(Day, DayRecord)> = self
-            .days
-            .iter()
-            .filter_map(|d| d.record(store::open_until(d.date, t)).map(|r| (d.clone(), r)))
-            .collect();
+        let s = &self.settings;
+        let mut recs: Vec<(Day, DayRecord)> =
+            self.days.iter().filter_map(|d| d.record(s).map(|r| (d.clone(), r))).collect();
         recs.reverse();
         let mut rows = Vec::new();
         let mut i = 0;
@@ -281,6 +281,7 @@ impl Model {
             let monday = recs[i].1.date - Duration::days(recs[i].1.date.weekday().num_days_from_monday() as i64);
             let sunday = monday + Duration::days(6);
             let total: i64 = recs[i..j].iter().map(|(_, r)| r.work_secs).sum();
+            let (_, target) = rules::balance(&self.days, monday, sunday, s);
             rows.push(Row::Week {
                 title: format!(
                     "KW {}  ·  {} – {}",
@@ -288,10 +289,16 @@ impl Model {
                     monday.format("%d.%m."),
                     sunday.format("%d.%m.%Y")
                 ),
-                total: format!("{}  ·  {}", plural(j - i, "Tag", "Tage"), store::fmt_hm(total)),
+                total: format!(
+                    "{}  ·  {}  ·  Saldo {}",
+                    plural(j - i, "Tag", "Tage"),
+                    store::fmt_hm(total),
+                    rules::fmt_balance(total - target)
+                ),
             });
             for (day, rec) in recs[i..j].iter().cloned() {
-                rows.push(Row::Day { day, rec });
+                let warnings = rules::day_warnings(&self.days, day.date, s);
+                rows.push(Row::Day { day, rec, warnings });
             }
             i = j;
         }
@@ -331,14 +338,15 @@ fn model<R>(f: impl FnOnce(&mut Model) -> R) -> R {
 
 // ---------- Controller (Ziel aller Aktionen, Datenquelle, Delegate) ----------
 
-const COLUMNS: [(&str, &str, f64, f64, f64); 6] = [
+const COLUMNS: [(&str, &str, f64, f64, f64); 7] = [
     // Kennung, Titel, Breite, Mindest- und Höchstbreite (zusätzlicher Platz geht an „Datum“)
     ("mark", "", 22.0, 22.0, 22.0),
-    ("date", "Datum", 160.0, 120.0, 10_000.0),
-    ("start", "Beginn", 80.0, 60.0, 120.0),
-    ("end", "Ende", 80.0, 60.0, 120.0),
-    ("work", "Arbeitszeit", 100.0, 80.0, 140.0),
-    ("pause", "Pausen", 90.0, 70.0, 130.0),
+    ("date", "Datum", 140.0, 110.0, 10_000.0),
+    ("start", "Beginn", 64.0, 56.0, 120.0),
+    ("end", "Ende", 64.0, 56.0, 120.0),
+    ("work", "Arbeitszeit", 90.0, 76.0, 140.0),
+    ("pause", "Pausen", 70.0, 60.0, 130.0),
+    ("balance", "Saldo", 76.0, 66.0, 130.0),
 ];
 
 const TB_RELOAD: &str = "reload";
@@ -464,6 +472,11 @@ define_class!(
             ui.split.adjustSubviews();
         }
 
+        #[unsafe(method(showSettings:))]
+        fn show_settings(&self, _sender: Option<&AnyObject>) {
+            settings_window::show(reload);
+        }
+
         #[unsafe(method(revealDatabase:))]
         fn reveal_database(&self, _sender: Option<&AnyObject>) {
             reveal(&store::db_file());
@@ -499,25 +512,20 @@ define_class!(
 
         #[unsafe(method(addBreak:))]
         fn add_break(&self, _sender: Option<&AnyObject>) {
-            let times = model(|m| {
-                m.inspector.as_ref().map(|i| (picker_secs(&i.break_from), picker_secs(&i.break_to)))
+            let (times, min) = model(|m| {
+                (
+                    m.inspector.as_ref().map(|i| (picker_secs(&i.break_from), picker_secs(&i.break_to))),
+                    m.settings.min_pause,
+                )
             });
             match times {
-                Some((Some(from), Some(to))) if to > from => apply(Edit::AddBreak(from, to), true),
+                Some((Some(from), Some(to))) if to - from >= min => apply(Edit::AddBreak(from, to), true),
+                Some((Some(from), Some(to))) if to > from => show_inspector_error(&format!(
+                    "Eine Pause dauert mindestens {} Min. (siehe Einstellungen).",
+                    min / 60
+                )),
                 Some((Some(_), Some(_))) => show_inspector_error("Das Ende der Pause muss nach ihrem Beginn liegen."),
                 _ => {}
-            }
-        }
-
-        #[unsafe(method(acceptGap:))]
-        fn accept_gap(&self, _sender: Option<&AnyObject>) {
-            let gap = model(|m| {
-                let date = m.selected?;
-                let day = m.day(date)?;
-                day.lunch_gap(&day.spans(store::open_until(date, now())))
-            });
-            if let Some(g) = gap {
-                apply(Edit::AddBreak(g.from, g.to), true);
             }
         }
 
@@ -609,38 +617,50 @@ fn cell_view(m: &Model, column: Option<&str>, row: NSInteger) -> Option<Retained
                 .setActive(true);
             unsafe { cell.setTextField(Some(&t)) };
         }
-        (Row::Day { day, rec }, Some("mark")) => {
-            if day.has_corrections() {
+        (Row::Day { day, warnings, .. }, Some("mark")) => {
+            // Hinweise gehen vor; sonst Stift für manuell korrigierte Tage.
+            let mark = if !warnings.is_empty() {
+                let tip: Vec<String> = warnings.iter().map(Warning::text).collect();
+                Some(("exclamationmark.triangle.fill", NSColor::systemOrangeColor(), tip.join("\n")))
+            } else if day.has_corrections() {
+                Some(("pencil", NSColor::secondaryLabelColor(), "Manuell korrigiert".to_string()))
+            } else {
+                None
+            };
+            if let Some((name, color, tip)) = mark {
                 let iv = NSImageView::new(mtm);
-                iv.setImage(symbol("pencil", "Manuell korrigiert").as_deref());
-                iv.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+                iv.setImage(symbol(name, &tip).as_deref());
+                iv.setContentTintColor(Some(&color));
                 iv.setTranslatesAutoresizingMaskIntoConstraints(false);
                 cell.addSubview(&iv);
                 iv.centerXAnchor().constraintEqualToAnchor(&cell.centerXAnchor()).setActive(true);
                 iv.centerYAnchor().constraintEqualToAnchor(&cell.centerYAnchor()).setActive(true);
                 unsafe { cell.setImageView(Some(&iv)) };
-                cell.setToolTip(Some(&ns("Manuell korrigiert")));
+                cell.setToolTip(Some(&ns(&tip)));
             }
-            let _ = rec;
         }
-        (Row::Day { day, rec }, Some(col)) => {
+        (Row::Day { day, rec, .. }, Some(col)) => {
             let today = now().date();
             let is_today = rec.date == today;
             let (text, align, secondary) = match col {
                 "date" => (store::fmt_date(rec.date), NSTextAlignment::Left, false),
                 "start" => (fmt_clock(rec.first_start), NSTextAlignment::Right, false),
                 "end" => {
-                    if is_today && day.end.is_none() {
-                        match (m.status, day.open_break()) {
-                            (_, Some(_)) => ("Pause".to_string(), NSTextAlignment::Right, true),
-                            (Some(Status::Running), _) => ("läuft".to_string(), NSTextAlignment::Right, true),
-                            _ => (fmt_clock(rec.last_end), NSTextAlignment::Right, false),
-                        }
+                    if is_today && day.end.is_none() && m.status == Some(Status::Running) {
+                        ("läuft".to_string(), NSTextAlignment::Right, true)
                     } else {
                         (fmt_clock(rec.last_end), NSTextAlignment::Right, false)
                     }
                 }
                 "work" => (store::fmt_hm(rec.work_secs), NSTextAlignment::Right, false),
+                "balance" => {
+                    let target = m.settings.daily_target(rec.date);
+                    if rec.work_secs > 0 {
+                        (rules::fmt_balance(rec.work_secs - target), NSTextAlignment::Right, true)
+                    } else {
+                        ("–".to_string(), NSTextAlignment::Right, true)
+                    }
+                }
                 "pause" => (store::fmt_hm(rec.pause_secs()), NSTextAlignment::Right, false),
                 _ => return None,
             };
@@ -689,33 +709,38 @@ fn refresh_summary() {
     let ui = ui();
     let t = now();
     let today = t.date();
-    let (texts, status, count, error) = model(|m| {
-        let recs = m.records();
+    let (texts, status, count, error, rules_text) = model(|m| {
+        let st = m.settings;
+        let recs: Vec<DayRecord> = m.records().into_iter().filter(|r| r.work_secs > 0).collect();
+        // (Arbeit, Pausen, Tage, Soll)
         let sum = |f: &dyn Fn(NaiveDate) -> bool| {
-            recs.iter()
-                .filter(|r| f(r.date))
-                .fold((0i64, 0i64, 0usize), |(w, p, n), r| (w + r.work_secs, p + r.pause_secs(), n + 1))
+            recs.iter().filter(|r| f(r.date)).fold((0i64, 0i64, 0usize, 0i64), |(w, p, n, t), r| {
+                (w + r.work_secs, p + r.pause_secs(), n + 1, t + st.daily_target(r.date))
+            })
         };
-        let (tw, tp, tn) = sum(&|d| d == today);
+        let (tw, _tp, tn, _) = sum(&|d| d == today);
         let week_start = today - Duration::days(today.weekday().num_days_from_monday() as i64);
-        let (ww, wp, wn) = sum(&|d| d >= week_start && d <= today);
-        let (mw, mp, mn) = sum(&|d| d.year() == today.year() && d.month() == today.month());
+        let (ww, _wp, wn, wt) = sum(&|d| d >= week_start && d <= today);
+        let (mw, mp, mn, mt) = sum(&|d| d.year() == today.year() && d.month() == today.month());
         let begin = m.day(today).zip(recs.iter().find(|r| r.date == today)).map(|(d, r)| {
             let manual = if d.start.is_some() { " (manuell)" } else { "" };
             format!("Beginn {} Uhr{manual}", fmt_clock(r.first_start))
         });
+        let today_target = st.daily_target(today);
         let today_detail = match (tn, begin) {
-            (0, _) | (_, None) => "Noch kein Arbeitsbeginn".to_string(),
-            (_, Some(b)) => format!("{b} · Pausen {}", store::fmt_hm(tp)),
+            (0, _) | (_, None) if today_target > 0 => format!("Soll {}", store::fmt_hm(today_target)),
+            (0, _) | (_, None) => "Kein Arbeitstag".to_string(),
+            (_, Some(b)) if today_target > 0 => format!("{b} · Soll {}", store::fmt_hm(today_target)),
+            (_, Some(b)) => b,
         };
         let avg = |x: i64| if mn > 0 { x / mn as i64 } else { 0 };
         let texts = [
             (store::fmt_hm(tw), today_detail),
-            (store::fmt_hm(ww), format!("{} · Pausen {}", plural(wn, "Arbeitstag", "Arbeitstage"), store::fmt_hm(wp))),
-            (store::fmt_hm(mw), format!("{} · Pausen {}", plural(mn, "Arbeitstag", "Arbeitstage"), store::fmt_hm(mp))),
+            (store::fmt_hm(ww), format!("{} · Saldo {}", plural(wn, "Arbeitstag", "Arbeitstage"), rules::fmt_balance(ww - wt))),
+            (store::fmt_hm(mw), format!("{} · Saldo {}", plural(mn, "Arbeitstag", "Arbeitstage"), rules::fmt_balance(mw - mt))),
             (store::fmt_hm(avg(mw)), format!("Pausen Ø {} · im {}", store::fmt_hm(avg(mp)), MONTHS[today.month0() as usize])),
         ];
-        (texts, m.status, recs.len(), m.error.clone())
+        (texts, m.status, recs.len(), m.error.clone(), st.summary())
     });
     for ((value, detail), (v, d)) in ui.cards.iter().zip(texts) {
         value.setStringValue(&ns(&v));
@@ -724,18 +749,14 @@ fn refresh_summary() {
     let subtitle = match status {
         Some(Status::Running) => "Zeiterfassung läuft",
         Some(Status::Paused) => "Zeiterfassung pausiert",
-        Some(Status::Break) => "Mittagspause",
+        Some(Status::Outside) => "Außerhalb des Arbeitszeitrahmens",
         Some(Status::Closed) => "Feierabend",
         None => "Menüleisten-App nicht aktiv",
     };
     ui.window.setSubtitle(&ns(subtitle));
     let footer = match error {
         Some(e) => e,
-        None => format!(
-            "{} erfasst  ·  Tägliche Sicherungen der letzten {} Tage",
-            plural(count, "Arbeitstag", "Arbeitstage"),
-            store::MAX_BACKUPS
-        ),
+        None => format!("{} erfasst  ·  {rules_text}", plural(count, "Arbeitstag", "Arbeitstage")),
     };
     ui.footer.setStringValue(&ns(&footer));
 }
@@ -766,7 +787,7 @@ fn apply(edit: Edit, rebuild: bool) {
             Edit::SetStart(s) => d.start = s,
             Edit::SetEnd(e) => d.end = e,
             Edit::AddBreak(from, to) => {
-                d.breaks.push(Break { from, to: Some(to) });
+                d.breaks.push(Break { from, to });
                 d.sort_breaks();
             }
             Edit::RemoveBreak(i) => {
@@ -785,7 +806,7 @@ fn apply(edit: Edit, rebuild: bool) {
                 if !rebuild {
                     // Eingabe läuft weiter: Felder stehen lassen, nur die Zahlen aktualisieren.
                     if let Some(date) = m.selected {
-                        m.built = Some((date, m.day(date).cloned()));
+                        m.built = Some((date, m.day(date).cloned(), m.settings));
                     }
                 }
             });
@@ -805,9 +826,15 @@ fn show_inspector_error(text: &str) {
     });
 }
 
-fn day_subtitle(day: Option<&Day>, date: NaiveDate) -> String {
-    match day.and_then(|d| d.record(store::open_until(date, now()))) {
-        Some(r) => format!("Arbeitszeit {}  ·  Pausen {}", store::fmt_hm(r.work_secs), store::fmt_hm(r.pause_secs())),
+fn day_subtitle(day: Option<&Day>, settings: &Settings) -> String {
+    match day.and_then(|d| d.record(settings)) {
+        Some(r) if r.work_secs > 0 => format!(
+            "Arbeitszeit {}  ·  Pausen {}  ·  Saldo {}",
+            store::fmt_hm(r.work_secs),
+            store::fmt_hm(r.pause_secs()),
+            rules::fmt_balance(r.work_secs - settings.daily_target(r.date))
+        ),
+        Some(_) => "Keine Arbeitszeit im Arbeitszeitrahmen.".to_string(),
         None => "Für diesen Tag ist noch nichts erfasst.".to_string(),
     }
 }
@@ -818,14 +845,14 @@ fn refresh_inspector(force: bool) {
     let ui = ui();
     let (selected, day, unchanged) = model(|m| {
         let day = m.selected.and_then(|d| m.day(d).cloned());
-        let unchanged = m.selected.is_some_and(|d| m.built.as_ref() == Some(&(d, day.clone())));
+        let unchanged = m.selected.is_some_and(|d| m.built.as_ref() == Some(&(d, day.clone(), m.settings)));
         (m.selected, day, unchanged)
     });
     if !force {
         // Laufende Zahlen (heute) aktualisieren
         model(|m| {
-            if let (Some(i), Some(date)) = (m.inspector.as_ref(), selected) {
-                i.subtitle.setStringValue(&ns(&day_subtitle(day.as_ref(), date)));
+            if let Some(i) = m.inspector.as_ref() {
+                i.subtitle.setStringValue(&ns(&day_subtitle(day.as_ref(), &m.settings)));
             }
         });
         if unchanged || (selected.is_none() && model(|m| m.inspector.is_none() && m.built.is_none())) {
@@ -870,20 +897,19 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         return;
     };
     let t = now();
-    let open_until = store::open_until(date, t);
-    let rec = day.as_ref().and_then(|d| d.record(open_until));
-    let spans = day.as_ref().map(|d| d.spans(open_until)).unwrap_or_default();
+    let (settings, warnings) = model(|m| (m.settings, rules::day_warnings(&m.days, date, &m.settings)));
+    let rec = day.as_ref().and_then(|d| d.record(&settings));
     let is_today = date == t.date();
 
     // Kopf
     let title = label(&fmt_date_long(date));
     title.setFont(Some(&font_semibold(15.0)));
-    let subtitle = label(&day_subtitle(day.as_ref(), date));
+    let subtitle = caption(&day_subtitle(day.as_ref(), &settings));
     subtitle.setFont(Some(&font_digits(NSFont::systemFontSize(), font_regular())));
-    subtitle.setTextColor(Some(&NSColor::secondaryLabelColor()));
     stack.addArrangedSubview(&title);
     stack.addArrangedSubview(&subtitle);
-    if let Some(hint) = Day::legal_hint(&spans) {
+    pin_width(&subtitle, stack, 40.0);
+    for w in &warnings {
         let row = hstack(6.0);
         row.setAlignment(NSLayoutAttribute::CenterY);
         if let Some(img) = symbol("exclamationmark.triangle.fill", "Hinweis") {
@@ -891,7 +917,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
             iv.setContentTintColor(Some(&NSColor::systemOrangeColor()));
             row.addArrangedSubview(&iv);
         }
-        let l = caption(&format!("{hint} (§ 4 ArbZG)."));
+        let l = caption(&format!("{}.", w.text()));
         row.addArrangedSubview(&l);
         stack.addArrangedSubview(&row);
         pin_width(&row, stack, 40.0);
@@ -912,7 +938,12 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
 
     // Arbeitsbeginn
     section("Arbeitsbeginn", None);
-    let auto_first = day.as_ref().and_then(|d| d.periods.first()).map(|p| p.from);
+    let auto = day.as_ref().and_then(|d| d.auto_bounds_in_frame(&settings));
+    // War der Mac auch außerhalb des Rahmens entsperrt, gilt der Wert im Rahmen – dann so benennen.
+    let raw_first = day.as_ref().and_then(|d| d.periods.first()).map(|p| p.from);
+    let raw_last = day.as_ref().and_then(|d| d.periods.last()).map(|p| p.to);
+    let note = |raw: Option<i64>, used: Option<i64>| if raw != used { " im Arbeitszeitrahmen" } else { "" };
+    let (first_in_frame, last_in_frame) = (note(raw_first, auto.map(|a| a.0)), note(raw_last, auto.map(|a| a.1)));
     let manual_start = day.as_ref().and_then(|d| d.start);
     let start_value = manual_start.or(rec.as_ref().map(|r| r.first_start)).unwrap_or(8 * 3600);
     let start_check = checkbox("Manuell festlegen", manual_start.is_some(), sel!(startToggled:), target);
@@ -922,15 +953,22 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     row.addArrangedSubview(&start_check);
     row.addArrangedSubview(&start_picker);
     stack.addArrangedSubview(&row);
-    let start_note = caption(&match auto_first {
-        Some(a) => format!("Ohne Angabe gilt das erste Entsperren um {} Uhr.", fmt_clock(a)),
-        None => "Ohne Angabe gilt das erste Entsperren des Macs.".to_string(),
+    let start_note = caption(&match auto {
+        Some((a, _)) => format!("Ohne Angabe gilt das erste Entsperren{first_in_frame} um {} Uhr.", fmt_clock(a)),
+        None => "Ohne Angabe gilt das erste Entsperren des Macs im Arbeitszeitrahmen.".to_string(),
     });
     stack.addArrangedSubview(&start_note);
     pin_width(&start_note, stack, 40.0);
 
     // Pausen
     section("Pausen", Some(&start_note));
+    let pause_note = caption(&format!(
+        "Sperren ab {} Min. gelten automatisch als Pause, kürzere zählen zur Arbeitszeit. \
+         Hier lassen sich zusätzliche Pausen eintragen.",
+        settings.min_pause / 60
+    ));
+    stack.addArrangedSubview(&pause_note);
+    pin_width(&pause_note, stack, 40.0);
     let breaks = day.as_ref().map(|d| d.breaks.clone()).unwrap_or_default();
     let mut last: Retained<NSView> = Retained::into_super(Retained::into_super(headline("")));
     if breaks.is_empty() {
@@ -942,11 +980,9 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     for (i, b) in breaks.iter().enumerate() {
         let row = hstack(8.0);
         row.setAlignment(NSLayoutAttribute::CenterY);
-        let to = b.to.map(fmt_clock).unwrap_or_else(|| "läuft".into());
-        let times = label(&format!("{} – {}", fmt_clock(b.from), to));
+        let times = label(&format!("{} – {}", fmt_clock(b.from), fmt_clock(b.to)));
         times.setFont(Some(&font_digits(NSFont::systemFontSize(), font_regular())));
-        let len = b.to.unwrap_or(open_until) - b.from;
-        let dur = label(&fmt_dur(len));
+        let dur = label(&fmt_dur(b.to - b.from));
         dur.setFont(Some(&font_digits(NSFont::systemFontSize(), font_regular())));
         dur.setTextColor(Some(&NSColor::secondaryLabelColor()));
         let remove = match symbol("minus.circle.fill", "Pause entfernen") {
@@ -970,19 +1006,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         last = Retained::into_super(row);
     }
     stack.setCustomSpacing_afterView(12.0, &last);
-    let gap = day.as_ref().and_then(|d| d.lunch_gap(&spans));
-    if let Some(g) = gap {
-        let b = button(
-            &format!("Lücke {}–{} als Pause eintragen", fmt_clock(g.from), fmt_clock(g.to)),
-            sel!(acceptGap:),
-            target,
-        );
-        b.setControlSize(NSControlSize::Small);
-        b.setFont(Some(&NSFont::systemFontOfSize(small_size())));
-        stack.addArrangedSubview(&b);
-        stack.setCustomSpacing_afterView(12.0, &b);
-    }
-    let (bf, bt) = gap.map(|g| (g.from, g.to)).unwrap_or((12 * 3600, 12 * 3600 + 1800));
+    let (bf, bt) = (12 * 3600, 12 * 3600 + settings.min_pause.max(30 * 60));
     let break_from = time_picker(date, bf, sel!(exportRange:), target);
     let break_to = time_picker(date, bt, sel!(exportRange:), target);
     // Keine Aktion beim Ändern – übernommen wird erst mit „Hinzufügen“.
@@ -1012,19 +1036,27 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     row.addArrangedSubview(&end_check);
     row.addArrangedSubview(&end_picker);
     stack.addArrangedSubview(&row);
-    let auto_last = day.as_ref().and_then(|d| d.periods.last()).map(|p| p.to);
-    let end_note = caption(&match auto_last {
+    let end_note = caption(&match auto {
         Some(_) if is_today && manual_end.is_none() => {
             "Ohne Angabe gilt das letzte Sperren. Mit Feierabend wird heute nichts mehr erfasst.".to_string()
         }
-        Some(a) => format!("Ohne Angabe gilt das letzte Sperren um {} Uhr. Ein späterer Feierabend wird mitgezählt.", fmt_clock(a)),
-        None => "Ohne Angabe gilt das letzte Sperren des Macs.".to_string(),
+        Some((_, a)) => format!(
+            "Ohne Angabe gilt das letzte Sperren{last_in_frame} um {} Uhr. Ein späterer Feierabend wird mitgezählt.",
+            fmt_clock(a)
+        ),
+        None => "Ohne Angabe gilt das letzte Sperren des Macs im Arbeitszeitrahmen.".to_string(),
     });
     stack.addArrangedSubview(&end_note);
     pin_width(&end_note, stack, 40.0);
 
     // Automatisch erfasst
     section("Automatisch erfasst", Some(&end_note));
+    let raw_note = caption(&format!(
+        "Zeiten, in denen der Mac entsperrt war. Gezählt wird nur im Arbeitszeitrahmen ({}).",
+        settings.frame_text()
+    ));
+    stack.addArrangedSubview(&raw_note);
+    pin_width(&raw_note, stack, 40.0);
     let periods: Vec<Span> = day.as_ref().map(|d| d.periods.clone()).unwrap_or_default();
     if periods.is_empty() {
         let none = label("Keine – der Mac war nicht entsperrt.");
@@ -1051,7 +1083,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     pin_width(&error, stack, 40.0);
 
     model(|m| {
-        m.built = Some((date, day));
+        m.built = Some((date, day, settings));
         m.inspector = Some(Inspector {
             date,
             subtitle,
@@ -1285,8 +1317,10 @@ fn export_finished(response: NSModalResponse) {
     let Some((from, to)) = export_range(&ex) else { return };
     let result = model(|m| -> Result<usize, String> {
         let db = m.db.as_ref().ok_or("Keine Datenbank geöffnet.")?;
-        let days = db.load_range(from, to).map_err(|e| format!("Lesen fehlgeschlagen: {e}"))?;
-        std::fs::write(&path, store::export_markdown(&days, from, to, now()))
+        let days = db
+            .load_range(from - Duration::days(1), to)
+            .map_err(|e| format!("Lesen fehlgeschlagen: {e}"))?;
+        std::fs::write(&path, store::export_markdown(&days, from, to, now(), &m.settings))
             .map_err(|e| format!("Schreiben fehlgeschlagen: {e}"))?;
         Ok(days.len())
     });
@@ -1387,6 +1421,8 @@ fn build_main_menu(app: &NSApplication, target: &Controller) {
         "Tagwerk",
         vec![
             Some(menu_item("Über Tagwerk", Some(sel!(orderFrontStandardAboutPanel:)), "", cmd, None)),
+            None,
+            Some(menu_item("Einstellungen …", Some(sel!(showSettings:)), ",", cmd, Some(target))),
             None,
             Some(menu_item("Tagwerk ausblenden", Some(sel!(hide:)), "h", cmd, None)),
             Some(menu_item("Andere ausblenden", Some(sel!(hideOtherApplications:)), "h", cmd | NSEventModifierFlags::Option, None)),
@@ -1554,7 +1590,8 @@ fn build_window(controller: &Retained<Controller>, shot: bool) -> Ui {
         table.setDataSource(Some(ProtocolObject::from_ref(&**controller)));
         table.setDelegate(Some(ProtocolObject::from_ref(&**controller)));
     }
-    table.setAutosaveName(Some(&ns("TagwerkRecordsTable")));
+    // Neuer Name seit der Spalte „Saldo“: alte gespeicherte Spaltenbreiten passen nicht mehr.
+    table.setAutosaveName(Some(&ns("TagwerkRecordsTable2")));
     table.setAutosaveTableColumns(true);
     let table_scroll = NSScrollView::new(mtm);
     table_scroll.setDocumentView(Some(&table));

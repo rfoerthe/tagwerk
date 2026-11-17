@@ -1,2 +1,6 @@
 /target/
 /.idea/
+/testdata/generate_testdata.py
+/testdata/tagwerk.db
+/testdata/testdaten.md
+/testdata/testdb.sh
