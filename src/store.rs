@@ -696,9 +696,9 @@ pub fn export_markdown(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
     Running,
-    /// Angehalten (z. B. gesperrt), ohne dass der Benutzer „Pausieren“ gewählt hat.
+    /// Angehalten (z. B. gesperrt), ohne dass der Benutzer „Arbeit unterbrechen“ gewählt hat.
     Paused,
-    /// Der Benutzer hat „Pausieren“ gewählt – seit diesem Zeitpunkt.
+    /// Der Benutzer hat „Arbeit unterbrechen“ gewählt – seit diesem Zeitpunkt.
     Break(NaiveDateTime),
     /// Außerhalb des Arbeitszeitrahmens: es wird nichts gezählt.
     Outside,

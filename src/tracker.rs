@@ -1,9 +1,9 @@
 //! Zeiterfassungs-Logik: automatische Perioden starten/stoppen, manuelle Entscheidungen
-//! (Pausieren, Arbeitsbeginn, Feierabend) eintragen und alles auf Tage verteilen.
+//! (Arbeit unterbrechen, Arbeitsbeginn, Feierabend) eintragen und alles auf Tage verteilen.
 //!
-//! Pausen entstehen durch Sperren des Macs oder über „Pausieren“. Eine Unterbrechung, die
+//! Pausen entstehen durch Sperren des Macs oder über „Arbeit unterbrechen“. Eine Unterbrechung, die
 //! mindestens so lange dauert wie die eingestellte Mindestpause, ist eine Pause; kürzere
-//! zählen zur Arbeitszeit. Eine Pause über „Pausieren“ endet mit „Weiter arbeiten“ oder
+//! zählen zur Arbeitszeit. Eine Pause über „Arbeit unterbrechen“ endet mit „Weiter arbeiten“ oder
 //! beim nächsten Entsperren bzw. Aufwachen des Macs.
 
 use crate::day::{self, Day, Mode, DAY_END};
@@ -17,7 +17,7 @@ pub enum PauseReason {
     Startup,
     /// Beenden der App, Feierabend o. Ä. (überschreibt keinen anderen Grund).
     Manual,
-    /// Der Benutzer hat „Pausieren“ gewählt.
+    /// Der Benutzer hat „Arbeit unterbrechen“ gewählt.
     Break,
     Locked,
     Sleep,
@@ -80,18 +80,18 @@ impl Tracker {
         self.running_since.is_some()
     }
 
-    /// Pause über „Pausieren“ (endet nicht von selbst, nur durch „Weiter arbeiten“ oder
+    /// Pause über „Arbeit unterbrechen“ (endet nicht von selbst, nur durch „Weiter arbeiten“ oder
     /// Entsperren/Aufwachen).
     pub fn on_break(&self) -> bool {
         self.running_since.is_none() && self.pause_reason == PauseReason::Break
     }
 
-    /// „Pausieren“: laufende Erfassung anhalten.
+    /// „Arbeit unterbrechen“: laufende Erfassung anhalten.
     pub fn take_break(&mut self, now: NaiveDateTime) -> bool {
         self.running_since.is_some() && self.stop(now, PauseReason::Break)
     }
 
-    /// Eine Pause über „Pausieren“ fortsetzen, die vor einem Neustart der App begonnen hat.
+    /// Eine Pause über „Arbeit unterbrechen“ fortsetzen, die vor einem Neustart der App begonnen hat.
     pub fn restore_break(&mut self, since: NaiveDateTime) {
         self.running_since = None;
         self.paused_since = Some(since);

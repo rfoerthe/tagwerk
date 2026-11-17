@@ -1,6 +1,6 @@
 //! Menüleisten-App (NSStatusItem) mit Erkennung von Sperren/Entsperren des Macs
-//! und manuellen Entscheidungen: Pausieren/Weiter arbeiten, Arbeitsbeginn, Feierabend.
-//! Pausen ergeben sich aus den Sperrzeiten und aus „Pausieren“ (jeweils ab der
+//! und manuellen Entscheidungen: Arbeit unterbrechen/Weiter arbeiten, Arbeitsbeginn, Feierabend.
+//! Pausen ergeben sich aus den Sperrzeiten und aus „Arbeit unterbrechen“ (jeweils ab der
 //! eingestellten Mindestdauer).
 
 use crate::day::{self, fmt_clock, Mode};
@@ -55,7 +55,7 @@ struct MenuItems {
     balance: Retained<NSMenuItem>,
     /// Hinweise zu Regelverstößen (so viele, wie es Arten von Hinweisen gibt).
     hints: Vec<Retained<NSMenuItem>>,
-    /// „Pausieren“ bzw. „Weiter arbeiten“.
+    /// „Arbeit unterbrechen“ bzw. „Weiter arbeiten“.
     pause: Retained<NSMenuItem>,
     start_reset: Retained<NSMenuItem>,
     close: Retained<NSMenuItem>,
@@ -127,7 +127,7 @@ define_class!(
     }
 
     impl Controller {
-        /// „Pausieren“ ↔ „Weiter arbeiten“.
+        /// „Arbeit unterbrechen“ ↔ „Weiter arbeiten“.
         #[unsafe(method(togglePause:))]
         fn toggle_pause(&self, _sender: Option<&AnyObject>) {
             act(|s, t| {
@@ -224,12 +224,6 @@ define_class!(
             settings_window::show(settings_changed);
         }
 
-        #[unsafe(method(openFolder:))]
-        fn open_folder(&self, _sender: Option<&AnyObject>) {
-            let _ = std::fs::create_dir_all(store::data_dir());
-            let _ = Command::new("/usr/bin/open").arg(store::data_dir()).spawn();
-        }
-
         #[unsafe(method(toggleLogin:))]
         fn toggle_login(&self, _sender: Option<&AnyObject>) {
             let enable = !login_item_enabled();
@@ -309,7 +303,7 @@ define_class!(
             shutdown();
         }
 
-        /// Abmelden, Neustart, Ausschalten: Eine Pause über „Pausieren“ endet damit (nach
+        /// Abmelden, Neustart, Ausschalten: Eine Pause über „Arbeit unterbrechen“ endet damit (nach
         /// dem Anmelden wird wieder erfasst). Beim bloßen Beenden der App bleibt sie bestehen.
         #[unsafe(method(willPowerOff:))]
         fn will_power_off(&self, _n: &NSNotification) {
@@ -546,7 +540,7 @@ impl AppState {
 
         let closed = matches!(info.mode, Mode::Closed(_));
         self.items.pause.setHidden(closed);
-        let (title, symbol) = if running { ("Pausieren", "pause.fill") } else { ("Weiter arbeiten", "play.fill") };
+        let (title, symbol) = if running { ("Arbeit unterbrechen", "pause.fill") } else { ("Weiter arbeiten", "play.fill") };
         if self.items.pause.title().to_string() != title {
             self.items.pause.setTitle(&ns(title));
             set_item_symbol(&self.items.pause, symbol, title);
@@ -914,7 +908,6 @@ pub fn run() {
     let records = menu_item(mtm, "Aufzeichnungen …", Some(sel!(showRecords:)), "a", &controller);
     let week = menu_item(mtm, "Wochenansicht …", Some(sel!(showWeek:)), "w", &controller);
     let settings = menu_item(mtm, "Einstellungen …", Some(sel!(showSettings:)), ",", &controller);
-    let folder = menu_item(mtm, "Datenordner im Finder zeigen", Some(sel!(openFolder:)), "", &controller);
     let quit = menu_item(mtm, "Tagwerk beenden", Some(sel!(quit:)), "q", &controller);
 
     for (item, symbol, desc) in [
@@ -928,7 +921,6 @@ pub fn run() {
         (&records, "tablecells", "Aufzeichnungen"),
         (&week, "calendar", "Wochenansicht"),
         (&settings, "gearshape", "Einstellungen"),
-        (&folder, "folder", "Datenordner"),
         (&quit, "power", "Beenden"),
     ] {
         set_item_symbol(item, symbol, desc);
@@ -955,7 +947,6 @@ pub fn run() {
     menu.addItem(&week);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&settings);
-    menu.addItem(&folder);
     menu.addItem(&items.login);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&quit);
@@ -983,7 +974,7 @@ pub fn run() {
     let t = now();
     tracker.roll_over(t);
     let locked = screen_locked();
-    // Pause über „Pausieren“ vor dem Beenden der App? Dann bleibt sie bestehen.
+    // Pause über „Arbeit unterbrechen“ vor dem Beenden der App? Dann bleibt sie bestehen.
     let open_break = match store::read_status() {
         Some(store::Status::Break(since)) if !locked && since <= t && since.date() == t.date() => Some(since),
         _ => None,

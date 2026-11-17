@@ -3,7 +3,7 @@
 Tagwerk ist eine kleine Menüleisten-App für macOS, die deine Arbeitszeit automatisch
 erfasst: gezählt wird die Zeit, in der der Mac entsperrt ist. Sperrst du den Mac für
 mindestens 15 Minuten, ist das eine Pause; kürzere Unterbrechungen zählen weiter zur
-Arbeitszeit. Über „Pausieren“ in der Menüleiste lässt sich eine Pause auch ohne Sperren
+Arbeitszeit. Über „Arbeit unterbrechen“ in der Menüleiste lässt sich eine Pause auch ohne Sperren
 einlegen. Arbeitsbeginn und Feierabend lassen sich zusätzlich von Hand festlegen oder
 korrigieren.
 
@@ -14,7 +14,7 @@ korrigieren.
 - **Pausen ohne Zutun** – jede Sperre ab der eingestellten Mindestdauer (Standard
   15 Minuten) ist eine Pause, egal ob Mittagspause oder Kaffeepause. Kürzere Sperren
   zählen zum laufenden Arbeitsblock.
-- **Pausieren / Weiter arbeiten** – der Menüpunkt (⌘P bei geöffnetem Menü) hält die
+- **Arbeit unterbrechen / Weiter arbeiten** – der Menüpunkt (⌘P bei geöffnetem Menü) hält die
   Erfassung an, auch wenn der Mac entsperrt bleibt, und setzt sie fort. Wird der Mac
   während der Pause gesperrt oder geht in den Ruhezustand, läuft die Erfassung nach dem
   Entsperren bzw. Aufwachen von selbst wieder. Auch hier gilt die Mindestdauer: Eine
@@ -34,7 +34,8 @@ korrigieren.
 - **Hinweise bei Regelverstößen** – siehe [Regeln](#regeln).
 - **Einstellungen** – Arbeitszeitrahmen, Regelwochenarbeitszeit und Mindestpause
   (Menüleiste „Einstellungen …“ oder ⌘, im Fenster „Aufzeichnungen“). Änderungen gelten
-  sofort, auch für bereits erfasste Tage.
+  sofort, auch für bereits erfasste Tage. Der Ordner-Knopf rechts in der Titelleiste
+  zeigt den Datenordner im Finder.
 - **Fenster „Aufzeichnungen“** – natives macOS-Fenster mit Kennzahlen (heute, Woche,
   Monat, Durchschnitt), einer Tabelle aller Tage mit Saldo und Wochensummen und einem
   Inspektor, in dem sich Arbeitsbeginn, Pausen und Feierabend eines Tages korrigieren
@@ -45,6 +46,10 @@ korrigieren.
   Korrekturen (Arbeitsbeginn, Feierabend, Pausen). Blättern mit ‹ › oder den
   Pfeiltasten, „Heute“ (⌘T) springt zur aktuellen Woche; ein Doppelklick auf einen Tag
   öffnet das Fenster „Aufzeichnungen“, der Tooltip eines Blocks nennt manuelle Grenzen.
+  Ein Klick auf die Uhrzeit von Beginn oder Ende kopiert sie in die Zwischenablage
+  (kurz hervorgehoben mit „… kopiert“). Tage mit Regelverstößen tragen ein Warnschild;
+  ein Klick auf den Tageskopf zeigt die Hinweise. Arbeit außerhalb des
+  Arbeitszeitrahmens erscheint orange als „nicht gezählt“.
 - **Export als Markdown** – für einen frei wählbaren Zeitraum (Standard: die letzten
   vier Wochen) im Fenster „Aufzeichnungen“ oder über die Kommandozeile.
 - **Bei Anmeldung starten** – per Menüpunkt als Anmeldeobjekt eintragen
@@ -64,7 +69,7 @@ verändert.
 | Pausen (§ 4 ArbZG)   | mehr als 6 Std. Arbeit: 30 Min., mehr als 9 Std.: 45 Min.; es zählen Pausen ab 15 Min. |
 | Ruhezeit (§ 5 ArbZG) | mindestens 11 Std. zwischen dem Ende eines Arbeitstags und dem nächsten Beginn |
 | Höchstarbeitszeit    | mehr als 10 Std. Arbeit an einem Tag                                    |
-| Erfassung            | Beginn und Ende durch Entsperren/Sperren oder Pausieren/Weiter arbeiten; keine Einträge in der Zukunft |
+| Erfassung            | Beginn und Ende durch Entsperren/Sperren oder Arbeit unterbrechen/Weiter arbeiten; keine Einträge in der Zukunft |
 
 Der Saldo vergleicht die Arbeitszeit mit dem Soll – aber nur für Tage, an denen
 gearbeitet wurde. Urlaub, Feiertage oder Krankheit drücken den Saldo also nicht; Arbeit

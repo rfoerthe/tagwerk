@@ -4,16 +4,18 @@
 //! Einstellbar sind der Arbeitszeitrahmen, die Regelwochenarbeitszeit und die
 //! Mindestdauer einer Pause. Gespeichert wird in der Datenbank; die jeweils andere
 //! Tagwerk-Instanz (Menüleiste bzw. Fenster „Aufzeichnungen“) übernimmt die Werte.
+//!
+//! Rechts in der Symbolleiste öffnet ein Ordner-Knopf den Datenordner im Finder.
 
 use crate::day::{secs_of, DAY_END};
 use crate::rules::{self, Settings, MIN_PAUSE_RANGE, WEEKLY_RANGE};
 use crate::store;
 use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, TimeZone};
 use objc2::rc::Retained;
-use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
+use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::*;
-use objc2_foundation::{NSArray, NSDate, NSLocale, NSPoint, NSRect, NSSize, NSString};
+use objc2_foundation::{NSArray, NSCopying, NSDate, NSLocale, NSPoint, NSRect, NSSize, NSString, NSURL};
 use std::cell::RefCell;
 
 fn ns(s: &str) -> Retained<NSString> {
@@ -72,6 +74,23 @@ define_class!(
 
     unsafe impl NSObjectProtocol for Controller {}
 
+    unsafe impl NSToolbarDelegate for Controller {
+        #[unsafe(method_id(toolbarDefaultItemIdentifiers:))]
+        fn toolbar_default(&self, _toolbar: &NSToolbar) -> Retained<NSArray<NSString>> {
+            toolbar_ids()
+        }
+
+        #[unsafe(method_id(toolbarAllowedItemIdentifiers:))]
+        fn toolbar_allowed(&self, _toolbar: &NSToolbar) -> Retained<NSArray<NSString>> {
+            toolbar_ids()
+        }
+
+        #[unsafe(method_id(toolbar:itemForItemIdentifier:willBeInsertedIntoToolbar:))]
+        fn toolbar_item(&self, _toolbar: &NSToolbar, id: &NSString, _insert: bool) -> Option<Retained<NSToolbarItem>> {
+            toolbar_item(self, id)
+        }
+    }
+
     impl Controller {
         #[unsafe(method(frameChanged:))]
         fn frame_changed(&self, _sender: Option<&AnyObject>) {
@@ -127,6 +146,15 @@ define_class!(
                 s.set_pause(Some(value));
             });
             save();
+        }
+
+        /// Knopf in der Titelleiste: Datenordner im Finder öffnen.
+        #[unsafe(method(openDataFolder:))]
+        fn open_data_folder(&self, _sender: Option<&AnyObject>) {
+            let dir = store::data_dir();
+            let _ = std::fs::create_dir_all(&dir);
+            let url = NSURL::fileURLWithPath(&ns(&dir.to_string_lossy()));
+            NSWorkspace::sharedWorkspace().openURL(&url);
         }
 
         #[unsafe(method(resetDefaults:))]
@@ -295,6 +323,33 @@ fn view<T: AsRef<NSView>>(v: &T) -> Retained<NSView> {
     v.as_ref().retain()
 }
 
+/// Kennung des Ordner-Knopfs in der Symbolleiste.
+const TB_FOLDER: &str = "folder";
+
+fn toolbar_ids() -> Retained<NSArray<NSString>> {
+    let flex: Retained<NSString> = unsafe { NSToolbarFlexibleSpaceItemIdentifier }.copy();
+    NSArray::from_retained_slice(&[flex, ns(TB_FOLDER)])
+}
+
+/// Ordner-Knopf rechts in der Symbolleiste (wie die Knöpfe im Fenster „Aufzeichnungen“).
+fn toolbar_item(target: &Controller, id: &NSString) -> Option<Retained<NSToolbarItem>> {
+    if id.to_string() != TB_FOLDER {
+        return None;
+    }
+    let label = "Datenordner";
+    let item = NSToolbarItem::initWithItemIdentifier(NSToolbarItem::alloc(mtm()), id);
+    item.setLabel(&ns(label));
+    item.setPaletteLabel(&ns(label));
+    item.setToolTip(Some(&ns("Datenordner im Finder zeigen")));
+    item.setImage(NSImage::imageWithSystemSymbolName_accessibilityDescription(&ns("folder"), Some(&ns(label))).as_deref());
+    item.setBordered(true);
+    unsafe {
+        item.setTarget(Some(target));
+        item.setAction(Some(sel!(openDataFolder:)));
+    }
+    Some(item)
+}
+
 fn build(on_change: fn()) -> State {
     let mtm = mtm();
     let controller = Controller::new(mtm);
@@ -380,12 +435,20 @@ fn build(on_change: fn()) -> State {
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(&ns("Einstellungen"));
     window.setTabbingMode(NSWindowTabbingMode::Disallowed);
+    window.setToolbarStyle(NSWindowToolbarStyle::Unified);
+    let toolbar = NSToolbar::initWithIdentifier(NSToolbar::alloc(mtm), &ns("TagwerkSettingsToolbar"));
+    toolbar.setDelegate(Some(ProtocolObject::from_ref(target)));
+    toolbar.setDisplayMode(NSToolbarDisplayMode::IconOnly);
+    toolbar.setAllowsUserCustomization(false);
+    window.setToolbar(Some(&toolbar));
     let root = window.contentView().expect("contentView");
     root.addSubview(&grid);
     grid.leadingAnchor().constraintEqualToAnchor_constant(&root.leadingAnchor(), 20.0).setActive(true);
     grid.trailingAnchor().constraintEqualToAnchor_constant(&root.trailingAnchor(), -20.0).setActive(true);
     grid.topAnchor().constraintEqualToAnchor_constant(&root.topAnchor(), 20.0).setActive(true);
     grid.bottomAnchor().constraintEqualToAnchor_constant(&root.bottomAnchor(), -20.0).setActive(true);
+    // Die Symbolleiste verändert die Fenstergröße; Inhalt wieder passend machen.
+    window.setContentSize(NSSize::new(w, h));
     window.center();
 
     let (db, settings, err) = match store::Db::open() {
