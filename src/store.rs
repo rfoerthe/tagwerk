@@ -11,7 +11,7 @@
 //! Die Markdown-Datei früherer Versionen (`tagwerk.md`) wird beim ersten Öffnen der
 //! Datenbank einmalig übernommen und danach in `tagwerk.md.importiert` umbenannt.
 
-use crate::day::{self, fmt_clock_s, parse_clock, Break, Day, Mode, Span, DAY_END};
+use crate::day::{self, fmt_clock_s, parse_clock, Break, Day, Span, DAY_END};
 use crate::rules::{self, Settings};
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Weekday};
 use rusqlite::{params, Connection, TransactionBehavior};
@@ -89,11 +89,6 @@ pub fn db_file() -> PathBuf {
 /// Kleine Statusdatei, damit das Fenster "Aufzeichnungen" weiß, ob gerade erfasst wird.
 pub fn status_file() -> PathBuf {
     data_dir().join(".status")
-}
-
-/// Markierung: Das Fenster „Aufzeichnungen“ soll den Export-Dialog öffnen.
-pub fn export_request_file() -> PathBuf {
-    data_dir().join(".export-request")
 }
 
 fn date_key(d: NaiveDate) -> String {
@@ -701,33 +696,49 @@ pub fn export_markdown(
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Status {
     Running,
+    /// Angehalten (z. B. gesperrt), ohne dass der Benutzer „Pausieren“ gewählt hat.
     Paused,
+    /// Der Benutzer hat „Pausieren“ gewählt – seit diesem Zeitpunkt.
+    Break(NaiveDateTime),
     /// Außerhalb des Arbeitszeitrahmens: es wird nichts gezählt.
     Outside,
     Closed,
 }
 
-pub fn write_status(running: bool, mode: Mode, in_frame: bool) {
-    let text = match (mode, running) {
-        (Mode::Closed(_), _) => "closed",
-        (Mode::Auto, _) if !in_frame => "outside",
-        (Mode::Auto, true) => "running",
-        (Mode::Auto, false) => "paused",
-    };
+const STATUS_TIME: &str = "%Y-%m-%dT%H:%M:%S";
+
+impl Status {
+    fn to_line(self) -> String {
+        match self {
+            Status::Running => "running".into(),
+            Status::Paused => "paused".into(),
+            Status::Break(since) => format!("break {}", since.format(STATUS_TIME)),
+            Status::Outside => "outside".into(),
+            Status::Closed => "closed".into(),
+        }
+    }
+
+    fn parse(line: &str) -> Option<Self> {
+        let mut words = line.split_whitespace();
+        match words.next()? {
+            "running" => Some(Status::Running),
+            "paused" => Some(Status::Paused),
+            "break" => NaiveDateTime::parse_from_str(words.next()?, STATUS_TIME).ok().map(Status::Break),
+            "outside" => Some(Status::Outside),
+            "closed" => Some(Status::Closed),
+            _ => None,
+        }
+    }
+}
+
+pub fn write_status(status: Status) {
     let _ = fs::create_dir_all(data_dir());
-    let _ = fs::write(status_file(), format!("{text}\n"));
+    let _ = fs::write(status_file(), format!("{}\n", status.to_line()));
 }
 
 /// `None` = unbekannt (App läuft nicht).
 pub fn read_status() -> Option<Status> {
-    let text = fs::read_to_string(status_file()).ok()?;
-    match text.trim() {
-        "running" => Some(Status::Running),
-        "paused" => Some(Status::Paused),
-        "outside" => Some(Status::Outside),
-        "closed" => Some(Status::Closed),
-        _ => None,
-    }
+    Status::parse(&fs::read_to_string(status_file()).ok()?)
 }
 
 #[cfg(test)]
@@ -736,6 +747,18 @@ mod tests {
 
     fn h(hh: i64, mm: i64) -> i64 {
         hh * 3600 + mm * 60
+    }
+
+    #[test]
+    fn status_line_round_trip() {
+        let since = date(17).and_hms_opt(12, 3, 9).unwrap();
+        for st in [Status::Running, Status::Paused, Status::Break(since), Status::Outside, Status::Closed] {
+            assert_eq!(Status::parse(&st.to_line()), Some(st));
+        }
+        assert_eq!(Status::to_line(Status::Break(since)), "break 2026-11-17T12:03:09");
+        assert_eq!(Status::parse("break"), None);
+        assert_eq!(Status::parse("break\n"), None);
+        assert_eq!(Status::parse("paused\n"), Some(Status::Paused));
     }
 
     fn date(d: u32) -> NaiveDate {

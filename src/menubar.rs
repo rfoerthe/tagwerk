@@ -1,6 +1,7 @@
 //! Menüleisten-App (NSStatusItem) mit Erkennung von Sperren/Entsperren des Macs
-//! und manuellen Entscheidungen: Arbeitsbeginn, Feierabend. Pausen ergeben sich aus
-//! den Sperrzeiten (ab der eingestellten Mindestdauer).
+//! und manuellen Entscheidungen: Pausieren/Weiter arbeiten, Arbeitsbeginn, Feierabend.
+//! Pausen ergeben sich aus den Sperrzeiten und aus „Pausieren“ (jeweils ab der
+//! eingestellten Mindestdauer).
 
 use crate::day::{self, fmt_clock, Mode};
 use crate::rules;
@@ -53,6 +54,8 @@ struct MenuItems {
     balance: Retained<NSMenuItem>,
     /// Hinweise zu Regelverstößen (so viele, wie es Arten von Hinweisen gibt).
     hints: Vec<Retained<NSMenuItem>>,
+    /// „Pausieren“ bzw. „Weiter arbeiten“.
+    pause: Retained<NSMenuItem>,
     start_reset: Retained<NSMenuItem>,
     close: Retained<NSMenuItem>,
     reopen: Retained<NSMenuItem>,
@@ -65,6 +68,7 @@ struct MenuItems {
 enum IconKind {
     Running,
     Paused,
+    Break,
     Outside,
     Closed,
 }
@@ -122,6 +126,18 @@ define_class!(
     }
 
     impl Controller {
+        /// „Pausieren“ ↔ „Weiter arbeiten“.
+        #[unsafe(method(togglePause:))]
+        fn toggle_pause(&self, _sender: Option<&AnyObject>) {
+            act(|s, t| {
+                if s.tracker.is_running() {
+                    s.tracker.take_break(t);
+                } else {
+                    s.tracker.start(t);
+                }
+            });
+        }
+
         #[unsafe(method(setStart:))]
         fn set_start(&self, sender: Option<&NSMenuItem>) {
             let tag = sender.map(|s| s.tag()).unwrap_or(0);
@@ -187,17 +203,6 @@ define_class!(
             });
         }
 
-        #[unsafe(method(exportRecords:))]
-        fn export_records(&self, _sender: Option<&AnyObject>) {
-            with_state(|s| {
-                let t = now();
-                s.sync_from_db(t);
-                s.persist(t);
-                let _ = std::fs::write(store::export_request_file(), "1");
-                s.open_records_window();
-            });
-        }
-
         #[unsafe(method(showSettings:))]
         fn show_settings(&self, _sender: Option<&AnyObject>) {
             settings_window::show(settings_changed);
@@ -235,6 +240,7 @@ define_class!(
                     dirty |= s.tracker.stop(t, PauseReason::Locked);
                 } else if !s.tracker.is_running()
                     && !locked
+                    && !s.tracker.on_break()
                     && s.tracker.paused_since.is_some_and(|p| p.date() == t.date())
                 {
                     // Entsperrt, aber nicht erfasst (z. B. Feierabend im Fenster zurückgenommen).
@@ -284,6 +290,18 @@ define_class!(
 
         #[unsafe(method(willTerminate:))]
         fn will_terminate(&self, _n: &NSNotification) {
+            shutdown();
+        }
+
+        /// Abmelden, Neustart, Ausschalten: Eine Pause über „Pausieren“ endet damit (nach
+        /// dem Anmelden wird wieder erfasst). Beim bloßen Beenden der App bleibt sie bestehen.
+        #[unsafe(method(willPowerOff:))]
+        fn will_power_off(&self, _n: &NSNotification) {
+            with_state(|s| {
+                if s.tracker.on_break() {
+                    s.tracker.pause_reason = PauseReason::Manual;
+                }
+            });
             shutdown();
         }
     }
@@ -421,26 +439,27 @@ impl AppState {
         if let Err(e) = self.tracker.save(&mut self.db, t) {
             eprintln!("Tagwerk: Speichern fehlgeschlagen: {e}");
         }
-        store::write_status(self.tracker.is_running(), self.tracker.mode(t), self.tracker.in_frame(t));
+        store::write_status(self.tracker.status(t));
         self.last_save = Instant::now();
     }
 
     fn refresh(&mut self) {
         let t = now();
         let running = self.tracker.is_running();
+        let status = self.tracker.status(t);
         let info = self.tracker.today(t);
         let mtm = MainThreadMarker::new().expect("main thread");
         let midnight = t.date().and_hms_opt(0, 0, 0).unwrap();
 
-        let in_frame = self.tracker.in_frame(t);
-        let (status, icon) = match info.mode {
-            Mode::Closed(at) => (format!("Feierabend um {} Uhr", fmt_clock(at)), IconKind::Closed),
-            Mode::Auto if !in_frame => (
+        let (status_text, icon) = match (status, info.mode) {
+            (_, Mode::Closed(at)) => (format!("Feierabend um {} Uhr", fmt_clock(at)), IconKind::Closed),
+            (store::Status::Break(since), _) => (break_text(since, t, self.tracker.settings.min_pause), IconKind::Break),
+            (store::Status::Outside, _) => (
                 format!("Außerhalb des Arbeitszeitrahmens ({})", self.tracker.settings.frame_text()),
                 IconKind::Outside,
             ),
-            Mode::Auto if running => ("Zeiterfassung läuft".to_string(), IconKind::Running),
-            Mode::Auto => (
+            (store::Status::Running, _) => ("Zeiterfassung läuft".to_string(), IconKind::Running),
+            _ => (
                 match self.tracker.paused_since {
                     Some(p) if p.date() == t.date() => {
                         format!("Zeiterfassung pausiert seit {} Uhr", p.format("%H:%M"))
@@ -450,7 +469,7 @@ impl AppState {
                 IconKind::Paused,
             ),
         };
-        self.items.status.setTitle(&ns(&status));
+        self.items.status.setTitle(&ns(&status_text));
         if self.last_icon != Some(icon) {
             set_item_symbol(&self.items.status, icon.symbol().0, icon.symbol().2);
         }
@@ -500,6 +519,12 @@ impl AppState {
         self.items.start_reset.setTitle(&ns(&reset));
 
         let closed = matches!(info.mode, Mode::Closed(_));
+        self.items.pause.setHidden(closed);
+        let (title, symbol) = if running { ("Pausieren", "pause.fill") } else { ("Weiter arbeiten", "play.fill") };
+        if self.items.pause.title().to_string() != title {
+            self.items.pause.setTitle(&ns(title));
+            set_item_symbol(&self.items.pause, symbol, title);
+        }
         self.items.close.setHidden(closed);
         self.items.reopen.setHidden(!closed);
         self.items.login.setState(if login_item_enabled() { 1 } else { 0 });
@@ -508,6 +533,7 @@ impl AppState {
             let state = match icon {
                 IconKind::Running => "läuft",
                 IconKind::Paused => "pausiert",
+                IconKind::Break => "Pause",
                 IconKind::Outside => "außerhalb des Arbeitszeitrahmens",
                 IconKind::Closed => "Feierabend",
             };
@@ -558,12 +584,28 @@ impl AppState {
     }
 }
 
+/// „Pause seit 12:03 Uhr“; solange die Mindestpause nicht erreicht ist, mit Hinweis,
+/// dass die Zeit noch als Arbeitszeit zählt.
+fn break_text(since: NaiveDateTime, t: NaiveDateTime, min_pause: i64) -> String {
+    let at = if since.date() == t.date() {
+        format!("{} Uhr", since.format("%H:%M"))
+    } else {
+        format!("{} Uhr", since.format("%d.%m. %H:%M"))
+    };
+    if (t - since).num_seconds() < min_pause {
+        format!("Pause seit {at} (zählt ab {} Min.)", min_pause / 60)
+    } else {
+        format!("Pause seit {at}")
+    }
+}
+
 impl IconKind {
     /// SF-Symbol, Ersatzzeichen (falls das Symbol fehlt) und Beschreibung.
     fn symbol(self) -> (&'static str, &'static str, &'static str) {
         match self {
             IconKind::Running => ("clock.fill", "◷", "Zeiterfassung läuft"),
             IconKind::Paused => ("pause.circle", "⏸", "Zeiterfassung pausiert"),
+            IconKind::Break => ("cup.and.saucer.fill", "☕", "Pause"),
             IconKind::Outside => ("moon.stars", "☾", "Außerhalb des Arbeitszeitrahmens"),
             IconKind::Closed => ("moon.zzz", "☾", "Feierabend"),
         }
@@ -823,6 +865,7 @@ pub fn run() {
         balance: menu_item(mtm, "Saldo diese Woche:", None, "", &controller),
         // Anklickbar (öffnet den heutigen Tag), damit macOS die Warnfarbe nicht ausgraut.
         hints: (0..5).map(|_| menu_item(mtm, "", Some(sel!(showToday:)), "", &controller)).collect(),
+        pause: menu_item(mtm, "", Some(sel!(togglePause:)), "p", &controller),
         start_reset,
         close,
         reopen: menu_item(mtm, "Feierabend aufheben", Some(sel!(reopenDay:)), "", &controller),
@@ -830,7 +873,6 @@ pub fn run() {
         relative,
     };
     let records = menu_item(mtm, "Aufzeichnungen …", Some(sel!(showRecords:)), "a", &controller);
-    let export = menu_item(mtm, "Als Markdown exportieren …", Some(sel!(exportRecords:)), "e", &controller);
     let settings = menu_item(mtm, "Einstellungen …", Some(sel!(showSettings:)), ",", &controller);
     let folder = menu_item(mtm, "Datenordner im Finder zeigen", Some(sel!(openFolder:)), "", &controller);
     let quit = menu_item(mtm, "Tagwerk beenden", Some(sel!(quit:)), "q", &controller);
@@ -844,7 +886,6 @@ pub fn run() {
         (&items.close, "moon", "Feierabend"),
         (&items.reopen, "arrow.uturn.backward", "Feierabend aufheben"),
         (&records, "tablecells", "Aufzeichnungen"),
-        (&export, "square.and.arrow.up", "Exportieren"),
         (&settings, "gearshape", "Einstellungen"),
         (&folder, "folder", "Datenordner"),
         (&quit, "power", "Beenden"),
@@ -863,12 +904,13 @@ pub fn run() {
         menu.addItem(item);
     }
     menu.addItem(&NSMenuItem::separatorItem(mtm));
+    menu.addItem(&items.pause);
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&start_item);
     menu.addItem(&items.close);
     menu.addItem(&items.reopen);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&records);
-    menu.addItem(&export);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&settings);
     menu.addItem(&folder);
@@ -899,7 +941,14 @@ pub fn run() {
     let t = now();
     tracker.roll_over(t);
     let locked = screen_locked();
-    if locked || !tracker.start(t) {
+    // Pause über „Pausieren“ vor dem Beenden der App? Dann bleibt sie bestehen.
+    let open_break = match store::read_status() {
+        Some(store::Status::Break(since)) if !locked && since <= t && since.date() == t.date() => Some(since),
+        _ => None,
+    };
+    if let Some(since) = open_break {
+        tracker.restore_break(since);
+    } else if locked || !tracker.start(t) {
         tracker.pause_reason = if locked { PauseReason::Locked } else { PauseReason::Manual };
         tracker.paused_since = Some(t);
     }
@@ -948,7 +997,7 @@ pub fn run() {
             ("NSWorkspaceDidWakeNotification", sel!(didWake:)),
             ("NSWorkspaceSessionDidResignActiveNotification", sel!(sessionResigned:)),
             ("NSWorkspaceSessionDidBecomeActiveNotification", sel!(sessionActive:)),
-            ("NSWorkspaceWillPowerOffNotification", sel!(willTerminate:)),
+            ("NSWorkspaceWillPowerOffNotification", sel!(willPowerOff:)),
         ] {
             wnc.addObserver_selector_name_object(&controller, action, Some(&ns(name)), None);
         }

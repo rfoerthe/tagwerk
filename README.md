@@ -3,7 +3,8 @@
 Tagwerk ist eine kleine Menüleisten-App für macOS, die deine Arbeitszeit automatisch
 erfasst: gezählt wird die Zeit, in der der Mac entsperrt ist. Sperrst du den Mac für
 mindestens 15 Minuten, ist das eine Pause; kürzere Unterbrechungen zählen weiter zur
-Arbeitszeit. Arbeitsbeginn und Feierabend lassen sich zusätzlich von Hand festlegen oder
+Arbeitszeit. Über „Pausieren“ in der Menüleiste lässt sich eine Pause auch ohne Sperren
+einlegen. Arbeitsbeginn und Feierabend lassen sich zusätzlich von Hand festlegen oder
 korrigieren.
 
 ## Funktionen
@@ -13,11 +14,17 @@ korrigieren.
 - **Pausen ohne Zutun** – jede Sperre ab der eingestellten Mindestdauer (Standard
   15 Minuten) ist eine Pause, egal ob Mittagspause oder Kaffeepause. Kürzere Sperren
   zählen zum laufenden Arbeitsblock.
+- **Pausieren / Weiter arbeiten** – der Menüpunkt (⌘P bei geöffnetem Menü) hält die
+  Erfassung an, auch wenn der Mac entsperrt bleibt, und setzt sie fort. Wird der Mac
+  während der Pause gesperrt oder geht in den Ruhezustand, läuft die Erfassung nach dem
+  Entsperren bzw. Aufwachen von selbst wieder. Auch hier gilt die Mindestdauer: Eine
+  kürzere Pause zählt als Arbeitszeit. Beim Beenden der App (z. B. für ein Update) bleibt
+  die Pause bestehen, beim Abmelden oder Neustarten des Macs endet sie.
 - **Arbeitszeitrahmen** – gezählt wird nur Montag bis Freitag im eingestellten Zeitraum
   (Standard 07:00–22:00 Uhr). Außerhalb wird weder Arbeitszeit noch Pause gezählt.
 - **Soll und Saldo** – aus der Regelwochenarbeitszeit (Standard 39 Stunden, also
   7:48 Stunden pro Arbeitstag) ergibt sich der Saldo je Tag, Woche und Monat.
-- **Menüleiste** – zeigt den Status (läuft, pausiert, außerhalb des Arbeitszeitrahmens,
+- **Menüleiste** – zeigt den Status (läuft, Pause, pausiert, außerhalb des Arbeitszeitrahmens,
   Feierabend), die Arbeitszeit von heute samt Soll, die Pausen, den Beginn, den Saldo
   der Woche und Hinweise auf Regelverstöße.
 - **Manuelle Korrekturen** – Arbeitsbeginn und Feierabend jeweils „jetzt“, „vor N
@@ -33,7 +40,7 @@ korrigieren.
   Inspektor, in dem sich Arbeitsbeginn, Pausen und Feierabend eines Tages korrigieren
   lassen – auch für Tage ohne Aufzeichnung. Hell- und Dunkelmodus folgen dem System.
 - **Export als Markdown** – für einen frei wählbaren Zeitraum (Standard: die letzten
-  vier Wochen) über das Fenster, das Menü oder die Kommandozeile.
+  vier Wochen) im Fenster „Aufzeichnungen“ oder über die Kommandozeile.
 - **Bei Anmeldung starten** – per Menüpunkt als Anmeldeobjekt eintragen
   (nur in der installierten App).
 
@@ -51,7 +58,7 @@ verändert.
 | Pausen (§ 4 ArbZG)   | mehr als 6 Std. Arbeit: 30 Min., mehr als 9 Std.: 45 Min.; es zählen Pausen ab 15 Min. |
 | Ruhezeit (§ 5 ArbZG) | mindestens 11 Std. zwischen dem Ende eines Arbeitstags und dem nächsten Beginn |
 | Höchstarbeitszeit    | mehr als 10 Std. Arbeit an einem Tag                                    |
-| Erfassung            | Beginn und Ende durch Entsperren/Sperren; keine Einträge in der Zukunft |
+| Erfassung            | Beginn und Ende durch Entsperren/Sperren oder Pausieren/Weiter arbeiten; keine Einträge in der Zukunft |
 
 Der Saldo vergleicht die Arbeitszeit mit dem Soll – aber nur für Tage, an denen
 gearbeitet wurde. Urlaub, Feiertage oder Krankheit drücken den Saldo also nicht; Arbeit
@@ -135,8 +142,8 @@ Vor der ersten Änderung eines Tages wird die Datenbank unter
 
 ### Export
 
-Über „Exportieren …“ im Fenster „Aufzeichnungen“ (oder „Als Markdown exportieren …“ in
-der Menüleiste) wird ein Zeitraum als Markdown-Datei gespeichert. Vorbelegt sind die
+Über „Exportieren …“ im Fenster „Aufzeichnungen“ (Symbolleiste oder Menü „Ablage“, ⌘E)
+wird ein Zeitraum als Markdown-Datei gespeichert. Vorbelegt sind die
 letzten vier Wochen (28 Tage bis heute); „Dieser Monat“ und „Letzter Monat“ lassen sich
 mit einem Klick wählen. Die Datei enthält
 

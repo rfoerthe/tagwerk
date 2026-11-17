@@ -1,19 +1,24 @@
 //! Zeiterfassungs-Logik: automatische Perioden starten/stoppen, manuelle Entscheidungen
-//! (Arbeitsbeginn, Feierabend) eintragen und alles auf Tage verteilen.
+//! (Pausieren, Arbeitsbeginn, Feierabend) eintragen und alles auf Tage verteilen.
 //!
-//! Pausen werden nicht von Hand begonnen oder beendet: Jede Sperre, die mindestens so lange
-//! dauert wie die eingestellte Mindestpause, ist eine Pause; kürzere zählen zur Arbeitszeit.
+//! Pausen entstehen durch Sperren des Macs oder über „Pausieren“. Eine Unterbrechung, die
+//! mindestens so lange dauert wie die eingestellte Mindestpause, ist eine Pause; kürzere
+//! zählen zur Arbeitszeit. Eine Pause über „Pausieren“ endet mit „Weiter arbeiten“ oder
+//! beim nächsten Entsperren bzw. Aufwachen des Macs.
 
 use crate::day::{self, Day, Mode, DAY_END};
 use crate::rules::{self, Settings, Warning};
-use crate::store;
+use crate::store::{self, Status};
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime};
 
 /// Warum gerade nicht automatisch erfasst wird.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum PauseReason {
     Startup,
+    /// Beenden der App, Feierabend o. Ä. (überschreibt keinen anderen Grund).
     Manual,
+    /// Der Benutzer hat „Pausieren“ gewählt.
+    Break,
     Locked,
     Sleep,
     SessionInactive,
@@ -73,6 +78,37 @@ impl Tracker {
 
     pub fn is_running(&self) -> bool {
         self.running_since.is_some()
+    }
+
+    /// Pause über „Pausieren“ (endet nicht von selbst, nur durch „Weiter arbeiten“ oder
+    /// Entsperren/Aufwachen).
+    pub fn on_break(&self) -> bool {
+        self.running_since.is_none() && self.pause_reason == PauseReason::Break
+    }
+
+    /// „Pausieren“: laufende Erfassung anhalten.
+    pub fn take_break(&mut self, now: NaiveDateTime) -> bool {
+        self.running_since.is_some() && self.stop(now, PauseReason::Break)
+    }
+
+    /// Eine Pause über „Pausieren“ fortsetzen, die vor einem Neustart der App begonnen hat.
+    pub fn restore_break(&mut self, since: NaiveDateTime) {
+        self.running_since = None;
+        self.paused_since = Some(since);
+        self.pause_reason = PauseReason::Break;
+    }
+
+    /// Zustand für die Statusdatei und die Anzeige.
+    pub fn status(&self, now: NaiveDateTime) -> Status {
+        match self.mode(now) {
+            Mode::Closed(_) => Status::Closed,
+            Mode::Auto => match self.paused_since {
+                Some(since) if self.on_break() => Status::Break(since),
+                _ if !self.in_frame(now) => Status::Outside,
+                _ if self.is_running() => Status::Running,
+                _ => Status::Paused,
+            },
+        }
     }
 
     fn day(&self, date: NaiveDate) -> Option<&Day> {
@@ -265,6 +301,47 @@ mod tests {
         assert_eq!(info.work_secs, 4 * 3600 + 30 * 60);
         assert_eq!(info.pause_secs, 30 * 60);
         assert_eq!(info.first_start, Some(hm(8, 0)));
+    }
+
+    #[test]
+    fn manual_break_until_resumed() {
+        let mut t = Tracker::new(vec![], Settings::default());
+        t.start(dt(16, 8, 0));
+        assert_eq!(t.status(dt(16, 9, 0)), Status::Running);
+        assert!(t.take_break(dt(16, 12, 0)));
+        assert!(t.on_break());
+        assert_eq!(t.status(dt(16, 12, 30)), Status::Break(dt(16, 12, 0)));
+        // während der Pause wird nichts gezählt
+        assert_eq!(t.today(dt(16, 12, 30)).work_secs, hm(4, 0));
+        // App beendet: Grund bleibt „Pause“
+        t.stop(dt(16, 12, 31), PauseReason::Manual);
+        assert!(t.on_break());
+        assert!(t.start(dt(16, 12, 45)));
+        assert!(!t.on_break());
+        let info = t.today(dt(16, 13, 0));
+        assert_eq!(info.work_secs, hm(4, 15));
+        assert_eq!(info.pause_secs, hm(0, 45));
+        // kürzer als die Mindestpause: zählt als Arbeitszeit
+        t.take_break(dt(16, 14, 0));
+        t.start(dt(16, 14, 10));
+        assert_eq!(t.today(dt(16, 15, 0)).work_secs, hm(6, 15));
+    }
+
+    #[test]
+    fn lock_during_break_ends_it_on_unlock() {
+        let mut t = Tracker::new(vec![], Settings::default());
+        t.start(dt(16, 8, 0));
+        t.take_break(dt(16, 12, 0));
+        t.stop(dt(16, 12, 5), PauseReason::Locked);
+        assert!(!t.on_break());
+        assert_eq!(t.status(dt(16, 12, 10)), Status::Paused);
+        // beim Entsperren läuft die Erfassung wieder; Pause ab 12:00
+        assert!(t.start(dt(16, 12, 40)));
+        assert_eq!(t.today(dt(16, 13, 0)).pause_secs, hm(0, 40));
+        // Neustart der App während einer Pause
+        let mut t = Tracker::new(t.snapshot(dt(16, 13, 0)), Settings::default());
+        t.restore_break(dt(16, 13, 0));
+        assert_eq!(t.status(dt(16, 13, 5)), Status::Break(dt(16, 13, 0)));
     }
 
     #[test]

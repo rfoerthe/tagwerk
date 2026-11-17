@@ -747,13 +747,14 @@ fn refresh_summary() {
         detail.setStringValue(&ns(&d));
     }
     let subtitle = match status {
-        Some(Status::Running) => "Zeiterfassung läuft",
-        Some(Status::Paused) => "Zeiterfassung pausiert",
-        Some(Status::Outside) => "Außerhalb des Arbeitszeitrahmens",
-        Some(Status::Closed) => "Feierabend",
-        None => "Menüleisten-App nicht aktiv",
+        Some(Status::Running) => "Zeiterfassung läuft".to_string(),
+        Some(Status::Paused) => "Zeiterfassung pausiert".to_string(),
+        Some(Status::Break(since)) => format!("Pause seit {} Uhr", since.format("%H:%M")),
+        Some(Status::Outside) => "Außerhalb des Arbeitszeitrahmens".to_string(),
+        Some(Status::Closed) => "Feierabend".to_string(),
+        None => "Menüleisten-App nicht aktiv".to_string(),
     };
-    ui.window.setSubtitle(&ns(subtitle));
+    ui.window.setSubtitle(&ns(&subtitle));
     let footer = match error {
         Some(e) => e,
         None => format!("{} erfasst  ·  {rules_text}", plural(count, "Arbeitstag", "Arbeitstage")),
@@ -1709,15 +1710,6 @@ fn tick() {
             NSApplication::sharedApplication(mtm()).terminate(None);
         }
         return;
-    }
-
-    // Export angefordert (Menüleiste „Als Markdown exportieren …“)?
-    let request = store::export_request_file();
-    if request.exists() {
-        let _ = std::fs::remove_file(&request);
-        activate();
-        ui().window.makeKeyAndOrderFront(None);
-        show_export();
     }
 
     // Änderungen von außen (Menüleisten-App) übernehmen, sonst regelmäßig die
