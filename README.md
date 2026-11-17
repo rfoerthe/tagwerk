@@ -92,6 +92,8 @@ je Tag eine Spalte, jeder Arbeitsabschnitt ein Block von Beginn bis Ende – das
 aus automatischer Erfassung und manuellen Korrekturen.
 
 - Blättern mit ‹ › oder den Pfeiltasten, **Heute** (⌘T) springt zur aktuellen Woche.
+- Jeder Tageskopf zeigt Arbeitszeit und Pausen des Tages, die Kopfzeile Arbeitszeit,
+  Pausen und Saldo der Woche.
 - Ein Doppelklick auf einen Tag öffnet das Fenster „Aufzeichnungen“; der Tooltip eines
   Blocks nennt manuelle Grenzen.
 - Ein Klick auf die Uhrzeit von Beginn oder Ende kopiert sie in die Zwischenablage.

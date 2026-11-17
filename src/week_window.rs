@@ -76,6 +76,8 @@ struct Column {
     date: NaiveDate,
     blocks: Vec<Block>,
     work_secs: i64,
+    /// Pausen zwischen Beginn und Ende (wie in „Aufzeichnungen“).
+    pause_secs: i64,
     /// Hinweise zu Regelverstößen.
     warnings: Vec<String>,
 }
@@ -125,7 +127,7 @@ fn columns(snap: &Snapshot, monday: NaiveDate) -> Vec<Column> {
         .map(|i| {
             let date = monday + Duration::days(i);
             let Some(day) = snap.days.iter().find(|d| d.date == date) else {
-                return Column { date, blocks: Vec::new(), work_secs: 0, warnings: Vec::new() };
+                return Column { date, blocks: Vec::new(), work_secs: 0, pause_secs: 0, warnings: Vec::new() };
             };
             let spans = day.spans(s);
             let now_secs = secs_of(snap.now.time());
@@ -149,9 +151,9 @@ fn columns(snap: &Snapshot, monday: NaiveDate) -> Vec<Column> {
                 running: false,
                 notes: Vec::new(),
             }));
-            let work_secs = day.record(s).map(|r| r.work_secs).unwrap_or(0);
+            let (work_secs, pause_secs) = day.record(s).map(|r| (r.work_secs, r.pause_secs())).unwrap_or((0, 0));
             let warnings = rules::day_warnings(&snap.days, date, s).iter().map(Warning::text).collect();
-            Column { date, blocks, work_secs, warnings }
+            Column { date, blocks, work_secs, pause_secs, warnings }
         })
         .collect()
 }
@@ -174,19 +176,22 @@ fn notes(day: &Day, s: &Settings, sp: Span, first: bool, last: bool) -> Vec<&'st
     out
 }
 
-/// `Woche: 31:20 h  ·  Saldo +0:08 h` (Saldo bis heute, wie in der Menüleiste).
+/// `Woche: 31:20 h  ·  Pausen: 3:05 h  ·  Saldo +0:08 h` (Saldo bis heute, wie in der
+/// Menüleiste).
 fn week_summary(snap: &Snapshot, monday: NaiveDate, cols: &[Column]) -> String {
     let total: i64 = cols.iter().map(|c| c.work_secs).sum();
+    let pauses: i64 = cols.iter().map(|c| c.pause_secs).sum();
     let today = snap.now.date();
     if monday > today {
         return "Woche: –".to_string();
     }
+    let head = format!("Woche: {}  ·  Pausen: {}", store::fmt_hm(total), store::fmt_hm(pauses));
     let to = (monday + Duration::days(6)).min(today);
     let (work, target) = rules::balance(&snap.days, monday, to, &snap.settings);
     if work == 0 {
-        return format!("Woche: {}", store::fmt_hm(total));
+        return head;
     }
-    format!("Woche: {}  ·  Saldo {}", store::fmt_hm(total), rules::fmt_balance(work - target))
+    format!("{head}  ·  Saldo {}", rules::fmt_balance(work - target))
 }
 
 /// `Hinweise an 2 Tagen` (leer, wenn es keine gibt).
@@ -725,6 +730,20 @@ fn warning_image(point_size: f64) -> Option<Retained<NSImage>> {
     Some(image)
 }
 
+/// Tasse für die Pausen im Tageskopf.
+fn pause_image(point_size: f64, color: &NSColor) -> Option<Retained<NSImage>> {
+    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(&ns("cup.and.saucer"), Some(&ns("Pausen")))?;
+    let config = NSImageSymbolConfiguration::configurationWithPointSize_weight(point_size, unsafe {
+        NSFontWeightRegular
+    })
+    .configurationByApplyingConfiguration(&NSImageSymbolConfiguration::configurationWithPaletteColors(
+        &NSArray::from_retained_slice(&[color.retain()]),
+    ));
+    let image = image.imageWithSymbolConfiguration(&config)?;
+    image.setTemplate(false);
+    Some(image)
+}
+
 fn show_warnings(view: &WeekView, date: NaiveDate, warnings: &[String], rect: NSRect) {
     let mtm = mtm();
     let stack = NSStackView::new(mtm);
@@ -850,6 +869,7 @@ fn draw(bounds: NSRect, d: &Data, flash: Option<&Flash>) {
     }
     hline(0.0, geo.w, HEADER_H - 1.0, &separator);
     let icon = warning_image(11.0);
+    let cup = pause_image(9.0, &secondary);
     for (i, c) in d.cols.iter().enumerate() {
         let x = geo.x(i);
         let is_today = Some(c.date) == today;
@@ -871,8 +891,27 @@ fn draw(bounds: NSRect, d: &Data, flash: Option<&Flash>) {
         text_in(&title, title_rect, &a);
         let total = if c.work_secs > 0 { store::fmt_hm(c.work_secs) } else { "–".to_string() };
         let total_color = if warn { &orange } else { &secondary };
-        let a = attrs(&digits(11.0, regular), total_color, NSTextAlignment::Center);
-        text_in(&total, NSRect::new(NSPoint::new(x + 2.0, 24.0), NSSize::new(geo.col_w - 4.0, 15.0)), &a);
+        let total_rect = NSRect::new(NSPoint::new(x + 2.0, 24.0), NSSize::new(geo.col_w - 4.0, 15.0));
+        // Daneben die Pausen mit Tasse (wie „Pausen heute“ im Menü) – nur wenn es Platz hat.
+        let a = attrs(&digits(11.0, regular), total_color, NSTextAlignment::Left);
+        let pa = attrs(&digits(11.0, regular), &secondary, NSTextAlignment::Left);
+        let pause = store::fmt_hm(c.pause_secs);
+        let (tw, pw) = (text_width(&total, &a), text_width(&pause, &pa));
+        let cup_w = cup.as_ref().map_or(0.0, |img| img.size().width + 3.0);
+        let width = tw + 12.0 + cup_w + pw;
+        if c.work_secs > 0 && width <= total_rect.size.width {
+            let x0 = (x + (geo.col_w - width) / 2.0).round();
+            text_in(&total, NSRect::new(NSPoint::new(x0, 24.0), NSSize::new(tw, 15.0)), &a);
+            let mut px = x0 + tw + 12.0;
+            if let Some(img) = &cup {
+                let sz = img.size();
+                img.drawInRect(NSRect::new(NSPoint::new(px, 24.0 + (14.0 - sz.height) / 2.0), sz));
+                px += cup_w;
+            }
+            text_in(&pause, NSRect::new(NSPoint::new(px, 24.0), NSSize::new(pw, 15.0)), &pa);
+        } else {
+            text_in(&total, total_rect, &attrs(&digits(11.0, regular), total_color, NSTextAlignment::Center));
+        }
     }
 
     // Abschnitte als Blöcke (wie Termine).
@@ -947,7 +986,7 @@ fn draw(bounds: NSRect, d: &Data, flash: Option<&Flash>) {
 }
 
 /// Tooltips für die Blöcke (Uhrzeiten, Dauer, manuelle Korrekturen) und die Tagesköpfe
-/// mit Hinweisen.
+/// (Arbeitszeit, Pausen, Hinweise).
 fn update_tooltips(view: &WeekView) {
     view.removeAllToolTips();
     let tips: Vec<(NSRect, String)> = DATA.with(|d| {
@@ -955,11 +994,22 @@ fn update_tooltips(view: &WeekView) {
         let geo = Geo::new(view.bounds(), d.hours);
         let mut out = Vec::new();
         for (i, c) in d.cols.iter().enumerate() {
+            let mut text = String::new();
+            if c.work_secs > 0 {
+                text = format!(
+                    "{}\nArbeitszeit {}  ·  Pausen {}",
+                    fmt_day(c.date),
+                    store::fmt_hm(c.work_secs),
+                    store::fmt_hm(c.pause_secs)
+                );
+            }
             if !c.warnings.is_empty() {
-                let mut text = format!("Hinweise für {}:", fmt_day(c.date));
+                text.push_str(&if text.is_empty() { format!("Hinweise für {}:", fmt_day(c.date)) } else { "\n\nHinweise:".to_string() });
                 for w in &c.warnings {
                     text.push_str(&format!("\n• {w}"));
                 }
+            }
+            if !text.is_empty() {
                 out.push((geo.header_rect(i), text));
             }
             for b in &c.blocks {
@@ -1291,6 +1341,8 @@ mod tests {
         let spans: Vec<(i64, i64)> = cols[1].blocks.iter().map(|b| (b.from, b.to)).collect();
         assert_eq!(spans, vec![(h(7, 30), h(10, 0)), (h(10, 30), h(11, 58)), (h(12, 41), h(17, 0))]);
         assert_eq!(cols[1].work_secs, h(2, 30) + h(1, 28) + h(4, 19));
+        // 7:30 – 17:00 abzüglich Arbeitszeit: manuelle Pause und Mittagslücke.
+        assert_eq!(cols[1].pause_secs, h(0, 30) + h(0, 43));
         assert_eq!(cols[1].blocks[0].notes, vec!["Arbeitsbeginn manuell festgelegt", "endet mit einer manuellen Pause"]);
         assert_eq!(cols[1].blocks[2].notes, vec!["Feierabend manuell festgelegt"]);
         assert!(cols[1].warnings.is_empty());
@@ -1324,7 +1376,7 @@ mod tests {
         let s = snap(vec![d], date(2026, 11, 17).and_hms_opt(9, 30, 0).unwrap(), true);
         let cols = columns(&s, date(2026, 11, 16));
         assert!(cols[1].blocks[0].running);
-        assert_eq!(week_summary(&s, date(2026, 11, 16), &cols), "Woche: 1:30 h  ·  Saldo −6:18 h");
+        assert_eq!(week_summary(&s, date(2026, 11, 16), &cols), "Woche: 1:30 h  ·  Pausen: 0:00 h  ·  Saldo −6:18 h");
         assert_eq!(week_summary(&s, date(2026, 11, 23), &columns(&s, date(2026, 11, 23))), "Woche: –");
     }
 }

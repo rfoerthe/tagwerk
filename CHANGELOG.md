@@ -16,6 +16,8 @@ dazu das Fenster „Aufzeichnungen“, eine Wochenansicht, Einstellungen und ein
 als Markdown. Alle Daten bleiben lokal auf dem Mac.
 
 ### Hinzugefügt
+- Wochenansicht: Jeder Tageskopf zeigt neben der Arbeitszeit auch die Pausen des Tages
+  (☕︎ 0:45 h), die Kopfzeile die Summe der Pausen der Woche.
 - Automatische Erfassung über Sperren, Entsperren, Ruhezustand und Benutzerwechsel.
   Jede Sperre ab der Mindestpause (Standard 15 Minuten) gilt als Pause, kürzere
   Unterbrechungen zählen zur Arbeitszeit.
