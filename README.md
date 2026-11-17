@@ -1,77 +1,164 @@
+<div align="center">
+
+<img src="assets/AppIcon.png" alt="Tagwerk App-Symbol" width="128" height="128">
+
 # Tagwerk
 
-Tagwerk ist eine kleine Menüleisten-App für macOS, die deine Arbeitszeit automatisch
-erfasst: gezählt wird die Zeit, in der der Mac entsperrt ist. Sperrst du den Mac für
-mindestens 15 Minuten, ist das eine Pause; kürzere Unterbrechungen zählen weiter zur
-Arbeitszeit. Über „Arbeit unterbrechen“ in der Menüleiste lässt sich eine Pause auch ohne Sperren
-einlegen. Arbeitsbeginn und Feierabend lassen sich zusätzlich von Hand festlegen oder
-korrigieren.
+**Automatische Arbeitszeiterfassung in der macOS-Menüleiste.**<br>
+Gezählt wird, solange dein Mac entsperrt ist – Pausen, Saldo und Arbeitszeitregeln inklusive.
+
+[![macOS 13+](https://img.shields.io/badge/macOS-13%2B-000000?logo=apple&logoColor=white)](#voraussetzungen)
+[![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-arm64-555555)](#voraussetzungen)
+[![Rust](https://img.shields.io/badge/Rust-2021-CE422B?logo=rust&logoColor=white)](https://www.rust-lang.org)
+[![Lizenz: MIT](https://img.shields.io/badge/Lizenz-MIT-blue.svg)](LICENSE)
+
+[Funktionen](#funktionen) ·
+[Regeln](#regeln) ·
+[Installation](#installation) ·
+[Kommandozeile](#kommandozeile) ·
+[Daten](#daten) ·
+[Entwicklung](#entwicklung)
+
+<br>
+
+<img src="doc/screenshots/aufzeichnungen.png" alt="Fenster „Aufzeichnungen“ mit Kennzahlen, Tagestabelle und Inspektor" width="860">
+
+</div>
+
+---
+
+## Warum Tagwerk?
+
+Stundenzettel vergisst man – den Sperrbildschirm nicht. Tagwerk läuft unauffällig in
+der Menüleiste und erfasst die Zeit, in der der Mac entsperrt ist. Sperrst du den Mac
+für mindestens 15 Minuten, ist das eine Pause; kürzere Unterbrechungen zählen weiter
+zur Arbeitszeit. Arbeitsbeginn, Pausen und Feierabend lassen sich jederzeit von Hand
+festlegen oder korrigieren.
+
+- 🔒 **Kein Starten, kein Stoppen** – Sperren, Entsperren, Ruhezustand und Benutzerwechsel werden automatisch erkannt.
+- ⚖️ **Regeln im Blick** – Pausen, Ruhezeit und Höchstarbeitszeit nach Arbeitszeitgesetz werden geprüft.
+- 📊 **Soll und Saldo** – je Tag, Woche und Monat, auf Basis deiner Regelwochenarbeitszeit.
+- 🗓️ **Wochenansicht** – jede Kalenderwoche übersichtlich wie in einem Kalender.
+- 🏠 **Lokal und privat** – alle Daten liegen in einer SQLite-Datenbank auf deinem Mac, nichts verlässt das Gerät.
+- 🦀 **Nativ** – in Rust geschrieben, mit AppKit-Oberfläche, Hell- und Dunkelmodus.
 
 ## Funktionen
 
-- **Automatische Erfassung** – Sperren, Entsperren, Ruhezustand und Benutzerwechsel
-  werden erkannt; jede entsperrte Phase wird als Periode gespeichert.
+### Menüleiste
+
+<table>
+  <tr>
+    <td align="center"><img src="doc/screenshots/menu-laeuft.png" alt="Menü während der Erfassung" width="260"><br><sub><b>Erfassung läuft</b></sub></td>
+    <td align="center"><img src="doc/screenshots/menu-pause.png" alt="Menü während einer Pause" width="260"><br><sub><b>Pause</b></sub></td>
+    <td align="center"><img src="doc/screenshots/menu-feierabend.png" alt="Menü nach Feierabend" width="260"><br><sub><b>Feierabend</b></sub></td>
+  </tr>
+</table>
+
+Das Menü zeigt auf einen Blick den Status, die Arbeitszeit von heute samt Soll, die
+Pausen, den Beginn, den Saldo der Woche und Hinweise auf Regelverstöße. Der Status ist
+farbig – **grün** = läuft, **orange** = Pause, **indigo** = Feierabend –, der Saldo
+grün im Plus und rot im Minus. Ein Klick auf eine dieser Zeilen öffnet den heutigen Tag
+im Fenster „Aufzeichnungen“.
+
 - **Pausen ohne Zutun** – jede Sperre ab der eingestellten Mindestdauer (Standard
-  15 Minuten) ist eine Pause, egal ob Mittagspause oder Kaffeepause. Kürzere Sperren
-  zählen zum laufenden Arbeitsblock.
-- **Arbeit unterbrechen / Weiter arbeiten** – der Menüpunkt (⌘P bei geöffnetem Menü) hält die
-  Erfassung an, auch wenn der Mac entsperrt bleibt, und setzt sie fort. Wird der Mac
-  während der Pause gesperrt oder geht in den Ruhezustand, läuft die Erfassung nach dem
-  Entsperren bzw. Aufwachen von selbst wieder. Auch hier gilt die Mindestdauer: Eine
-  kürzere Pause zählt als Arbeitszeit. Beim Beenden der App (z. B. für ein Update) bleibt
-  die Pause bestehen, beim Abmelden oder Neustarten des Macs endet sie.
-- **Arbeitszeitrahmen** – gezählt wird nur Montag bis Freitag im eingestellten Zeitraum
-  (Standard 07:00–22:00 Uhr). Außerhalb wird weder Arbeitszeit noch Pause gezählt.
-- **Soll und Saldo** – aus der Regelwochenarbeitszeit (Standard 39 Stunden, also
-  7:48 Stunden pro Arbeitstag) ergibt sich der Saldo je Tag, Woche und Monat.
-- **Menüleiste** – zeigt den Status (läuft, Pause, pausiert, außerhalb des Arbeitszeitrahmens,
-  Feierabend), die Arbeitszeit von heute samt Soll, die Pausen, den Beginn, den Saldo
-  der Woche und Hinweise auf Regelverstöße. Der Status ist farbig (grün = läuft,
-  orange = Pause, indigo = Feierabend), die Werte sind hervorgehoben, der Saldo grün im
-  Plus und rot im Minus; ein Klick auf eine dieser Zeilen zeigt den heutigen Tag im
-  Fenster „Aufzeichnungen“. Das Symbol ist so groß wie die übrigen
-  Symbole der Menüleiste; „läuft“ ist grün, „Pause“ orange hinterlegt, „außerhalb des
-  Arbeitszeitrahmens“ und „Feierabend“ sind einfarbig. Zur Wahl stehen neun Symbolsätze
-  (siehe Einstellungen): **Tagbogen** (Standard; der Arbeitstag als Sonnenbogen,
-  Feierabend als Sonnenuntergang), **Schlossuhr** (offenes Schloss = Arbeitszeit,
-  geschlossen = Pause) und **Tagesring** (Fortschritt zum Tagessoll) – dazu sechs
-  verspielte: **Bauarbeiter** und **Handwerkerin** (mit Hammer bzw.
-  Schraubenschlüssel bei der Arbeit, mit Kaffee in der Pause, winkend zum Feierabend),
-  **Kaffeetasse** mit Gesicht, **Hamsterrad**, **Roboter** und **Kaninchen** (in der
-  Pause knickt ein Ohr um).
-- **Manuelle Korrekturen** – Arbeitsbeginn und Feierabend jeweils „jetzt“, „vor N
-  Minuten“ oder zu einer frei gewählten Uhrzeit; im Fenster „Aufzeichnungen“ zusätzlich
-  Pausen. Korrekturen liegen als eigene Schicht über den erfassten Perioden und lassen
-  sich jederzeit zurücknehmen.
-- **Hinweise bei Regelverstößen** – siehe [Regeln](#regeln).
-- **Einstellungen** – Arbeitszeitrahmen, Regelwochenarbeitszeit, Mindestpause und
-  Symbolsatz der Menüleiste mit Vorschau aller Zustände (Menüleiste „Einstellungen …“ oder ⌘, im Fenster „Aufzeichnungen“). Änderungen gelten
-  sofort, auch für bereits erfasste Tage. Der Ordner-Knopf rechts in der Titelleiste
-  zeigt den Datenordner im Finder.
-- **Fenster „Aufzeichnungen“** – natives macOS-Fenster mit Kennzahlen (heute, Woche,
-  Monat, Durchschnitt), einer Tabelle aller Tage mit Saldo und Wochensummen und einem
-  Inspektor, in dem sich Arbeitsbeginn, Pausen und Feierabend eines Tages korrigieren
-  lassen – auch für Tage ohne Aufzeichnung. Hell- und Dunkelmodus folgen dem System.
-- **Wochenansicht** – Menüleiste „Wochenansicht …“ (⌘W bei geöffnetem Menü) zeigt eine
-  Kalenderwoche wie einen Kalender: je Tag eine Spalte, jeder Arbeitsabschnitt ein Block
-  von Beginn bis Ende – das Ergebnis aus automatischer Erfassung und manuellen
-  Korrekturen (Arbeitsbeginn, Feierabend, Pausen). Blättern mit ‹ › oder den
-  Pfeiltasten, „Heute“ (⌘T) springt zur aktuellen Woche; ein Doppelklick auf einen Tag
-  öffnet das Fenster „Aufzeichnungen“, der Tooltip eines Blocks nennt manuelle Grenzen.
-  Ein Klick auf die Uhrzeit von Beginn oder Ende kopiert sie in die Zwischenablage
-  (kurz hervorgehoben mit „… kopiert“). Tage mit Regelverstößen tragen ein Warnschild;
-  ein Klick auf den Tageskopf zeigt die Hinweise. Arbeit außerhalb des
-  Arbeitszeitrahmens erscheint orange als „nicht gezählt“.
-- **Export als Markdown** – für einen frei wählbaren Zeitraum (Standard: die letzten
-  vier Wochen) im Fenster „Aufzeichnungen“ oder über die Kommandozeile.
-- **Bei Anmeldung starten** – per Menüpunkt als Anmeldeobjekt eintragen
-  (nur in der installierten App).
+  15 Minuten) ist eine Pause, egal ob Mittags- oder Kaffeepause. Kürzere Sperren zählen
+  zum laufenden Arbeitsblock.
+- **Arbeit unterbrechen / Weiter arbeiten** (⌘P bei geöffnetem Menü) – hält die
+  Erfassung an, auch wenn der Mac entsperrt bleibt. Wird der Mac währenddessen gesperrt
+  oder geht in den Ruhezustand, läuft die Erfassung nach dem Entsperren bzw. Aufwachen
+  von selbst weiter. Auch hier gilt die Mindestdauer: Eine kürzere Pause zählt als
+  Arbeitszeit. Beim Beenden der App (z. B. für ein Update) bleibt die Pause bestehen,
+  beim Abmelden oder Neustarten des Macs endet sie.
+- **Arbeitsbeginn und Feierabend festlegen** – „jetzt“, „vor N Minuten“ oder zu einer
+  frei gewählten Uhrzeit. Korrekturen liegen als eigene Schicht über den erfassten
+  Perioden und lassen sich jederzeit zurücknehmen.
+- **Bei Anmeldung starten** – per Menüpunkt als Anmeldeobjekt eintragen (nur in der
+  installierten App).
+
+### Aufzeichnungen
+
+Ein natives macOS-Fenster (⌘A bei geöffnetem Menü) mit Kennzahlen für heute, die Woche,
+den Monat und den Durchschnitt pro Arbeitstag, einer Tabelle aller Tage mit Saldo und
+Wochensummen sowie einem **Inspektor**. Dort lassen sich Arbeitsbeginn, Pausen und
+Feierabend eines Tages korrigieren – auch für Tage ohne Aufzeichnung. Tage mit
+Regelverstößen tragen ein Warnsymbol, manuell korrigierte Tage einen Stift.
+
+### Wochenansicht
+
+<img src="doc/screenshots/wochenansicht-hinweise.png" alt="Wochenansicht mit Hinweisen zu Regelverstößen und nicht gezählter Arbeit" width="860">
+
+Die Wochenansicht (⌘W bei geöffnetem Menü) zeigt eine Kalenderwoche wie einen Kalender:
+je Tag eine Spalte, jeder Arbeitsabschnitt ein Block von Beginn bis Ende – das Ergebnis
+aus automatischer Erfassung und manuellen Korrekturen.
+
+- Blättern mit ‹ › oder den Pfeiltasten, **Heute** (⌘T) springt zur aktuellen Woche.
+- Ein Doppelklick auf einen Tag öffnet das Fenster „Aufzeichnungen“; der Tooltip eines
+  Blocks nennt manuelle Grenzen.
+- Ein Klick auf die Uhrzeit von Beginn oder Ende kopiert sie in die Zwischenablage.
+- Tage mit Regelverstößen tragen ein Warnschild; ein Klick auf den Tageskopf zeigt die
+  Hinweise.
+- Arbeit außerhalb des Arbeitszeitrahmens erscheint orange als „nicht gezählt“.
+
+<details>
+<summary>Weitere Ansichten</summary>
+<br>
+<img src="doc/screenshots/wochenansicht.png" alt="Wochenansicht der laufenden Woche" width="860">
+<br><br>
+<img src="doc/screenshots/wochenansicht-ausserhalb.png" alt="Wochenansicht mit Tooltip zu Arbeit außerhalb des Arbeitszeitrahmens" width="860">
+</details>
+
+### Einstellungen
+
+<table>
+  <tr>
+    <td align="center"><img src="doc/screenshots/einstellungen.png" alt="Einstellungen" width="400"></td>
+    <td align="center"><img src="doc/screenshots/einstellungen-symbolsaetze.png" alt="Auswahl des Symbolsatzes für die Menüleiste" width="400"></td>
+  </tr>
+</table>
+
+Erreichbar über „Einstellungen …“ in der Menüleiste oder ⌘, im Fenster „Aufzeichnungen“.
+Änderungen gelten sofort, auch für bereits erfasste Tage. Der Ordner-Knopf in der
+Titelleiste zeigt den Datenordner im Finder.
+
+| Einstellung           | Bedeutung                                                              | Standard        |
+|-----------------------|------------------------------------------------------------------------|-----------------|
+| Arbeitszeitrahmen     | Nur Mo–Fr in diesem Zeitraum wird Arbeitszeit bzw. Pause gezählt        | 07:00–22:00 Uhr |
+| Regelarbeitszeit      | Wochenarbeitszeit, daraus ergibt sich das Tagessoll                     | 39 Std. (7:48 h/Tag) |
+| Mindestpause          | Ab dieser Sperrdauer gilt eine Unterbrechung als Pause                 | 15 Min.         |
+| Menüleiste            | Symbolsatz für die Menüleiste, mit Vorschau aller Zustände             | Tagbogen        |
+
+Neun Symbolsätze stehen zur Wahl. Sie werden von der App selbst gezeichnet und sind
+damit in jeder Höhe scharf:
+
+- **Tagbogen** – der Arbeitstag als Sonnenbogen, Feierabend als Sonnenuntergang
+- **Schlossuhr** – offenes Schloss = Arbeitszeit, geschlossen = Pause
+- **Tagesring** – Fortschritt zum Tagessoll
+- **Bauarbeiter** und **Handwerkerin** – mit Hammer bzw. Schraubenschlüssel bei der
+  Arbeit, mit Kaffee in der Pause, winkend zum Feierabend
+- **Kaffeetasse** mit Gesicht, **Hamsterrad**, **Roboter** und **Kaninchen** (in der
+  Pause knickt ein Ohr um)
+
+### Export als Markdown
+
+Über „Exportieren …“ im Fenster „Aufzeichnungen“ (Symbolleiste oder Menü „Ablage“, ⌘E)
+wird ein frei wählbarer Zeitraum als Markdown-Datei gespeichert – vorbelegt sind die
+letzten vier Wochen, „Dieser Monat“ und „Letzter Monat“ sind einen Klick entfernt. Die
+Datei enthält:
+
+1. eine **Übersichtstabelle** mit Beginn, Ende, Arbeits- und Pausenzeit sowie Saldo je
+   Tag und einer Summenzeile,
+2. **`## Hinweise`** – Verstöße gegen die [Regeln](#regeln),
+3. **`## Korrekturen`** – die manuellen Entscheidungen,
+4. **`## Erfasste Perioden`** – die automatisch erfassten Zeiten.
+
+Ein Export lässt sich mit `Tagwerk --import <datei.md>` wieder einlesen; die enthaltenen
+Tage ersetzen dabei die vorhandenen Einträge dieser Tage.
 
 ## Regeln
 
 Tagwerk berücksichtigt die folgenden Regeln aus Arbeitszeitgesetz und
-Betriebsvereinbarung. Verstöße werden in der Menüleiste, in der Tabelle (Warnsymbol),
-im Inspektor und im Export angezeigt – die Arbeitszeit selbst wird dadurch nicht
+Betriebsvereinbarung. Verstöße werden in der Menüleiste, in der Tabelle, im Inspektor,
+in der Wochenansicht und im Export angezeigt – die Arbeitszeit selbst wird dadurch nicht
 verändert.
 
 | Regel                | Inhalt                                                                  |
@@ -83,24 +170,33 @@ verändert.
 | Höchstarbeitszeit    | mehr als 10 Std. Arbeit an einem Tag                                    |
 | Erfassung            | Beginn und Ende durch Entsperren/Sperren oder Arbeit unterbrechen/Weiter arbeiten; keine Einträge in der Zukunft |
 
-Der Saldo vergleicht die Arbeitszeit mit dem Soll – aber nur für Tage, an denen
-gearbeitet wurde. Urlaub, Feiertage oder Krankheit drücken den Saldo also nicht; Arbeit
-am Wochenende zählt vollständig als Mehrarbeit.
+> [!NOTE]
+> Der Saldo vergleicht die Arbeitszeit mit dem Soll – aber nur für Tage, an denen
+> gearbeitet wurde. Urlaub, Feiertage oder Krankheit drücken den Saldo also nicht;
+> Arbeit am Wochenende zählt vollständig als Mehrarbeit.
 
-## Voraussetzungen
+## Installation
+
+### Voraussetzungen
 
 - macOS 13 (Ventura) oder neuer, Apple Silicon (arm64)
 - Zum Bauen: [Rust](https://rustup.rs) und die Xcode-Befehlszeilenwerkzeuge
+  (`xcode-select --install`)
 
-## Bauen
-
-Zum Ausprobieren während der Entwicklung:
+### Aus dem Quellcode bauen
 
 ```bash
-cargo run
+git clone https://github.com/rfoerthe/tagwerk.git
+cd tagwerk
+./build.sh --no-sign --install
 ```
 
-Ein fertiges App-Bundle samt DMG erzeugt `build.sh`:
+Damit wird Tagwerk gebaut, ad hoc signiert und nach `/Applications` kopiert. Zum
+schnellen Ausprobieren während der Entwicklung genügt `cargo run`.
+
+### App-Bundle und DMG
+
+`build.sh` erzeugt ein fertiges App-Bundle samt DMG:
 
 ```bash
 ./build.sh                 # sauber bauen, signieren und notarisieren
@@ -109,19 +205,16 @@ Ein fertiges App-Bundle samt DMG erzeugt `build.sh`:
 ./build.sh --install       # zusätzlich nach /Applications installieren
 ```
 
-`--install` lässt sich mit den anderen Optionen kombinieren (z. B.
-`./build.sh --no-notarize --install`). Läuft Tagwerk bereits aus `/Applications`, wird
-es vorher regulär beendet – die laufende Erfassung wird dabei gespeichert – und nach
-dem Kopieren wieder gestartet.
-
-Das App-Symbol liegt als `assets/AppIcon.png` (1024 × 1024) im Projekt, die Vorlage
-dazu als `assets/AppIcon.svg`; `build.sh` erzeugt daraus `AppIcon.icns`. Die Symbole der
-Menüleiste zeichnet die App selbst (`src/glyphs.rs`), damit sie in jeder Höhe scharf sind.
+`--install` lässt sich mit den anderen Optionen kombinieren. Läuft Tagwerk bereits aus
+`/Applications`, wird es vorher regulär beendet – die laufende Erfassung wird dabei
+gespeichert – und nach dem Kopieren wieder gestartet.
 
 Das Ergebnis liegt in `target/dist/Tagwerk-<Version>.dmg`. Das Skript führt vorher
 `cargo clean` aus; ältere DMGs in `target/dist` werden dabei gelöscht.
 
-Einstellungen über Umgebungsvariablen:
+<details>
+<summary>Signieren und Notarisieren</summary>
+<br>
 
 | Variable         | Bedeutung                                   | Standard                       |
 |------------------|---------------------------------------------|--------------------------------|
@@ -135,7 +228,9 @@ Das Notary-Profil wird einmalig angelegt mit:
 xcrun notarytool store-credentials general-notary --apple-id <apple-id> --team-id <team-id>
 ```
 
-## Aufruf
+</details>
+
+## Kommandozeile
 
 ```text
 Tagwerk                       Menüleisten-App (Standard)
@@ -155,7 +250,7 @@ Es läuft immer nur eine Instanz der Menüleisten-App.
 
 ## Daten
 
-Alle Daten liegen in einer lokalen SQLite-Datenbank:
+Alle Daten liegen lokal in einer SQLite-Datenbank:
 
 ```text
 ~/Library/Application Support/Tagwerk/tagwerk.db
@@ -167,31 +262,20 @@ Perioden werden ungekürzt gespeichert; Mindestpause und Arbeitszeitrahmen wirke
 bei der Berechnung. Bearbeitet werden die Daten im Fenster „Aufzeichnungen“; Änderungen
 dort übernimmt die laufende App automatisch.
 
-Vor der ersten Änderung eines Tages wird die Datenbank unter
+**Backups:** Vor der ersten Änderung eines Tages wird die Datenbank unter
 `backups/tagwerk-JJJJ-MM-TT.db` gesichert; die letzten 15 Backups bleiben erhalten.
 
-### Export
+**Ältere Versionen:** Die Markdown-Datei `tagwerk.md` früherer Versionen wird beim
+ersten Start einmalig in die Datenbank übernommen und danach in `tagwerk.md.importiert`
+umbenannt. Daten der Vorgängerversion „TrackMyWork“ werden ebenfalls übernommen; der
+alte Ordner bleibt unverändert.
 
-Über „Exportieren …“ im Fenster „Aufzeichnungen“ (Symbolleiste oder Menü „Ablage“, ⌘E)
-wird ein Zeitraum als Markdown-Datei gespeichert. Vorbelegt sind die
-letzten vier Wochen (28 Tage bis heute); „Dieser Monat“ und „Letzter Monat“ lassen sich
-mit einem Klick wählen. Die Datei enthält
+## Entwicklung
 
-1. eine **Übersichtstabelle** mit Beginn, Ende, Arbeits- und Pausenzeit sowie Saldo je
-   Tag und einer Summenzeile,
-2. **`## Hinweise`** – Verstöße gegen die [Regeln](#regeln),
-3. **`## Korrekturen`** – die manuellen Entscheidungen,
-4. **`## Erfasste Perioden`** – die automatisch erfassten Zeiten.
-
-Damit lässt sich ein Export mit `Tagwerk --import <datei.md>` wieder einlesen; die
-enthaltenen Tage ersetzen dabei die vorhandenen Einträge dieser Tage.
-
-### Ältere Versionen
-
-Die Markdown-Datei `tagwerk.md` früherer Versionen wird beim ersten Start einmalig in
-die Datenbank übernommen und danach in `tagwerk.md.importiert` umbenannt. Daten der
-Vorgängerversion „TrackMyWork“ werden ebenfalls übernommen; der alte Ordner bleibt
-unverändert.
+```bash
+cargo run     # App starten
+cargo test    # Tests ausführen
+```
 
 Zum Testen lässt sich der Datenordner mit der Umgebungsvariablen `TAGWERK_DIR`
 umlenken:
@@ -200,13 +284,13 @@ umlenken:
 TAGWERK_DIR=/tmp/tagwerk-test cargo run
 ```
 
-## Tests
+Das App-Symbol liegt als `assets/AppIcon.png` (1024 × 1024) im Projekt, die Vorlage
+dazu als `assets/AppIcon.svg`; `build.sh` erzeugt daraus `AppIcon.icns`. Die Symbole der
+Menüleiste zeichnet die App selbst (`src/glyphs.rs`).
 
-```bash
-cargo test
-```
-
-### Testdaten
+<details>
+<summary>Testdaten</summary>
+<br>
 
 `testdata/testdb.sh` erzeugt eine Testdatenbank mit sechs Wochen Arbeitszeiten
 (KW 41–46/2026 plus Montag der KW 47, Wochensummen um 39 Stunden ± 10 %) und einigen
@@ -221,14 +305,16 @@ testdata/testdb.sh --restore   # die echten Daten zurückholen
 Mit `--install` wird die zentrale Datenbank vorher nach
 `~/Library/Application Support/Tagwerk/vor-testdaten/` gesichert – außer sie enthält
 schon Testdaten (die Testdatenbank ist dafür gekennzeichnet). `--restore` holt die
-neueste Sicherung mit echten Daten zurück. Laufende Tagwerk-Instanzen werden dafür beendet und – wenn sie
-als App liefen – danach neu gestartet. Ohne Austausch lässt sich die Testdatenbank auch
-direkt öffnen:
+neueste Sicherung mit echten Daten zurück. Laufende Tagwerk-Instanzen werden dafür
+beendet und – wenn sie als App liefen – danach neu gestartet. Ohne Austausch lässt sich
+die Testdatenbank auch direkt öffnen:
 
 ```bash
 TAGWERK_DIR=testdata cargo run -- --records
 ```
 
+</details>
+
 ## Lizenz
 
-Tagwerk steht unter der MIT-Lizenz – siehe [LICENSE](LICENSE).
+Tagwerk steht unter der [MIT-Lizenz](LICENSE).
