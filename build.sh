@@ -177,6 +177,10 @@ if [[ "$DO_NOTARIZE" == 1 ]]; then
   spctl --assess --type open --context context:primary-signature --verbose "$DMG" || true
 fi
 
+# Prüfsumme erst nach dem Anheften des Tickets – das verändert das DMG.
+step "Erzeuge Prüfsumme $(basename "$DMG").sha256"
+( cd "$DIST" && shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256" )
+
 # 7) Installieren --------------------------------------------------------------
 if [[ "$DO_INSTALL" == 1 ]]; then
   TARGET_APP="$INSTALL_DIR/$APP_NAME.app"

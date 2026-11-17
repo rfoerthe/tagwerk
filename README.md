@@ -230,6 +230,21 @@ xcrun notarytool store-credentials general-notary --apple-id <apple-id> --team-i
 
 </details>
 
+### Release auf GitHub
+
+Nach `./build.sh` veröffentlicht `github-release.sh` das DMG als Release auf GitHub:
+
+```bash
+./github-release.sh --dry-run   # nur prüfen und anzeigen, was passieren würde
+./github-release.sh             # Tag v<Version> setzen und Release veröffentlichen
+```
+
+Das Skript prüft Prüfsumme (`Tagwerk-<Version>.dmg.sha256` von `build.sh`), Signatur und
+Notarisierung, gleicht die Version mit `Cargo.toml` ab und übernimmt die Release-Notizen
+aus dem passenden Eintrag in [CHANGELOG.md](CHANGELOG.md). Voraussetzung ist die
+[GitHub CLI](https://cli.github.com) (`brew install gh`, `gh auth login`); der Commit
+muss bereits gepusht sein.
+
 ## Kommandozeile
 
 ```text
