@@ -4,7 +4,8 @@
 //! eingestellten Mindestdauer).
 
 use crate::day::{self, fmt_clock, Mode};
-use crate::rules;
+use crate::glyphs;
+use crate::rules::{self, IconSet};
 use crate::settings_window;
 use crate::store;
 use crate::tracker::{PauseReason, Tracker};
@@ -14,10 +15,10 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSApplication, NSApplicationActivationOptions,
+    NSAlert, NSAlertFirstButtonReturn, NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication, NSApplicationActivationOptions,
     NSApplicationActivationPolicy, NSAttributedStringAttachmentConveniences, NSColor, NSDatePicker,
     NSDatePickerElementFlags, NSDatePickerStyle, NSFont, NSFontAttributeName, NSFontWeightRegular,
-    NSForegroundColorAttributeName, NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuDelegate, NSMenuItem,
+    NSFontWeightSemibold, NSForegroundColorAttributeName, NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuDelegate, NSMenuItem,
     NSRunningApplication, NSStatusBar, NSStatusItem, NSTextAttachment, NSVariableStatusItemLength,
     NSWorkspace,
 };
@@ -81,6 +82,8 @@ struct AppState {
     records_window: Option<Child>,
     last_save: Instant,
     last_icon: Option<IconKind>,
+    /// Zuletzt gezeigtes Symbol in der Menüleiste (Zustand, Symbolsatz, Höhe).
+    button_icon: Option<(IconKind, IconSet, u32)>,
     db: store::Db,
 }
 
@@ -489,28 +492,29 @@ impl AppState {
                 IconKind::Paused,
             ),
         };
-        self.items.status.setTitle(&ns(&status_text));
+        self.items.status.setAttributedTitle(Some(&status_title(&status_text, icon)));
         if self.last_icon != Some(icon) {
-            set_item_symbol(&self.items.status, icon.symbol().0, icon.symbol().2);
+            set_item_symbol(&self.items.status, icon.symbol().0, icon.symbol().1);
         }
-        let worked = if info.target_secs > 0 {
-            format!("Heute gearbeitet:  {} von {}", store::fmt_hm(info.work_secs), store::fmt_hm(info.target_secs))
-        } else {
-            format!("Heute gearbeitet:  {}", store::fmt_hm(info.work_secs))
-        };
-        self.items.worked.setTitle(&ns(&worked));
-        self.items
-            .balance
-            .setTitle(&ns(&format!("Saldo diese Woche:  {}", rules::fmt_balance(info.week_balance))));
-        self.items
-            .pauses
-            .setTitle(&ns(&format!("Pausen heute:  {}", store::fmt_hm(info.pause_secs))));
-        let first = match info.first_start {
-            Some(f) if info.start_manual => format!("Beginn heute:  {} Uhr (manuell)", fmt_clock(f)),
-            Some(f) => format!("Beginn heute:  {} Uhr", fmt_clock(f)),
-            None => "Beginn heute:  –".to_string(),
-        };
-        self.items.first.setTitle(&ns(&first));
+        let worked = store::fmt_hm(info.work_secs);
+        let target = format!("  von {}", store::fmt_hm(info.target_secs));
+        let done = info.target_secs > 0 && info.work_secs >= info.target_secs;
+        let mut parts = vec![("Heute gearbeitet:  ", Tone::Label), (worked.as_str(), if done { Tone::Good } else { Tone::Value })];
+        if info.target_secs > 0 {
+            parts.push((target.as_str(), Tone::Muted));
+        }
+        self.items.worked.setAttributedTitle(Some(&rich(&parts)));
+        let balance = rules::fmt_balance(info.week_balance);
+        let tone = if info.week_balance < -59 { Tone::Bad } else { Tone::Good };
+        self.items.balance.setAttributedTitle(Some(&rich(&[("Saldo diese Woche:  ", Tone::Label), (&balance, tone)])));
+        let pauses = store::fmt_hm(info.pause_secs);
+        self.items.pauses.setAttributedTitle(Some(&rich(&[("Pausen heute:  ", Tone::Label), (&pauses, Tone::Value)])));
+        let first = info.first_start.map(|f| format!("{} Uhr", fmt_clock(f)));
+        let mut parts = vec![("Beginn heute:  ", Tone::Label), (first.as_deref().unwrap_or("–"), Tone::Value)];
+        if info.start_manual {
+            parts.push(("  (manuell)", Tone::Muted));
+        }
+        self.items.first.setAttributedTitle(Some(&rich(&parts)));
         for (i, item) in self.items.hints.iter().enumerate() {
             match info.warnings.get(i) {
                 Some(w) => {
@@ -566,10 +570,13 @@ impl AppState {
                 store::fmt_hm(info.pause_secs)
             );
             button.setToolTip(Some(&ns(&tip)));
-            if self.last_icon != Some(icon) {
-                set_icon(&button, icon);
-                self.last_icon = Some(icon);
+            let set = self.tracker.settings.icon_set;
+            let height = icon_height(&self.status_item);
+            if self.button_icon != Some((icon, set, height)) {
+                set_icon(&button, icon, set, height);
+                self.button_icon = Some((icon, set, height));
             }
+            self.last_icon = Some(icon);
         }
     }
 
@@ -633,14 +640,25 @@ fn break_text(since: NaiveDateTime, t: NaiveDateTime, min_pause: i64) -> String 
 }
 
 impl IconKind {
-    /// SF-Symbol, Ersatzzeichen (falls das Symbol fehlt) und Beschreibung.
-    fn symbol(self) -> (&'static str, &'static str, &'static str) {
+    /// SF-Symbol (für den Eintrag im Menü) und Beschreibung.
+    fn symbol(self) -> (&'static str, &'static str) {
         match self {
-            IconKind::Running => ("clock.fill", "◷", "Zeiterfassung läuft"),
-            IconKind::Paused => ("pause.circle", "⏸", "Zeiterfassung pausiert"),
-            IconKind::Break => ("cup.and.saucer.fill", "☕", "Pause"),
-            IconKind::Outside => ("moon.stars", "☾", "Außerhalb des Arbeitszeitrahmens"),
-            IconKind::Closed => ("moon.zzz", "☾", "Feierabend"),
+            IconKind::Running => ("clock.fill", "Zeiterfassung läuft"),
+            IconKind::Paused => ("pause.circle", "Zeiterfassung pausiert"),
+            IconKind::Break => ("cup.and.saucer.fill", "Pause"),
+            IconKind::Outside => ("moon.stars", "Außerhalb des Arbeitszeitrahmens"),
+            IconKind::Closed => ("moon.zzz", "Feierabend"),
+        }
+    }
+
+    /// Zustand des Menüleisten-Symbols.
+    fn glyph(self) -> glyphs::State {
+        match self {
+            IconKind::Running => glyphs::State::Running,
+            // gesperrt oder im Ruhezustand – in der Menüleiste kaum je zu sehen
+            IconKind::Paused | IconKind::Break => glyphs::State::Break,
+            IconKind::Outside => glyphs::State::Outside,
+            IconKind::Closed => glyphs::State::Closed,
         }
     }
 }
@@ -649,6 +667,93 @@ impl IconKind {
 fn set_item_symbol(item: &NSMenuItem, symbol: &str, desc: &str) {
     let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(&ns(symbol), Some(&ns(desc)));
     item.setImage(image.as_deref());
+}
+
+/// Darstellung eines Textteils in den Status- und Kennzahl-Zeilen des Menüs.
+#[derive(Clone, Copy)]
+enum Tone {
+    /// Beschriftung in normaler Textfarbe
+    Label,
+    /// Nebensache (Tagessoll, „manuell“)
+    Muted,
+    /// Wert: halbfett, gleich breite Ziffern
+    Value,
+    /// Wert im Plus bzw. erreicht (grün) oder im Minus (rot)
+    Good,
+    Bad,
+    /// Statuszeile: halbfett in der Farbe des Zustands
+    Status(fn() -> Retained<NSColor>),
+}
+
+/// Farbe, die im hellen Erscheinungsbild einen dunkleren, im dunklen den hellen
+/// Systemton nimmt – die Systemfarben allein sind auf hellem Grund zu kontrastarm.
+fn adaptive(light: (f64, f64, f64), dark: fn() -> Retained<NSColor>) -> Retained<NSColor> {
+    let light = NSColor::colorWithSRGBRed_green_blue_alpha(light.0, light.1, light.2, 1.0);
+    let dark = dark();
+    let provider = block2::RcBlock::new(move |appearance: std::ptr::NonNull<NSAppearance>| {
+        let names = NSArray::from_slice(&[unsafe { NSAppearanceNameAqua }, unsafe { NSAppearanceNameDarkAqua }]);
+        let best = unsafe { appearance.as_ref() }.bestMatchFromAppearancesWithNames(&names);
+        let is_dark = best.is_some_and(|n| &*n == unsafe { NSAppearanceNameDarkAqua });
+        // Beide Farben gehören dem Block und leben so lange wie die dynamische Farbe.
+        std::ptr::NonNull::from(if is_dark { &*dark } else { &*light })
+    });
+    unsafe { NSColor::colorWithName_dynamicProvider(None, &provider) }
+}
+
+fn green() -> Retained<NSColor> {
+    adaptive((0.09, 0.50, 0.20), NSColor::systemGreenColor)
+}
+
+fn orange() -> Retained<NSColor> {
+    adaptive((0.74, 0.36, 0.0), NSColor::systemOrangeColor)
+}
+
+/// Feierabend: Indigo statt Blau, damit der Text auf der (meist blauen) Markierung
+/// beim Überfahren mit der Maus lesbar bleibt.
+fn indigo() -> Retained<NSColor> {
+    adaptive((0.30, 0.24, 0.78), NSColor::systemIndigoColor)
+}
+
+fn red() -> Retained<NSColor> {
+    adaptive((0.78, 0.12, 0.12), NSColor::systemRedColor)
+}
+
+/// Menütitel aus mehreren Teilen mit eigener Farbe und Schrift.
+fn rich(parts: &[(&str, Tone)]) -> Retained<NSAttributedString> {
+    let size = NSFont::menuFontOfSize(0.0).pointSize();
+    let strong = || NSFont::monospacedDigitSystemFontOfSize_weight(size, unsafe { NSFontWeightSemibold });
+    let title = NSMutableAttributedString::new();
+    for &(text, tone) in parts {
+        let (color, font) = match tone {
+            Tone::Label => (NSColor::labelColor(), NSFont::menuFontOfSize(0.0)),
+            Tone::Muted => (NSColor::secondaryLabelColor(), NSFont::menuFontOfSize(0.0)),
+            Tone::Value => (NSColor::labelColor(), strong()),
+            Tone::Good => (green(), strong()),
+            Tone::Bad => (red(), strong()),
+            Tone::Status(color) => (color(), NSFont::systemFontOfSize_weight(size, unsafe { NSFontWeightSemibold })),
+        };
+        let keys = unsafe { [NSForegroundColorAttributeName, NSFontAttributeName] };
+        let values: [Retained<AnyObject>; 2] =
+            [Retained::into_super(Retained::into_super(color)), Retained::into_super(Retained::into_super(font))];
+        text_with(&title, text, &NSDictionary::from_retained_objects(&keys, &values));
+    }
+    Retained::into_super(title)
+}
+
+/// Statuszeile: farbiger Punkt und Text in der Farbe des Zustands (wie das Symbol in
+/// der Menüleiste: grün = läuft, orange = Pause; Feierabend indigo).
+fn status_title(text: &str, kind: IconKind) -> Retained<NSAttributedString> {
+    let color: fn() -> Retained<NSColor> = match kind {
+        IconKind::Running => green,
+        IconKind::Break | IconKind::Paused => orange,
+        IconKind::Closed => indigo,
+        IconKind::Outside => NSColor::labelColor,
+    };
+    let dot: fn() -> Retained<NSColor> = match kind {
+        IconKind::Outside => NSColor::systemGrayColor,
+        _ => color,
+    };
+    rich(&[("●\u{2002}", Tone::Status(dot)), (text, Tone::Status(color))])
 }
 
 /// Farbe für Hinweise auf Regelverstöße (wie im Fenster „Aufzeichnungen“).
@@ -706,20 +811,17 @@ fn warning_symbol(color: &NSColor, point_size: f64) -> Option<Retained<NSImage>>
     Some(image)
 }
 
-fn set_icon(button: &objc2_app_kit::NSStatusBarButton, kind: IconKind) {
-    let (symbol, fallback, desc) = kind.symbol();
-    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(&ns(symbol), Some(&ns(desc)));
-    match image {
-        Some(img) => {
-            img.setTemplate(true);
-            button.setImage(Some(&img));
-            button.setTitle(&ns(""));
-        }
-        None => {
-            button.setImage(None);
-            button.setTitle(&ns(fallback));
-        }
-    }
+/// Größe des Menüleisten-Symbols wie bei den Symbolen von macOS (18 pt bei der
+/// üblichen Menüleiste von 24 pt).
+fn icon_height(item: &NSStatusItem) -> u32 {
+    let thickness = item.statusBar().map(|b| b.thickness()).unwrap_or(24.0);
+    (thickness - 6.0).round().clamp(12.0, 20.0) as u32
+}
+
+fn set_icon(button: &objc2_app_kit::NSStatusBarButton, kind: IconKind, set: IconSet, height: u32) {
+    let img = glyphs::image(set, kind.glyph(), height as f64, 0.0, kind.symbol().1);
+    button.setImage(Some(&img));
+    button.setTitle(&ns(""));
 }
 
 // ---------- Bildschirm gesperrt? ----------
@@ -891,11 +993,13 @@ pub fn run() {
     let (close, _) = time_menu(mtm, "Feierabend", sel!(closeDay:), &[0, 15, 30], &controller, &mut relative);
 
     let items = MenuItems {
-        status: menu_item(mtm, "Zeiterfassung", None, "", &controller),
-        worked: menu_item(mtm, "Heute gearbeitet:", None, "", &controller),
-        pauses: menu_item(mtm, "Pausen heute:", None, "", &controller),
-        first: menu_item(mtm, "Beginn heute:", None, "", &controller),
-        balance: menu_item(mtm, "Saldo diese Woche:", None, "", &controller),
+        // Status und Kennzahlen sind anklickbar (öffnen den heutigen Tag), damit macOS
+        // sie nicht ausgraut – deaktivierte Einträge wären schlecht lesbar und farblos.
+        status: menu_item(mtm, "Zeiterfassung", Some(sel!(showToday:)), "", &controller),
+        worked: menu_item(mtm, "Heute gearbeitet:", Some(sel!(showToday:)), "", &controller),
+        pauses: menu_item(mtm, "Pausen heute:", Some(sel!(showToday:)), "", &controller),
+        first: menu_item(mtm, "Beginn heute:", Some(sel!(showToday:)), "", &controller),
+        balance: menu_item(mtm, "Saldo diese Woche:", Some(sel!(showToday:)), "", &controller),
         // Anklickbar (öffnet den heutigen Tag), damit macOS die Warnfarbe nicht ausgraut.
         hints: (0..5).map(|_| menu_item(mtm, "", Some(sel!(showToday:)), "", &controller)).collect(),
         pause: menu_item(mtm, "", Some(sel!(togglePause:)), "p", &controller),
@@ -925,7 +1029,10 @@ pub fn run() {
     ] {
         set_item_symbol(item, symbol, desc);
     }
-    for item in &items.hints {
+    for item in [&items.status, &items.worked, &items.pauses, &items.first, &items.balance]
+        .into_iter()
+        .chain(&items.hints)
+    {
         item.setToolTip(Some(&ns("Im Fenster „Aufzeichnungen“ zeigen")));
     }
     menu.addItem(&items.status);
@@ -993,6 +1100,7 @@ pub fn run() {
         records_window: None,
         last_save: Instant::now(),
         last_icon: None,
+        button_icon: None,
         db,
     };
     state.persist(t);
@@ -1054,4 +1162,63 @@ pub fn run() {
     }
 
     app.run();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use objc2::AnyThread;
+    use objc2_app_kit::{
+        NSAttributedStringNSStringDrawing, NSBezierPath, NSBitmapImageFileType, NSBitmapImageRep, NSDeviceRGBColorSpace, NSGraphicsContext,
+    };
+    use objc2_foundation::NSSize;
+
+    /// Vorschau der Status- und Kennzahl-Zeilen (hell und dunkel, @2x):
+    /// `TAGWERK_MENU_PNG=/pfad/menu cargo test render_menu_lines -- --ignored`
+    #[test]
+    #[ignore]
+    fn render_menu_lines() {
+        let base = std::env::var("TAGWERK_MENU_PNG").expect("TAGWERK_MENU_PNG");
+        for (mode, name, bg) in [
+            ("light", unsafe { NSAppearanceNameAqua }, (0.93, 0.93, 0.93)),
+            ("dark", unsafe { NSAppearanceNameDarkAqua }, (0.17, 0.18, 0.2)),
+        ] {
+            #[allow(deprecated)]
+            unsafe {
+                NSAppearance::setCurrentAppearance(NSAppearance::appearanceNamed(name).as_deref())
+            };
+            let lines = [
+                status_title("Zeiterfassung läuft", IconKind::Running),
+                status_title("Pause seit 12:03 Uhr", IconKind::Break),
+                status_title("Außerhalb des Arbeitszeitrahmens (07:00–22:00 Uhr)", IconKind::Outside),
+                status_title("Feierabend um 17:30 Uhr", IconKind::Closed),
+                rich(&[("Heute gearbeitet:  ", Tone::Label), ("3:57 h", Tone::Value), ("  von 7:48 h", Tone::Muted)]),
+                rich(&[("Pausen heute:  ", Tone::Label), ("0:35 h", Tone::Value)]),
+                rich(&[("Beginn heute:  ", Tone::Label), ("12:42 Uhr", Tone::Value), ("  (manuell)", Tone::Muted)]),
+                rich(&[("Saldo diese Woche:  ", Tone::Label), ("−3:51 h", Tone::Bad)]),
+                rich(&[("Saldo diese Woche:  ", Tone::Label), ("+1:12 h", Tone::Good)]),
+            ];
+            let (w, h) = (900isize, (lines.len() as isize) * 52 + 20);
+            let rep = unsafe {
+                NSBitmapImageRep::initWithBitmapDataPlanes_pixelsWide_pixelsHigh_bitsPerSample_samplesPerPixel_hasAlpha_isPlanar_colorSpaceName_bytesPerRow_bitsPerPixel(
+                    NSBitmapImageRep::alloc(), std::ptr::null_mut(), w, h, 8, 4, true, false, NSDeviceRGBColorSpace, 0, 0,
+                )
+            }
+            .unwrap();
+            // @2x: Punkte = halbe Pixel
+            rep.setSize(NSSize::new(w as f64 / 2.0, h as f64 / 2.0));
+            NSGraphicsContext::saveGraphicsState_class();
+            let ctx = NSGraphicsContext::graphicsContextWithBitmapImageRep(&rep).unwrap();
+            NSGraphicsContext::setCurrentContext(Some(&ctx));
+            NSColor::colorWithSRGBRed_green_blue_alpha(bg.0, bg.1, bg.2, 1.0).set();
+            NSBezierPath::fillRect(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w as f64, h as f64)));
+            for (i, line) in lines.iter().enumerate() {
+                line.drawAtPoint(NSPoint::new(16.0, (h as f64 / 2.0) - 30.0 - i as f64 * 26.0));
+            }
+            NSGraphicsContext::restoreGraphicsState_class();
+            let data = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &NSDictionary::new()) }
+                .unwrap();
+            std::fs::write(format!("{base}_{mode}.png"), data.to_vec()).unwrap();
+        }
+    }
 }

@@ -76,12 +76,13 @@ lipo -archs "$BIN" | grep -qx "arm64" || fail "Das Programm ist nicht für arm64
 # 2) App-Symbol ----------------------------------------------------------------
 step "Erzeuge App-Symbol"
 ICONSET="$WORK/AppIcon.iconset"
+ICON_SRC="assets/AppIcon.png"   # 1024 × 1024, Quelle: assets/AppIcon.svg
+[ -f "$ICON_SRC" ] || fail "$ICON_SRC fehlt."
 mkdir -p "$ICONSET"
-"$BIN" --render-icon "$WORK/icon_1024.png"
 for size in 16 32 128 256 512; do
-  sips -z "$size" "$size" "$WORK/icon_1024.png" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
+  sips -z "$size" "$size" "$ICON_SRC" --out "$ICONSET/icon_${size}x${size}.png" >/dev/null
   double=$((size * 2))
-  sips -z "$double" "$double" "$WORK/icon_1024.png" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
+  sips -z "$double" "$double" "$ICON_SRC" --out "$ICONSET/icon_${size}x${size}@2x.png" >/dev/null
 done
 iconutil -c icns "$ICONSET" -o "$WORK/AppIcon.icns"
 

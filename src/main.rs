@@ -10,10 +10,12 @@
 //!   Tagwerk --screenshot <png>    Fenster "Aufzeichnungen" öffnen, Bild speichern, beenden
 //!   Tagwerk --week-screenshot <png>
 //!                                 Fenster "Wochenansicht" öffnen, Bild speichern, beenden
-//!   Tagwerk --render-icon <png>   App-Symbol zeichnen (für build.sh)
+//!   Tagwerk --settings-screenshot <png>
+//!                                 Fenster "Einstellungen" öffnen, Bild speichern, beenden
 
 mod day;
-mod icon;
+#[cfg(target_os = "macos")]
+mod glyphs;
 #[cfg(target_os = "macos")]
 mod menubar;
 #[cfg(target_os = "macos")]
@@ -43,13 +45,6 @@ fn main() {
             .and_then(|i| args.get(i + 1))
             .cloned()
     };
-
-    if let Some(path) = arg_after("--render-icon") {
-        if let Err(e) = icon::render(1024).save(&path) {
-            fail(format!("Symbol konnte nicht gespeichert werden: {e}"));
-        }
-        return;
-    }
 
     if has("--export") {
         export(arg_after("--from"), arg_after("--to"), arg_after("-o").or_else(|| arg_after("--output")));
@@ -84,6 +79,18 @@ fn main() {
         };
         #[cfg(target_os = "macos")]
         if let Err(e) = week_window::screenshot(std::path::Path::new(&path)) {
+            fail(e);
+        }
+        return;
+    }
+
+    if has("--settings-screenshot") {
+        let Some(path) = arg_after("--settings-screenshot") else {
+            eprintln!("Aufruf: Tagwerk --settings-screenshot <datei.png>");
+            std::process::exit(2);
+        };
+        #[cfg(target_os = "macos")]
+        if let Err(e) = settings_window::screenshot(std::path::Path::new(&path)) {
             fail(e);
         }
         return;

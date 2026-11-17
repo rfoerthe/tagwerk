@@ -28,6 +28,78 @@ pub const WORKDAYS_PER_WEEK: i64 = 5;
 pub const MIN_PAUSE_RANGE: (i64, i64) = (60, 120 * 60);
 pub const WEEKLY_RANGE: (i64, i64) = (3600, 60 * 3600);
 
+/// Symbolsatz für die Menüleiste.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum IconSet {
+    /// Der Arbeitstag als Sonnenbogen über dem Horizont.
+    #[default]
+    Tagbogen,
+    /// Vorhängeschloss mit Uhr: entsperrt = Arbeitszeit.
+    Schlossuhr,
+    /// Fortschrittsring zum Tagessoll.
+    Tagesring,
+    /// Bauarbeiter mit Helm und Hammer.
+    Bauarbeiter,
+    /// Handwerkerin mit Dutt, Schleife und Schraubenschlüssel.
+    Handwerkerin,
+    /// Kaffeetasse mit Gesicht.
+    Kaffeetasse,
+    /// Hamster im Hamsterrad.
+    Hamsterrad,
+    /// Roboter.
+    Roboter,
+    /// Kaninchen mit langen Ohren.
+    Kaninchen,
+}
+
+impl IconSet {
+    pub const ALL: [IconSet; 9] = [
+        IconSet::Tagbogen,
+        IconSet::Schlossuhr,
+        IconSet::Tagesring,
+        IconSet::Bauarbeiter,
+        IconSet::Handwerkerin,
+        IconSet::Kaffeetasse,
+        IconSet::Hamsterrad,
+        IconSet::Roboter,
+        IconSet::Kaninchen,
+    ];
+
+    pub fn name(self) -> &'static str {
+        match self {
+            IconSet::Tagbogen => "Tagbogen",
+            IconSet::Schlossuhr => "Schlossuhr",
+            IconSet::Tagesring => "Tagesring",
+            IconSet::Bauarbeiter => "Bauarbeiter",
+            IconSet::Handwerkerin => "Handwerkerin",
+            IconSet::Kaffeetasse => "Kaffeetasse",
+            IconSet::Hamsterrad => "Hamsterrad",
+            IconSet::Roboter => "Roboter",
+            IconSet::Kaninchen => "Kaninchen",
+        }
+    }
+
+    /// Wert für die Datenbank.
+    pub fn id(self) -> i64 {
+        match self {
+            IconSet::Tagbogen => 0,
+            IconSet::Schlossuhr => 1,
+            IconSet::Tagesring => 2,
+            IconSet::Bauarbeiter => 3,
+            IconSet::Handwerkerin => 4,
+            IconSet::Kaffeetasse => 5,
+            IconSet::Hamsterrad => 6,
+            IconSet::Roboter => 7,
+            IconSet::Kaninchen => 8,
+        }
+    }
+
+    /// Unbekannte Werte ergeben den Standard.
+    pub fn from_id(id: i64) -> Self {
+        Self::ALL.into_iter().find(|s| s.id() == id).unwrap_or_default()
+    }
+}
+
 /// Vom Benutzer einstellbare Werte (alle Zeiten in Sekunden).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Settings {
@@ -39,11 +111,19 @@ pub struct Settings {
     pub frame_from: i64,
     /// Ende des Arbeitszeitrahmens (Sekunden seit Mitternacht).
     pub frame_to: i64,
+    /// Symbolsatz der Menüleiste.
+    pub icon_set: IconSet,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Self { min_pause: 15 * 60, weekly_target: 39 * 3600, frame_from: 7 * 3600, frame_to: 22 * 3600 }
+        Self {
+            min_pause: 15 * 60,
+            weekly_target: 39 * 3600,
+            frame_from: 7 * 3600,
+            frame_to: 22 * 3600,
+            icon_set: IconSet::default(),
+        }
     }
 }
 
@@ -56,6 +136,7 @@ impl Settings {
             weekly_target: self.weekly_target.clamp(WEEKLY_RANGE.0, WEEKLY_RANGE.1),
             frame_from: self.frame_from.clamp(0, DAY_END),
             frame_to: self.frame_to.clamp(0, DAY_END),
+            icon_set: self.icon_set,
         };
         if s.frame_to <= s.frame_from {
             s.frame_from = d.frame_from;
@@ -251,11 +332,20 @@ mod tests {
         assert_eq!(s.daily_target(date(16)), h(7, 48)); // Montag
         assert_eq!(s.daily_target(date(15)), 0); // Sonntag
         assert_eq!(s.frame_text(), "07:00–22:00 Uhr");
-        let bad = Settings { frame_from: h(22, 0), frame_to: h(7, 0), min_pause: 0, weekly_target: 0 };
+        let bad = Settings { frame_from: h(22, 0), frame_to: h(7, 0), min_pause: 0, weekly_target: 0, ..s };
         let fixed = bad.sanitized();
         assert_eq!((fixed.frame_from, fixed.frame_to), (h(7, 0), h(22, 0)));
         assert_eq!(fixed.min_pause, 60);
         assert_eq!(fixed.weekly_target, 3600);
+    }
+
+    #[test]
+    fn icon_set_ids() {
+        assert_eq!(IconSet::default(), IconSet::Tagbogen);
+        for s in IconSet::ALL {
+            assert_eq!(IconSet::from_id(s.id()), s);
+        }
+        assert_eq!(IconSet::from_id(99), IconSet::Tagbogen);
     }
 
     #[test]

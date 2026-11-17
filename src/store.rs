@@ -61,6 +61,7 @@ const KEY_MIN_PAUSE: &str = "min_pause_s";
 const KEY_WEEKLY: &str = "weekly_target_s";
 const KEY_FRAME_FROM: &str = "frame_from_s";
 const KEY_FRAME_TO: &str = "frame_to_s";
+const KEY_ICON_SET: &str = "icon_set";
 
 const HEAD_CORRECTIONS: &str = "## Korrekturen";
 const HEAD_PERIODS: &str = "## Erfasste Perioden";
@@ -181,6 +182,7 @@ impl Db {
                 KEY_WEEKLY => s.weekly_target = value,
                 KEY_FRAME_FROM => s.frame_from = value,
                 KEY_FRAME_TO => s.frame_to = value,
+                KEY_ICON_SET => s.icon_set = rules::IconSet::from_id(value),
                 _ => {}
             }
         }
@@ -195,6 +197,7 @@ impl Db {
             (KEY_WEEKLY, s.weekly_target),
             (KEY_FRAME_FROM, s.frame_from),
             (KEY_FRAME_TO, s.frame_to),
+            (KEY_ICON_SET, s.icon_set.id()),
         ] {
             tx.execute(
                 "INSERT INTO settings (key, value) VALUES (?1, ?2)
@@ -883,7 +886,13 @@ mod tests {
         assert_eq!(days.len(), 1);
         assert!(days[0].breaks.is_empty(), "offene Pause wird ignoriert");
 
-        let custom = Settings { min_pause: 20 * 60, weekly_target: h(38, 30), frame_from: h(6, 0), frame_to: h(20, 0) };
+        let custom = Settings {
+            min_pause: 20 * 60,
+            weekly_target: h(38, 30),
+            frame_from: h(6, 0),
+            frame_to: h(20, 0),
+            icon_set: rules::IconSet::Schlossuhr,
+        };
         let mut other = Db::open_in(&dir, false).unwrap();
         other.save_settings(&custom).unwrap();
         assert!(db.changed_externally(), "Einstellungen ändern die Datenbank");

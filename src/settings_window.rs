@@ -1,14 +1,15 @@
 //! Fenster „Einstellungen“ nach den macOS Human Interface Guidelines: nicht modal,
 //! Änderungen gelten sofort, kein „OK“/„Abbrechen“.
 //!
-//! Einstellbar sind der Arbeitszeitrahmen, die Regelwochenarbeitszeit und die
-//! Mindestdauer einer Pause. Gespeichert wird in der Datenbank; die jeweils andere
+//! Einstellbar sind der Arbeitszeitrahmen, die Regelwochenarbeitszeit, die
+//! Mindestdauer einer Pause und der Symbolsatz der Menüleiste. Gespeichert wird in der Datenbank; die jeweils andere
 //! Tagwerk-Instanz (Menüleiste bzw. Fenster „Aufzeichnungen“) übernimmt die Werte.
 //!
 //! Rechts in der Symbolleiste öffnet ein Ordner-Knopf den Datenordner im Finder.
 
 use crate::day::{secs_of, DAY_END};
-use crate::rules::{self, Settings, MIN_PAUSE_RANGE, WEEKLY_RANGE};
+use crate::glyphs;
+use crate::rules::{self, IconSet, Settings, MIN_PAUSE_RANGE, WEEKLY_RANGE};
 use crate::store;
 use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, TimeZone};
 use objc2::rc::Retained;
@@ -54,9 +55,23 @@ struct State {
     pause: Retained<NSTextField>,
     pause_stepper: Retained<NSStepper>,
     daily_note: Retained<NSTextField>,
+    icon_popup: Retained<NSPopUpButton>,
+    icon_preview: Vec<Retained<NSImageView>>,
     error: Retained<NSTextField>,
     on_change: fn(),
 }
+
+/// Höhe der Vorschau (wie in der Menüleiste) und der Symbole im Auswahlmenü.
+const PREVIEW_H: f64 = 18.0;
+const POPUP_ICON_H: f64 = 14.0;
+
+/// Zustände in der Reihenfolge der Vorschau.
+const PREVIEW_STATES: [(glyphs::State, &str); 4] = [
+    (glyphs::State::Running, "Zeiterfassung läuft"),
+    (glyphs::State::Break, "Pause"),
+    (glyphs::State::Outside, "Außerhalb des Arbeitszeitrahmens"),
+    (glyphs::State::Closed, "Feierabend"),
+];
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
@@ -157,6 +172,17 @@ define_class!(
             NSWorkspace::sharedWorkspace().openURL(&url);
         }
 
+        #[unsafe(method(iconSetChanged:))]
+        fn icon_set_changed(&self, _sender: Option<&AnyObject>) {
+            with_state(|s| {
+                let i = s.icon_popup.indexOfSelectedItem();
+                if let Some(&set) = usize::try_from(i).ok().and_then(|i| IconSet::ALL.get(i)) {
+                    s.settings.icon_set = set;
+                }
+            });
+            save();
+        }
+
         #[unsafe(method(resetDefaults:))]
         fn reset_defaults(&self, _sender: Option<&AnyObject>) {
             with_state(|s| {
@@ -189,6 +215,11 @@ impl State {
             "Das sind {} pro Arbeitstag (Montag bis Freitag).",
             store::fmt_hm(s.daily_target_workday())
         )));
+        let index = IconSet::ALL.iter().position(|&x| x == s.icon_set).unwrap_or(0);
+        self.icon_popup.selectItemAtIndex(index as isize);
+        for (view, (state, desc)) in self.icon_preview.iter().zip(PREVIEW_STATES) {
+            view.setImage(Some(&glyphs::image(s.icon_set, state, PREVIEW_H, 0.0, desc)));
+        }
     }
 
     fn set_weekly(&mut self, value: Option<i64>) {
@@ -319,6 +350,45 @@ fn hstack(views: &[&NSView]) -> Retained<NSStackView> {
     s
 }
 
+/// Auswahl des Symbolsatzes; jeder Eintrag zeigt sein Symbol für „läuft“.
+fn icon_popup(target: &Controller) -> Retained<NSPopUpButton> {
+    let p = NSPopUpButton::initWithFrame_pullsDown(NSPopUpButton::alloc(mtm()), NSRect::ZERO, false);
+    // gleich breite Symbole, damit die Namen untereinander stehen
+    let w = IconSet::ALL.iter().map(|&set| glyphs::width(set, POPUP_ICON_H)).fold(0.0, f64::max);
+    for set in IconSet::ALL {
+        p.addItemWithTitle(&ns(set.name()));
+        if let Some(item) = p.lastItem() {
+            item.setImage(Some(&glyphs::image(set, glyphs::State::Running, POPUP_ICON_H, w, set.name())));
+        }
+    }
+    unsafe {
+        p.setTarget(Some(target));
+        p.setAction(Some(sel!(iconSetChanged:)));
+    }
+    p
+}
+
+/// Vorschau aller Zustände des gewählten Satzes (Bilder setzt `State::fill`).
+fn icon_preview() -> (Retained<NSStackView>, Vec<Retained<NSImageView>>) {
+    let stack = NSStackView::new(mtm());
+    stack.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+    stack.setAlignment(NSLayoutAttribute::CenterY);
+    stack.setSpacing(16.0);
+    let views: Vec<_> = PREVIEW_STATES
+        .iter()
+        .map(|(_, desc)| {
+            let v = NSImageView::new(mtm());
+            v.setImageScaling(NSImageScaling::ScaleNone);
+            // Template-Bilder wie in der Menüleiste in Textfarbe (sonst grau)
+            v.setContentTintColor(Some(&NSColor::textColor()));
+            v.setToolTip(Some(&ns(desc)));
+            stack.addArrangedSubview(&v);
+            v
+        })
+        .collect();
+    (stack, views)
+}
+
 fn view<T: AsRef<NSView>>(v: &T) -> Retained<NSView> {
     v.as_ref().retain()
 }
@@ -374,6 +444,8 @@ fn build(on_change: fn()) -> State {
         1.0,
     );
     let daily_note = caption("");
+    let icon_popup = icon_popup(target);
+    let (preview_row, icon_preview) = icon_preview();
     let error = caption("");
     error.setTextColor(Some(&NSColor::systemRedColor()));
     error.setHidden(true);
@@ -408,6 +480,12 @@ fn build(on_change: fn()) -> State {
                  Nach dem Arbeitszeitgesetz zählen Pausen erst ab 15 Minuten.",
             )),
         ]),
+        NSArray::from_retained_slice(&[view(&label("Menüleiste:")), view(&icon_popup)]),
+        NSArray::from_retained_slice(&[empty(), view(&preview_row)]),
+        NSArray::from_retained_slice(&[
+            empty(),
+            view(&caption("Von links: läuft, Pause, außerhalb des Arbeitszeitrahmens, Feierabend.")),
+        ]),
         NSArray::from_retained_slice(&[empty(), view(&error)]),
         NSArray::from_retained_slice(&[empty(), view(&reset)]),
     ];
@@ -416,9 +494,13 @@ fn build(on_change: fn()) -> State {
     grid.setColumnSpacing(8.0);
     grid.setRowSpacing(4.0);
     grid.columnAtIndex(0).setXPlacement(NSGridCellPlacement::Trailing);
-    for r in [2, 4, 7] {
+    for r in [2, 4, 6, 10] {
         grid.rowAtIndex(r).setTopPadding(14.0);
     }
+    // Bilder haben keine Grundlinie
+    grid.rowAtIndex(7).setRowAlignment(NSGridRowAlignment::None);
+    grid.rowAtIndex(7).setTopPadding(6.0);
+    grid.rowAtIndex(7).setBottomPadding(2.0);
     grid.setTranslatesAutoresizingMaskIntoConstraints(false);
 
     let size = grid.fittingSize();
@@ -470,6 +552,8 @@ fn build(on_change: fn()) -> State {
         pause,
         pause_stepper,
         daily_note,
+        icon_popup,
+        icon_preview,
         error,
         on_change,
     };
@@ -501,4 +585,38 @@ pub fn show(on_change: fn()) {
         NSApplication::sharedApplication(mtm()).activateIgnoringOtherApps(true);
         s.window.makeKeyAndOrderFront(None);
     });
+}
+
+/// Zum Testen: Fenster „Einstellungen“ mit dem Stand der Datenbank öffnen, ein Bild
+/// speichern und beenden (`Tagwerk --settings-screenshot <png>`; Symbolsatz zur Ansicht
+/// über `TAGWERK_ICON_SET=0|1|2`, Erscheinungsbild über `TAGWERK_APPEARANCE=dark`).
+/// Es wird nichts gespeichert.
+pub fn screenshot(path: &std::path::Path) -> Result<(), String> {
+    let mtm = MainThreadMarker::new().ok_or("Das Fenster muss im Hauptthread laufen.")?;
+    let app = NSApplication::sharedApplication(mtm);
+    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    if let Ok(a) = std::env::var("TAGWERK_APPEARANCE") {
+        let name = if a == "dark" { unsafe { NSAppearanceNameDarkAqua } } else { unsafe { NSAppearanceNameAqua } };
+        app.setAppearance(NSAppearance::appearanceNamed(name).as_deref());
+    }
+    let state = build(|| {});
+    STATE.with(|s| *s.borrow_mut() = Some(state));
+    with_state(|s| {
+        if let Some(id) = std::env::var("TAGWERK_ICON_SET").ok().and_then(|v| v.parse().ok()) {
+            s.settings.icon_set = IconSet::from_id(id);
+        }
+        s.fill();
+        s.window.orderFront(None);
+    });
+    let window = with_state(|s| s.window.clone()).ok_or("kein Fenster")?;
+    let content = window.contentView().ok_or("kein Inhalt")?;
+    let frame_view = unsafe { content.superview() }.unwrap_or(content);
+    frame_view.layoutSubtreeIfNeeded();
+    frame_view.displayIfNeeded();
+    let bounds = frame_view.bounds();
+    let rep = frame_view.bitmapImageRepForCachingDisplayInRect(bounds).ok_or("kein Bildpuffer")?;
+    frame_view.cacheDisplayInRect_toBitmapImageRep(bounds, &rep);
+    let data = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &objc2_foundation::NSDictionary::new()) }
+        .ok_or("PNG konnte nicht erzeugt werden")?;
+    std::fs::write(path, data.to_vec()).map_err(|e| e.to_string())
 }

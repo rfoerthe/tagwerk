@@ -26,14 +26,26 @@ korrigieren.
   7:48 Stunden pro Arbeitstag) ergibt sich der Saldo je Tag, Woche und Monat.
 - **Menüleiste** – zeigt den Status (läuft, Pause, pausiert, außerhalb des Arbeitszeitrahmens,
   Feierabend), die Arbeitszeit von heute samt Soll, die Pausen, den Beginn, den Saldo
-  der Woche und Hinweise auf Regelverstöße.
+  der Woche und Hinweise auf Regelverstöße. Der Status ist farbig (grün = läuft,
+  orange = Pause, indigo = Feierabend), die Werte sind hervorgehoben, der Saldo grün im
+  Plus und rot im Minus; ein Klick auf eine dieser Zeilen zeigt den heutigen Tag im
+  Fenster „Aufzeichnungen“. Das Symbol ist so groß wie die übrigen
+  Symbole der Menüleiste; „läuft“ ist grün, „Pause“ orange hinterlegt, „außerhalb des
+  Arbeitszeitrahmens“ und „Feierabend“ sind einfarbig. Zur Wahl stehen neun Symbolsätze
+  (siehe Einstellungen): **Tagbogen** (Standard; der Arbeitstag als Sonnenbogen,
+  Feierabend als Sonnenuntergang), **Schlossuhr** (offenes Schloss = Arbeitszeit,
+  geschlossen = Pause) und **Tagesring** (Fortschritt zum Tagessoll) – dazu sechs
+  verspielte: **Bauarbeiter** und **Handwerkerin** (mit Hammer bzw.
+  Schraubenschlüssel bei der Arbeit, mit Kaffee in der Pause, winkend zum Feierabend),
+  **Kaffeetasse** mit Gesicht, **Hamsterrad**, **Roboter** und **Kaninchen** (in der
+  Pause knickt ein Ohr um).
 - **Manuelle Korrekturen** – Arbeitsbeginn und Feierabend jeweils „jetzt“, „vor N
   Minuten“ oder zu einer frei gewählten Uhrzeit; im Fenster „Aufzeichnungen“ zusätzlich
   Pausen. Korrekturen liegen als eigene Schicht über den erfassten Perioden und lassen
   sich jederzeit zurücknehmen.
 - **Hinweise bei Regelverstößen** – siehe [Regeln](#regeln).
-- **Einstellungen** – Arbeitszeitrahmen, Regelwochenarbeitszeit und Mindestpause
-  (Menüleiste „Einstellungen …“ oder ⌘, im Fenster „Aufzeichnungen“). Änderungen gelten
+- **Einstellungen** – Arbeitszeitrahmen, Regelwochenarbeitszeit, Mindestpause und
+  Symbolsatz der Menüleiste mit Vorschau aller Zustände (Menüleiste „Einstellungen …“ oder ⌘, im Fenster „Aufzeichnungen“). Änderungen gelten
   sofort, auch für bereits erfasste Tage. Der Ordner-Knopf rechts in der Titelleiste
   zeigt den Datenordner im Finder.
 - **Fenster „Aufzeichnungen“** – natives macOS-Fenster mit Kennzahlen (heute, Woche,
@@ -102,6 +114,10 @@ Ein fertiges App-Bundle samt DMG erzeugt `build.sh`:
 es vorher regulär beendet – die laufende Erfassung wird dabei gespeichert – und nach
 dem Kopieren wieder gestartet.
 
+Das App-Symbol liegt als `assets/AppIcon.png` (1024 × 1024) im Projekt, die Vorlage
+dazu als `assets/AppIcon.svg`; `build.sh` erzeugt daraus `AppIcon.icns`. Die Symbole der
+Menüleiste zeichnet die App selbst (`src/glyphs.rs`), damit sie in jeder Höhe scharf sind.
+
 Das Ergebnis liegt in `target/dist/Tagwerk-<Version>.dmg`. Das Skript führt vorher
 `cargo clean` aus; ältere DMGs in `target/dist` werden dabei gelöscht.
 
@@ -129,7 +145,10 @@ Tagwerk --export [--from TT.MM.JJJJ] [--to TT.MM.JJJJ] [-o datei.md]
                               (Standard: die letzten 28 Tage, Ausgabe auf stdout)
 Tagwerk --import <datei.md>   Tage aus einem Markdown-Export übernehmen
 Tagwerk --screenshot <png>    Fenster „Aufzeichnungen“ als Bild speichern und beenden
-Tagwerk --render-icon <png>   App-Symbol zeichnen (wird von build.sh genutzt)
+Tagwerk --week-screenshot <png>
+                              Fenster „Wochenansicht“ als Bild speichern und beenden
+Tagwerk --settings-screenshot <png>
+                              Fenster „Einstellungen“ als Bild speichern und beenden
 ```
 
 Es läuft immer nur eine Instanz der Menüleisten-App.
