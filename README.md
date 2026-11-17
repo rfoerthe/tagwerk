@@ -220,7 +220,12 @@ Das Ergebnis liegt in `target/dist/Tagwerk-<Version>.dmg`. Das Skript führt vor
 |------------------|---------------------------------------------|--------------------------------|
 | `SIGN_IDENTITY`  | Zertifikat „Developer ID Application: …“    | erste gefundene Developer-ID   |
 | `NOTARY_PROFILE` | Schlüsselbund-Profil für `notarytool`       | `general-notary`               |
-| `BUNDLE_ID`      | Bundle-Kennung                              | `com.tagwerk.app`              |
+| `BUNDLE_ID`      | Bundle-Kennung                              | `de.foerther.tagwerk`          |
+
+`build.sh` notarisiert zuerst die App und heftet ihr das Ticket an, damit sie nach dem
+Kopieren auch ohne Internetverbindung startet. Danach packt es die App ins DMG und
+notarisiert auch das DMG – pro Build gibt es also zwei Einreichungen bei Apple. Beide
+müssen Gatekeeper als „Notarized Developer ID“ bestehen, sonst bricht das Skript ab.
 
 Das Notary-Profil wird einmalig angelegt mit:
 

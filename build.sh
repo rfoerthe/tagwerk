@@ -13,7 +13,7 @@
 # Einstellungen über Umgebungsvariablen:
 #   SIGN_IDENTITY   "Developer ID Application: …" (Standard: erste gefundene Developer-ID)
 #   NOTARY_PROFILE  Schlüsselbund-Profil für notarytool (Standard: general-notary)
-#   BUNDLE_ID       Bundle-Kennung (Standard: com.tagwerk.app)
+#   BUNDLE_ID       Bundle-Kennung (Standard: de.foerther.tagwerk)
 #   INSTALL_DIR     Ziel für --install (Standard: /Applications)
 #
 # Das Notary-Profil wird einmalig angelegt mit:
@@ -22,7 +22,7 @@
 set -euo pipefail
 
 APP_NAME="Tagwerk"
-BUNDLE_ID="${BUNDLE_ID:-com.tagwerk.app}"
+BUNDLE_ID="${BUNDLE_ID:-de.foerther.tagwerk}"
 NOTARY_PROFILE="${NOTARY_PROFILE:-general-notary}"
 SIGN_IDENTITY="${SIGN_IDENTITY:-}"
 MIN_MACOS="13.0"
@@ -142,7 +142,50 @@ else
   codesign --force --sign - "$APP"
 fi
 
-# 5) DMG -----------------------------------------------------------------------
+# Reicht eine Datei bei Apple ein und wartet auf das Ergebnis.
+notarize() {
+  local file="$1" log="$2" sub_id
+  # Bei "Invalid" endet notarytool je nach Version nicht mit Fehler –
+  # maßgeblich ist allein der Status im Log.
+  xcrun notarytool submit "$file" --keychain-profile "$NOTARY_PROFILE" --wait | tee "$log" || true
+  if ! grep -q "status: Accepted" "$log"; then
+    sub_id="$(sed -n 's/^ *id: \(.*\)$/\1/p' "$log" | head -n1)"
+    fail "Notarisierung von $(basename "$file") nicht akzeptiert. Details: xcrun notarytool log ${sub_id:-<id>} --keychain-profile $NOTARY_PROFILE"
+  fi
+}
+
+# Gatekeeper muss die Datei als notarisierte Developer-ID-Software anerkennen.
+#   gatekeeper_check execute <App>   bzw.   gatekeeper_check open <DMG>
+gatekeeper_check() {
+  local type="$1" file="$2" out
+  local args=(--assess --type "$type" -vv)
+  [[ "$type" == open ]] && args+=(--context context:primary-signature)
+  if ! out="$(spctl "${args[@]}" "$file" 2>&1)" \
+     || [[ "$out" != *"source=Notarized Developer ID"* ]]; then
+    printf '%s\n' "$out" >&2
+    fail "Gatekeeper erkennt $(basename "$file") nicht als notarisierte Developer-ID-Software an."
+  fi
+  printf '%s\n' "$out"
+}
+
+# 5) App notarisieren und Ticket anheften --------------------------------------
+# Die App bekommt ihr eigenes Ticket, bevor sie ins DMG kommt. Nach dem Kopieren
+# nach /Applications startet sie dann auch ohne Internetverbindung – Gatekeeper
+# muss beim ersten Start nicht bei Apple nachfragen.
+if [[ "$DO_NOTARIZE" == 1 ]]; then
+  step "Notarisiere $APP_NAME.app bei Apple (Profil: $NOTARY_PROFILE) – das kann einige Minuten dauern"
+  ZIP="$WORK/$APP_NAME.zip"
+  rm -f "$ZIP"
+  ditto -c -k --keepParent "$APP" "$ZIP"
+  notarize "$ZIP" "$WORK/notary-app.log"
+  rm -f "$ZIP"
+  step "Hefte Notarisierungs-Ticket an $APP_NAME.app"
+  xcrun stapler staple "$APP"
+  xcrun stapler validate "$APP"
+  gatekeeper_check execute "$APP"
+fi
+
+# 6) DMG -----------------------------------------------------------------------
 step "Erzeuge $DMG"
 STAGE="$WORK/dmg"
 mkdir -p "$STAGE"
@@ -162,34 +205,26 @@ if [[ "$DO_SIGN" == 1 ]]; then
   codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG"
 fi
 
-# 6) Notarisieren --------------------------------------------------------------
+# 7) DMG notarisieren ----------------------------------------------------------
 if [[ "$DO_NOTARIZE" == 1 ]]; then
-  step "Notarisiere bei Apple (Profil: $NOTARY_PROFILE) – das kann einige Minuten dauern"
-  LOG="$WORK/notary.log"
-  xcrun notarytool submit "$DMG" --keychain-profile "$NOTARY_PROFILE" --wait | tee "$LOG"
-  if ! grep -q "status: Accepted" "$LOG"; then
-    SUB_ID="$(sed -n 's/^ *id: \(.*\)$/\1/p' "$LOG" | head -n1)"
-    fail "Notarisierung nicht akzeptiert. Details: xcrun notarytool log ${SUB_ID:-<id>} --keychain-profile $NOTARY_PROFILE"
-  fi
-  step "Hefte Notarisierungs-Ticket an"
+  step "Notarisiere $(basename "$DMG") bei Apple (Profil: $NOTARY_PROFILE) – das kann einige Minuten dauern"
+  notarize "$DMG" "$WORK/notary-dmg.log"
+  step "Hefte Notarisierungs-Ticket an $(basename "$DMG")"
   xcrun stapler staple "$DMG"
   xcrun stapler validate "$DMG"
-  spctl --assess --type open --context context:primary-signature --verbose "$DMG" || true
+  gatekeeper_check open "$DMG"
 fi
 
 # Prüfsumme erst nach dem Anheften des Tickets – das verändert das DMG.
 step "Erzeuge Prüfsumme $(basename "$DMG").sha256"
 ( cd "$DIST" && shasum -a 256 "$(basename "$DMG")" > "$(basename "$DMG").sha256" )
 
-# 7) Installieren --------------------------------------------------------------
+# 8) Installieren --------------------------------------------------------------
+# Mit Notarisierung ist das Ticket schon in Schritt 5 an die App geheftet worden.
 if [[ "$DO_INSTALL" == 1 ]]; then
   TARGET_APP="$INSTALL_DIR/$APP_NAME.app"
   TARGET_BIN="$TARGET_APP/Contents/MacOS/$APP_NAME"
   [[ -w "$INSTALL_DIR" ]] || fail "Keine Schreibrechte für $INSTALL_DIR."
-  if [[ "$DO_NOTARIZE" == 1 ]]; then
-    # Das Ticket der Notarisierung gilt auch für die App im DMG.
-    xcrun stapler staple "$APP" >/dev/null || echo "Hinweis: Ticket konnte nicht an die App geheftet werden." >&2
-  fi
 
   WAS_RUNNING=0
   if pgrep -xf "$TARGET_BIN" >/dev/null; then
