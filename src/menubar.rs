@@ -8,6 +8,7 @@ use crate::rules;
 use crate::settings_window;
 use crate::store;
 use crate::tracker::{PauseReason, Tracker};
+use crate::week_window;
 use chrono::{DateTime, Duration, Local, NaiveDateTime, TimeZone};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyClass, AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
@@ -203,6 +204,21 @@ define_class!(
             });
         }
 
+        #[unsafe(method(showWeek:))]
+        fn show_week(&self, _sender: Option<&AnyObject>) {
+            let snap = with_state(|s| {
+                let t = now();
+                s.sync_from_db(t);
+                if s.tracker.roll_over(t) {
+                    s.persist(t);
+                }
+                s.week_snapshot(t)
+            });
+            if let Some(snap) = snap {
+                week_window::show(snap, open_day_in_records);
+            }
+        }
+
         #[unsafe(method(showSettings:))]
         fn show_settings(&self, _sender: Option<&AnyObject>) {
             settings_window::show(settings_changed);
@@ -333,6 +349,16 @@ fn resume_auto() {
             s.persist(t);
         }
         s.refresh();
+    });
+}
+
+/// Doppelklick auf einen Tag in der Wochenansicht: im Fenster „Aufzeichnungen“ zeigen.
+fn open_day_in_records(date: chrono::NaiveDate) {
+    with_state(|s| {
+        let t = now();
+        s.sync_from_db(t);
+        s.persist(t);
+        s.open_records_window_at(Some(date));
     });
 }
 
@@ -528,6 +554,9 @@ impl AppState {
         self.items.close.setHidden(closed);
         self.items.reopen.setHidden(!closed);
         self.items.login.setState(if login_item_enabled() { 1 } else { 0 });
+        if week_window::is_open() {
+            week_window::update(self.week_snapshot(t));
+        }
 
         if let Some(button) = self.status_item.button(mtm) {
             let state = match icon {
@@ -547,6 +576,16 @@ impl AppState {
                 set_icon(&button, icon);
                 self.last_icon = Some(icon);
             }
+        }
+    }
+
+    /// Stand für die Wochenansicht (inklusive laufender Periode).
+    fn week_snapshot(&self, t: NaiveDateTime) -> week_window::Snapshot {
+        week_window::Snapshot {
+            days: self.tracker.snapshot(t),
+            settings: self.tracker.settings,
+            now: t,
+            running: self.tracker.is_running(),
         }
     }
 
@@ -873,6 +912,7 @@ pub fn run() {
         relative,
     };
     let records = menu_item(mtm, "Aufzeichnungen …", Some(sel!(showRecords:)), "a", &controller);
+    let week = menu_item(mtm, "Wochenansicht …", Some(sel!(showWeek:)), "w", &controller);
     let settings = menu_item(mtm, "Einstellungen …", Some(sel!(showSettings:)), ",", &controller);
     let folder = menu_item(mtm, "Datenordner im Finder zeigen", Some(sel!(openFolder:)), "", &controller);
     let quit = menu_item(mtm, "Tagwerk beenden", Some(sel!(quit:)), "q", &controller);
@@ -886,6 +926,7 @@ pub fn run() {
         (&items.close, "moon", "Feierabend"),
         (&items.reopen, "arrow.uturn.backward", "Feierabend aufheben"),
         (&records, "tablecells", "Aufzeichnungen"),
+        (&week, "calendar", "Wochenansicht"),
         (&settings, "gearshape", "Einstellungen"),
         (&folder, "folder", "Datenordner"),
         (&quit, "power", "Beenden"),
@@ -911,6 +952,7 @@ pub fn run() {
     menu.addItem(&items.reopen);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&records);
+    menu.addItem(&week);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&settings);
     menu.addItem(&folder);

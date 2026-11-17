@@ -8,6 +8,8 @@
 //!                                 (Standard: die letzten 28 Tage, Ausgabe auf stdout)
 //!   Tagwerk --import <datei.md>   Tage aus einem Markdown-Export übernehmen
 //!   Tagwerk --screenshot <png>    Fenster "Aufzeichnungen" öffnen, Bild speichern, beenden
+//!   Tagwerk --week-screenshot <png>
+//!                                 Fenster "Wochenansicht" öffnen, Bild speichern, beenden
 //!   Tagwerk --render-icon <png>   App-Symbol zeichnen (für build.sh)
 
 mod day;
@@ -21,6 +23,8 @@ mod rules;
 mod settings_window;
 mod store;
 mod tracker;
+#[cfg(target_os = "macos")]
+mod week_window;
 
 use chrono::{Duration, Local};
 use std::path::PathBuf;
@@ -68,6 +72,18 @@ fn main() {
         };
         #[cfg(target_os = "macos")]
         if let Err(e) = records::run(Some(PathBuf::from(path))) {
+            fail(e);
+        }
+        return;
+    }
+
+    if has("--week-screenshot") {
+        let Some(path) = arg_after("--week-screenshot") else {
+            eprintln!("Aufruf: Tagwerk --week-screenshot <datei.png>");
+            std::process::exit(2);
+        };
+        #[cfg(target_os = "macos")]
+        if let Err(e) = week_window::screenshot(std::path::Path::new(&path)) {
             fail(e);
         }
         return;

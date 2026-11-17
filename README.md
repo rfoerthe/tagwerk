@@ -39,6 +39,12 @@ korrigieren.
   Monat, Durchschnitt), einer Tabelle aller Tage mit Saldo und Wochensummen und einem
   Inspektor, in dem sich Arbeitsbeginn, Pausen und Feierabend eines Tages korrigieren
   lassen – auch für Tage ohne Aufzeichnung. Hell- und Dunkelmodus folgen dem System.
+- **Wochenansicht** – Menüleiste „Wochenansicht …“ (⌘W bei geöffnetem Menü) zeigt eine
+  Kalenderwoche wie einen Kalender: je Tag eine Spalte, jeder Arbeitsabschnitt ein Block
+  von Beginn bis Ende – das Ergebnis aus automatischer Erfassung und manuellen
+  Korrekturen (Arbeitsbeginn, Feierabend, Pausen). Blättern mit ‹ › oder den
+  Pfeiltasten, „Heute“ (⌘T) springt zur aktuellen Woche; ein Doppelklick auf einen Tag
+  öffnet das Fenster „Aufzeichnungen“, der Tooltip eines Blocks nennt manuelle Grenzen.
 - **Export als Markdown** – für einen frei wählbaren Zeitraum (Standard: die letzten
   vier Wochen) im Fenster „Aufzeichnungen“ oder über die Kommandozeile.
 - **Bei Anmeldung starten** – per Menüpunkt als Anmeldeobjekt eintragen
