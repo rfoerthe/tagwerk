@@ -20,7 +20,7 @@ use objc2_foundation::{
 };
 use std::cell::{Cell, RefCell};
 use std::process::{Child, Command};
-use std::time::{Instant, SystemTime};
+use std::time::Instant;
 
 /// Menü-Tag: Uhrzeit im Dialog wählen.
 const TAG_ASK: isize = -1;
@@ -71,8 +71,7 @@ struct AppState {
     records_window: Option<Child>,
     last_save: Instant,
     last_icon: Option<IconKind>,
-    /// Änderungszeit der Datei nach dem letzten eigenen Schreiben.
-    file_mtime: Option<SystemTime>,
+    db: store::Db,
 }
 
 thread_local! {
@@ -88,7 +87,7 @@ fn with_state<R>(f: impl FnOnce(&mut AppState) -> R) -> Option<R> {
 fn act(f: impl FnOnce(&mut AppState, NaiveDateTime)) {
     with_state(|s| {
         let t = now();
-        s.sync_from_disk(t);
+        s.sync_from_db(t);
         s.tracker.roll_over(t);
         f(s, t);
         s.persist(t);
@@ -109,7 +108,7 @@ define_class!(
         fn menu_will_open(&self, _menu: &NSMenu) {
             with_state(|s| {
                 let t = now();
-                s.sync_from_disk(t);
+                s.sync_from_db(t);
                 if s.tracker.roll_over(t) {
                     s.persist(t);
                 }
@@ -192,8 +191,19 @@ define_class!(
             with_state(|s| {
                 // Vorher speichern, damit das Fenster den aktuellen Stand zeigt.
                 let t = now();
-                s.sync_from_disk(t);
+                s.sync_from_db(t);
                 s.persist(t);
+                s.open_records_window();
+            });
+        }
+
+        #[unsafe(method(exportRecords:))]
+        fn export_records(&self, _sender: Option<&AnyObject>) {
+            with_state(|s| {
+                let t = now();
+                s.sync_from_db(t);
+                s.persist(t);
+                let _ = std::fs::write(store::export_request_file(), "1");
                 s.open_records_window();
             });
         }
@@ -222,7 +232,7 @@ define_class!(
         fn tick(&self, _timer: Option<&AnyObject>) {
             with_state(|s| {
                 let t = now();
-                let mut dirty = s.sync_from_disk(t);
+                let mut dirty = s.sync_from_db(t);
                 dirty |= s.tracker.roll_over(t);
                 let locked = screen_locked();
                 if s.tracker.is_running() && locked {
@@ -307,7 +317,7 @@ fn pause_for(reason: PauseReason) {
 fn resume_auto() {
     with_state(|s| {
         let t = now();
-        s.sync_from_disk(t);
+        s.sync_from_db(t);
         s.tracker.roll_over(t);
         if s.tracker.start(t) {
             s.persist(t);
@@ -328,7 +338,7 @@ fn end_break_now() {
 fn shutdown() {
     with_state(|s| {
         let t = now();
-        s.sync_from_disk(t);
+        s.sync_from_db(t);
         s.tracker.stop(t, PauseReason::Manual);
         s.persist(t);
         if let Some(mut child) = s.records_window.take() {
@@ -427,31 +437,28 @@ fn ask_end_break() {
 }
 
 impl AppState {
-    /// Übernimmt Änderungen, die das Fenster „Aufzeichnungen“ (oder ein Editor) in die
-    /// Datei geschrieben hat. Gibt `true` zurück, wenn neu eingelesen wurde.
-    fn sync_from_disk(&mut self, t: NaiveDateTime) -> bool {
-        let m = store::file_mtime();
-        if m.is_none() || m == self.file_mtime {
+    /// Übernimmt Änderungen, die das Fenster „Aufzeichnungen“ (oder `--import`) in die
+    /// Datenbank geschrieben hat. Gibt `true` zurück, wenn neu eingelesen wurde.
+    fn sync_from_db(&mut self, t: NaiveDateTime) -> bool {
+        if !self.db.changed_externally() {
             return false;
         }
-        self.file_mtime = m;
-        match store::load() {
+        match self.db.load() {
             Ok(days) => {
                 self.tracker.replace_days(days, t);
                 true
             }
             Err(e) => {
-                eprintln!("Tagwerk: Datei konnte nicht neu gelesen werden: {e}");
+                eprintln!("Tagwerk: Datenbank konnte nicht neu gelesen werden: {e}");
                 false
             }
         }
     }
 
     fn persist(&mut self, t: NaiveDateTime) {
-        if let Err(e) = self.tracker.save(t) {
+        if let Err(e) = self.tracker.save(&mut self.db, t) {
             eprintln!("Tagwerk: Speichern fehlgeschlagen: {e}");
         }
-        self.file_mtime = store::file_mtime();
         store::write_status(self.tracker.is_running(), self.tracker.mode(t));
         self.last_save = Instant::now();
     }
@@ -713,6 +720,17 @@ fn time_menu(
     (parent, sub)
 }
 
+/// Zeigt einen Fehler, bei dem Tagwerk nicht weiterlaufen kann.
+fn show_fatal(mtm: MainThreadMarker, message: &str, info: &str) {
+    eprintln!("Tagwerk: {message} {info}");
+    let alert = NSAlert::new(mtm);
+    alert.setMessageText(&ns(message));
+    alert.setInformativeText(&ns(info));
+    alert.addButtonWithTitle(&ns("Beenden"));
+    activate_app(mtm);
+    alert.runModal();
+}
+
 /// Hält eine Sperrdatei, damit nur eine Instanz läuft.
 fn single_instance() -> Option<std::fs::File> {
     let _ = std::fs::create_dir_all(store::data_dir());
@@ -772,6 +790,7 @@ pub fn run() {
         relative,
     };
     let records = menu_item(mtm, "Aufzeichnungen …", Some(sel!(showRecords:)), "a", &controller);
+    let export = menu_item(mtm, "Als Markdown exportieren …", Some(sel!(exportRecords:)), "e", &controller);
     let folder = menu_item(mtm, "Datenordner im Finder zeigen", Some(sel!(openFolder:)), "", &controller);
     let quit = menu_item(mtm, "Tagwerk beenden", Some(sel!(quit:)), "q", &controller);
 
@@ -789,6 +808,7 @@ pub fn run() {
     menu.addItem(&items.lunch_gap);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&records);
+    menu.addItem(&export);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&folder);
     menu.addItem(&items.login);
@@ -799,8 +819,15 @@ pub fn run() {
     status_item.setMenu(Some(&menu));
 
     // Daten laden und – falls entsperrt und kein Feierabend – sofort starten.
-    let days = store::load().unwrap_or_else(|e| {
-        eprintln!("Tagwerk: Datei konnte nicht gelesen werden: {e}");
+    let db = match store::Db::open() {
+        Ok(db) => db,
+        Err(e) => {
+            show_fatal(mtm, &format!("Die Datenbank {} konnte nicht geöffnet werden.", store::db_file().display()), &e.to_string());
+            return;
+        }
+    };
+    let days = db.load().unwrap_or_else(|e| {
+        eprintln!("Tagwerk: Datenbank konnte nicht gelesen werden: {e}");
         Vec::new()
     });
     let mut tracker = Tracker::new(days);
@@ -819,7 +846,7 @@ pub fn run() {
         records_window: None,
         last_save: Instant::now(),
         last_icon: None,
-        file_mtime: store::file_mtime(),
+        db,
     };
     state.persist(t);
     state.refresh();

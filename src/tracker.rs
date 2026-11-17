@@ -17,6 +17,8 @@ pub enum PauseReason {
 
 pub struct Tracker {
     pub days: Vec<Day>,
+    /// Stand der Datenbank nach dem letzten Laden/Speichern (um nur Änderungen zu schreiben).
+    saved: Vec<Day>,
     /// Beginn der laufenden automatischen Periode.
     pub running_since: Option<NaiveDateTime>,
     pub paused_since: Option<NaiveDateTime>,
@@ -44,7 +46,8 @@ fn secs(t: NaiveDateTime) -> i64 {
 
 impl Tracker {
     pub fn new(days: Vec<Day>) -> Self {
-        Self { days, running_since: None, paused_since: None, pause_reason: PauseReason::Startup }
+        let saved = days.clone();
+        Self { days, saved, running_since: None, paused_since: None, pause_reason: PauseReason::Startup }
     }
 
     pub fn is_running(&self) -> bool {
@@ -153,8 +156,29 @@ impl Tracker {
         }
     }
 
-    pub fn save(&self, now: NaiveDateTime) -> std::io::Result<()> {
-        store::save(&self.snapshot(now), now)
+    /// Speichert nur die Tage, die sich seit dem letzten Laden/Speichern geändert haben,
+    /// damit Korrekturen aus dem Fenster „Aufzeichnungen“ an anderen Tagen erhalten bleiben.
+    pub fn save(&mut self, db: &mut store::Db, now: NaiveDateTime) -> store::Result<()> {
+        let snap = self.snapshot(now);
+        let (changed, removed) = Self::diff(&self.saved, &snap);
+        db.save_days(&changed, &removed, now)?;
+        self.saved = snap;
+        Ok(())
+    }
+
+    /// Geänderte bzw. neue Tage und Tage, die es nicht mehr gibt.
+    fn diff(old: &[Day], new: &[Day]) -> (Vec<Day>, Vec<NaiveDate>) {
+        let changed = new
+            .iter()
+            .filter(|d| old.iter().find(|o| o.date == d.date) != Some(*d))
+            .cloned()
+            .collect();
+        let removed = old
+            .iter()
+            .filter(|o| !new.iter().any(|d| d.date == o.date))
+            .map(|o| o.date)
+            .collect();
+        (changed, removed)
     }
 
     // ---------- manuelle Entscheidungen (immer für heute) ----------
@@ -218,9 +242,10 @@ impl Tracker {
         self.cleanup();
     }
 
-    /// Nach einer Änderung der Datei von außen (Fenster „Aufzeichnungen“) neu einlesen.
+    /// Nach einer Änderung der Datenbank von außen (Fenster „Aufzeichnungen“) neu einlesen.
     /// Die laufende Periode bleibt erhalten; doppelt gespeicherte Zeiten werden zusammengefasst.
     pub fn replace_days(&mut self, days: Vec<Day>, now: NaiveDateTime) {
+        self.saved = days.clone();
         self.days = days;
         if self.running_since.is_some() && matches!(self.mode(now), Mode::Closed(_)) {
             self.stop(now, PauseReason::Manual);
@@ -319,6 +344,22 @@ mod tests {
         assert_eq!(info.auto_first, Some(hm(8, 12)));
         t.set_start(dt(16, 9, 0), None);
         assert_eq!(t.today(dt(16, 9, 0)).work_secs, hm(0, 48));
+    }
+
+    #[test]
+    fn save_writes_only_changed_days() {
+        let mut old = Day::new(NaiveDate::from_ymd_opt(2026, 11, 10).unwrap());
+        old.add_period(hm(8, 0), hm(9, 0));
+        let mut t = Tracker::new(vec![old.clone()]);
+        t.start(dt(16, 8, 0));
+        let snap = t.snapshot(dt(16, 9, 0));
+        let (changed, removed) = Tracker::diff(&t.saved, &snap);
+        assert_eq!(changed.len(), 1);
+        assert_eq!(changed[0].date, dt(16, 0, 0).date());
+        assert!(removed.is_empty());
+        let (changed, removed) = Tracker::diff(&snap, &snap[1..]);
+        assert!(changed.is_empty());
+        assert_eq!(removed, vec![old.date]);
     }
 
     #[test]

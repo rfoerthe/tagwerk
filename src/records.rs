@@ -1,5 +1,6 @@
-//! Fenster "Aufzeichnungen": zeigt die Tabelle aus der Markdown-Datei und erlaubt,
-//! einzelne Tage zu korrigieren (Arbeitsbeginn, Pausen, Feierabend).
+//! Fenster "Aufzeichnungen": zeigt die Tabelle aus der Datenbank, erlaubt, einzelne Tage
+//! zu korrigieren (Arbeitsbeginn, Pausen, Feierabend), und exportiert einen Zeitraum
+//! als Markdown.
 
 use crate::day::{fmt_clock, parse_clock, secs_of, Break, Day, DayRecord};
 use crate::store::{self, Status};
@@ -39,6 +40,43 @@ impl Editor {
     }
 }
 
+/// Eingabefelder des Export-Dialogs.
+struct ExportDialog {
+    from: String,
+    to: String,
+    error: Option<String>,
+    /// Zuletzt geschriebene Datei.
+    done: Option<PathBuf>,
+}
+
+impl ExportDialog {
+    fn new(today: NaiveDate) -> Self {
+        let (from, to) = store::default_export_range(today);
+        Self { from: store::fmt_date_short(from), to: store::fmt_date_short(to), error: None, done: None }
+    }
+
+    fn set(&mut self, from: NaiveDate, to: NaiveDate) {
+        self.from = store::fmt_date_short(from);
+        self.to = store::fmt_date_short(to);
+        self.error = None;
+        self.done = None;
+    }
+
+    fn range(&self) -> Result<(NaiveDate, NaiveDate), String> {
+        let parse = |s: &str| store::parse_date(s).ok_or_else(|| format!("„{}“ ist kein Datum (TT.MM.JJJJ).", s.trim()));
+        let (from, to) = (parse(&self.from)?, parse(&self.to)?);
+        if from > to {
+            return Err("„Von“ liegt nach „Bis“.".into());
+        }
+        Ok((from, to))
+    }
+}
+
+/// Erster Tag des Monats von `d`.
+fn month_start(d: NaiveDate) -> NaiveDate {
+    d.with_day(1).unwrap_or(d)
+}
+
 /// Was im Editor geklickt wurde (wird nach dem Zeichnen ausgeführt).
 enum Edit {
     SetStart(Option<i64>),
@@ -48,11 +86,13 @@ enum Edit {
 }
 
 struct RecordsApp {
+    db: Option<store::Db>,
     days: Vec<Day>,
     status: Option<Status>,
     error: Option<String>,
     loaded_at: Instant,
     editor: Option<Editor>,
+    export: Option<ExportDialog>,
     goto_date: String,
     screenshot: Option<PathBuf>,
     frames: u32,
@@ -66,12 +106,18 @@ fn now() -> NaiveDateTime {
 
 impl RecordsApp {
     fn new(screenshot: Option<PathBuf>) -> Self {
+        let (db, error) = match store::Db::open() {
+            Ok(db) => (Some(db), None),
+            Err(e) => (None, Some(format!("Datenbank konnte nicht geöffnet werden: {e}"))),
+        };
         let mut app = Self {
+            db,
             days: Vec::new(),
             status: None,
-            error: None,
+            error,
             loaded_at: Instant::now(),
             editor: None,
+            export: None,
             goto_date: String::new(),
             screenshot,
             frames: 0,
@@ -90,12 +136,14 @@ impl RecordsApp {
     }
 
     fn reload(&mut self) {
-        match store::load() {
-            Ok(d) => {
-                self.days = d;
-                self.error = None;
+        if let Some(db) = self.db.as_ref() {
+            match db.load() {
+                Ok(d) => {
+                    self.days = d;
+                    self.error = None;
+                }
+                Err(e) => self.error = Some(format!("Datenbank konnte nicht gelesen werden: {e}")),
             }
-            Err(e) => self.error = Some(format!("Datei konnte nicht gelesen werden: {e}")),
         }
         self.status = store::read_status();
         self.loaded_at = Instant::now();
@@ -140,7 +188,8 @@ impl RecordsApp {
 
     fn apply(&mut self, edit: Edit) {
         let Some(date) = self.editor.as_ref().map(|e| e.date) else { return };
-        let result = store::edit_day(date, now(), |d| match edit {
+        let Some(db) = self.db.as_mut() else { return };
+        let result = db.edit_day(date, now(), |d| match edit {
             Edit::SetStart(s) => d.start = s,
             Edit::SetEnd(e) => d.end = e,
             Edit::AddBreak(from, to) => {
@@ -290,6 +339,120 @@ impl RecordsApp {
         edit
     }
 
+    /// Fragt nach dem Speicherort und schreibt den Export.
+    fn write_export(&mut self, from: NaiveDate, to: NaiveDate) -> Result<Option<PathBuf>, String> {
+        let Some(db) = self.db.as_ref() else { return Err("Keine Datenbank geöffnet.".into()) };
+        let days = db.load_range(from, to).map_err(|e| format!("Lesen fehlgeschlagen: {e}"))?;
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Aufzeichnungen exportieren")
+            .set_file_name(store::export_file_name(from, to))
+            .add_filter("Markdown", &["md"]);
+        if let Some(dir) = std::env::var_os("HOME").map(|h| PathBuf::from(h).join("Downloads")) {
+            if dir.is_dir() {
+                dialog = dialog.set_directory(dir);
+            }
+        }
+        let Some(path) = dialog.save_file() else { return Ok(None) };
+        std::fs::write(&path, store::export_markdown(&days, from, to, now()))
+            .map_err(|e| format!("Schreiben fehlgeschlagen: {e}"))?;
+        Ok(Some(path))
+    }
+
+    fn export_dialog(&mut self, ctx: &egui::Context) {
+        if self.export.is_none() {
+            return;
+        }
+        let today = Local::now().date_naive();
+        let records: Vec<(NaiveDate, i64)> = self.records().iter().map(|(_, r)| (r.date, r.work_secs)).collect();
+        let mut save: Option<(NaiveDate, NaiveDate)> = None;
+        let mut close = false;
+        let Some(ex) = self.export.as_mut() else { return };
+        let modal = egui::Modal::new(egui::Id::unique("tagwerk-export")).show(ctx, |ui| {
+            ui.set_width(380.0);
+            ui.label(RichText::new("Als Markdown exportieren").size(18.0).strong());
+            ui.add_space(8.0);
+            ui.horizontal(|ui| {
+                ui.label("Von");
+                ui.add(egui::TextEdit::singleline(&mut ex.from).desired_width(90.0).hint_text("TT.MM.JJJJ"));
+                ui.label("bis");
+                ui.add(egui::TextEdit::singleline(&mut ex.to).desired_width(90.0).hint_text("TT.MM.JJJJ"));
+            });
+            ui.horizontal(|ui| {
+                if ui.small_button("Letzte 4 Wochen").clicked() {
+                    let (f, t) = store::default_export_range(today);
+                    ex.set(f, t);
+                }
+                if ui.small_button("Dieser Monat").clicked() {
+                    ex.set(month_start(today), today);
+                }
+                if ui.small_button("Letzter Monat").clicked() {
+                    let last = month_start(today) - ChronoDuration::days(1);
+                    ex.set(month_start(last), last);
+                }
+            });
+            ui.add_space(6.0);
+            let weak = ui.visuals().weak_text_color();
+            match ex.range() {
+                Ok((from, to)) => {
+                    let (w, n) = records
+                        .iter()
+                        .filter(|(d, _)| *d >= from && *d <= to)
+                        .fold((0, 0), |(w, n), (_, secs)| (w + secs, n + 1));
+                    ui.label(RichText::new(format!("{n} Arbeitstag(e), zusammen {}", store::fmt_hm(w))).color(weak));
+                }
+                Err(e) => {
+                    ui.label(RichText::new(e).color(weak));
+                }
+            }
+            if let Some(err) = &ex.error {
+                ui.colored_label(Color32::from_rgb(0xd0, 0x3b, 0x3b), err);
+            }
+            if let Some(path) = &ex.done {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new(format!("✓  Gespeichert: {}", path.display())).color(GREEN));
+                });
+            }
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if ui.button("Speichern …").clicked() {
+                    match ex.range() {
+                        Ok(r) => save = Some(r),
+                        Err(e) => ex.error = Some(e),
+                    }
+                }
+                if let Some(path) = ex.done.clone() {
+                    if ui.button("Im Finder zeigen").clicked() {
+                        let _ = std::process::Command::new("/usr/bin/open").arg("-R").arg(path).spawn();
+                    }
+                }
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    if ui.button("Schließen").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        });
+        if modal.should_close() {
+            close = true;
+        }
+        if let Some((from, to)) = save {
+            let result = self.write_export(from, to);
+            if let Some(ex) = self.export.as_mut() {
+                match result {
+                    Ok(Some(path)) => {
+                        ex.error = None;
+                        ex.done = Some(path);
+                    }
+                    Ok(None) => {}
+                    Err(e) => ex.error = Some(e),
+                }
+            }
+        }
+        if close {
+            self.export = None;
+        }
+    }
+
     fn handle_screenshot(&mut self, ctx: &egui::Context) {
         let Some(path) = self.screenshot.clone() else { return };
         self.frames += 1;
@@ -350,6 +513,13 @@ impl eframe::App for RecordsApp {
 
         let today = Local::now().date_naive();
 
+        // Export-Dialog angefordert (Menüleiste „Als Markdown exportieren …“)?
+        let request = store::export_request_file();
+        if request.exists() {
+            let _ = std::fs::remove_file(&request);
+            self.export = Some(ExportDialog::new(today));
+        }
+
         egui::Panel::top("header")
             .frame(egui::Frame::new().inner_margin(egui::Margin::symmetric(18, 14)).fill(ui.visuals().panel_fill))
             .show(ui, |ui| {
@@ -366,7 +536,7 @@ impl eframe::App for RecordsApp {
                     ui.label(RichText::new(txt).color(col).strong());
                 });
                 ui.label(
-                    RichText::new(store::data_file().display().to_string())
+                    RichText::new(store::db_file().display().to_string())
                         .small()
                         .color(ui.visuals().weak_text_color()),
                 );
@@ -404,13 +574,13 @@ impl eframe::App for RecordsApp {
                     if ui.button("⟳  Neu laden").clicked() {
                         self.reload();
                     }
-                    if ui.button("Markdown-Datei öffnen").clicked() {
-                        let _ = std::process::Command::new("/usr/bin/open").arg(store::data_file()).spawn();
+                    if ui.button("Exportieren …").clicked() {
+                        self.export = Some(ExportDialog::new(today));
                     }
                     if ui.button("Im Finder zeigen").clicked() {
                         let _ = std::process::Command::new("/usr/bin/open")
                             .arg("-R")
-                            .arg(store::data_file())
+                            .arg(store::db_file())
                             .spawn();
                     }
                     ui.separator();
@@ -522,6 +692,7 @@ impl eframe::App for RecordsApp {
         if let Some(d) = clicked {
             self.select(d);
         }
+        self.export_dialog(&ctx);
     }
 }
 

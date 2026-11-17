@@ -20,6 +20,8 @@ Mittagspause und Feierabend lassen sich zusätzlich von Hand festlegen oder korr
   Pausen ab 15 Minuten).
 - **Fenster „Aufzeichnungen“** – Übersicht aller Tage, in der sich einzelne Tage
   nachträglich bearbeiten lassen.
+- **Export als Markdown** – für einen frei wählbaren Zeitraum (Standard: die letzten
+  vier Wochen) über das Fenster, das Menü oder die Kommandozeile.
 - **Bei Anmeldung starten** – per Menüpunkt als Anmeldeobjekt eintragen
   (nur in der installierten App).
 
@@ -66,6 +68,10 @@ xcrun notarytool store-credentials general-notary --apple-id <apple-id> --team-i
 ```text
 Tagwerk                       Menüleisten-App (Standard)
 Tagwerk --records             nur das Fenster „Aufzeichnungen“ öffnen
+Tagwerk --export [--from TT.MM.JJJJ] [--to TT.MM.JJJJ] [-o datei.md]
+                              Aufzeichnungen als Markdown exportieren
+                              (Standard: die letzten 28 Tage, Ausgabe auf stdout)
+Tagwerk --import <datei.md>   Tage aus einem Markdown-Export übernehmen
 Tagwerk --screenshot <png>    Fenster „Aufzeichnungen“ als Bild speichern und beenden
 Tagwerk --render-icon <png>   App-Symbol zeichnen (wird von build.sh genutzt)
 ```
@@ -74,25 +80,40 @@ Es läuft immer nur eine Instanz der Menüleisten-App.
 
 ## Daten
 
-Alle Daten liegen lesbar in einer Markdown-Datei:
+Alle Daten liegen in einer lokalen SQLite-Datenbank:
 
 ```text
-~/Library/Application Support/Tagwerk/tagwerk.md
+~/Library/Application Support/Tagwerk/tagwerk.db
 ```
 
-Die Datei hat drei Abschnitte:
+Sie enthält die automatisch erfassten Perioden (Mac entsperrt) und getrennt davon die
+manuellen Korrekturen (Arbeitsbeginn, Pausen, Feierabend). Bearbeitet werden die Daten
+im Fenster „Aufzeichnungen“; Änderungen dort übernimmt die laufende App automatisch.
 
-1. **Übersichtstabelle** – berechnet, zum Lesen
-2. **`## Korrekturen`** – manuelle Entscheidungen (Arbeitsbeginn, Pausen, Feierabend)
-3. **`## Erfasste Perioden`** – automatisch erfasste Zeiten (Mac entsperrt)
+Vor der ersten Änderung eines Tages wird die Datenbank unter
+`backups/tagwerk-JJJJ-MM-TT.db` gesichert; die letzten 15 Backups bleiben erhalten.
 
-Vor der ersten Änderung eines Tages wird die bisherige Datei unter
-`backups/tagwerk-JJJJ-MM-TT.md` gesichert; die letzten 15 Backups bleiben erhalten.
-Ändert man die Datei von Hand oder im Fenster „Aufzeichnungen“, übernimmt die laufende
-App die Änderungen automatisch.
+### Export
 
-Daten der Vorgängerversion „TrackMyWork“ werden beim ersten Start einmalig übernommen;
-der alte Ordner bleibt unverändert.
+Über „Exportieren …“ im Fenster „Aufzeichnungen“ (oder „Als Markdown exportieren …“ in
+der Menüleiste) wird ein Zeitraum als Markdown-Datei gespeichert. Vorbelegt sind die
+letzten vier Wochen (28 Tage bis heute); „Dieser Monat“ und „Letzter Monat“ lassen sich
+mit einem Klick wählen. Die Datei enthält
+
+1. eine **Übersichtstabelle** mit Beginn, Ende, Arbeits- und Pausenzeit je Tag und einer
+   Summenzeile,
+2. **`## Korrekturen`** – die manuellen Entscheidungen,
+3. **`## Erfasste Perioden`** – die automatisch erfassten Zeiten.
+
+Damit lässt sich ein Export mit `Tagwerk --import <datei.md>` wieder einlesen; die
+enthaltenen Tage ersetzen dabei die vorhandenen Einträge dieser Tage.
+
+### Ältere Versionen
+
+Die Markdown-Datei `tagwerk.md` früherer Versionen wird beim ersten Start einmalig in
+die Datenbank übernommen und danach in `tagwerk.md.importiert` umbenannt. Daten der
+Vorgängerversion „TrackMyWork“ werden ebenfalls übernommen; der alte Ordner bleibt
+unverändert.
 
 Zum Testen lässt sich der Datenordner mit der Umgebungsvariablen `TAGWERK_DIR`
 umlenken:
