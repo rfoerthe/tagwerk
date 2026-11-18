@@ -595,7 +595,7 @@ impl AppState {
         if pauses != self.items.count_pause_list {
             self.items.count_pause_menu.removeAllItems();
             for p in &pauses {
-                let title = format!("{} – {} Uhr  ({})", fmt_clock(p.from), fmt_clock(p.to), fmt_minutes(p.len()));
+                let title = pause_title(*p);
                 let item = menu_item(mtm, &title, Some(sel!(countPause:)), "", &self.items.controller);
                 item.setTag(p.from as isize);
                 self.items.count_pause_menu.addItem(&item);
@@ -698,6 +698,13 @@ fn away_text(since: NaiveDateTime, t: NaiveDateTime, activity: Activity) -> Stri
         "" => format!("Ohne Mac seit {at}"),
         note => format!("Ohne Mac seit {at} – {note}"),
     }
+}
+
+/// Eintrag unter „Pause als Arbeitszeit zählen“: `15:25 – 15:45 Uhr  (20 Min.)`. Die Dauer
+/// richtet sich wie in der Wochenansicht nach den angezeigten Uhrzeiten.
+fn pause_title(p: Span) -> String {
+    let len = records::shown_len(p.from, p.to);
+    format!("{} – {} Uhr  ({})", fmt_clock(p.from), fmt_clock(p.to), fmt_minutes(len))
 }
 
 /// `55 Min.` bzw. `1:20 h`
@@ -1256,6 +1263,14 @@ mod tests {
         NSAttributedStringNSStringDrawing, NSBezierPath, NSBitmapImageFileType, NSBitmapImageRep, NSDeviceRGBColorSpace, NSGraphicsContext,
     };
     use objc2_foundation::NSSize;
+
+    #[test]
+    fn pause_titles_follow_shown_minutes() {
+        // 15:25:40 – 15:45:10 zeigt 15:25 – 15:45 und damit 20 Min. (nicht 19).
+        let hms = |h: i64, m: i64, s: i64| h * 3600 + m * 60 + s;
+        assert_eq!(pause_title(Span::new(hms(15, 25, 40), hms(15, 45, 10))), "15:25 – 15:45 Uhr  (20 Min.)");
+        assert_eq!(pause_title(Span::new(hms(12, 0, 0), hms(13, 5, 0))), "12:00 – 13:05 Uhr  (1:05 h)");
+    }
 
     #[test]
     fn away_outside_frame_shows_outside() {

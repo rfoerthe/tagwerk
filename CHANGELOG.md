@@ -21,6 +21,11 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 - Ein Klick auf einen freien Bereich der Woche öffnet den Dialog „Arbeit ohne Mac
   eintragen“ sofort (bisher erst nach der Doppelklick-Zeit).
 
+### Behoben
+- „Pause als Arbeitszeit zählen“ in der Menüleiste zeigt die Dauer einer Pause jetzt wie
+  die Wochenansicht nach den angezeigten Uhrzeiten (15:25 – 15:45 sind 20 Min., bisher
+  je nach Sekunden 19 Min.).
+
 ### Entfernt
 - Der Menüpunkt „Wochenansicht …“ (⌘W) in der Menüleiste; die Woche ist über
   „Aufzeichnungen …“ und den Umschalter „Tage | Woche“ erreichbar.
