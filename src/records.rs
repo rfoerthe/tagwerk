@@ -338,7 +338,7 @@ impl Model {
             let j = recs[i..].iter().position(|(_, r)| r.date.iso_week() != week).map_or(recs.len(), |n| i + n);
             let monday = recs[i].1.date - Duration::days(recs[i].1.date.weekday().num_days_from_monday() as i64);
             let sunday = monday + Duration::days(6);
-            let total: i64 = recs[i..j].iter().map(|(_, r)| r.work_secs).sum();
+            let total: i64 = recs[i..j].iter().map(|(_, r)| r.shown_work_secs).sum();
             let (_, target) = rules::balance(&self.days, monday, sunday, s);
             rows.push(Row::Week {
                 title: format!(
@@ -388,15 +388,6 @@ struct Ui {
 enum Mode {
     Days,
     Week,
-}
-
-/// Wie das Fenster geöffnet wird.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Open {
-    /// In der zuletzt benutzten Ansicht.
-    Last,
-    /// In der Ansicht „Tage“ mit diesem Tag.
-    Day(NaiveDate),
 }
 
 /// Verbindung zur Menüleisten-App.
@@ -865,11 +856,11 @@ fn cell_view(m: &Model, column: Option<&str>, row: NSInteger) -> Option<Retained
                         (fmt_clock(rec.last_end), NSTextAlignment::Right, false)
                     }
                 }
-                "work" => (store::fmt_hm(rec.work_secs), NSTextAlignment::Right, false),
+                "work" => (store::fmt_hm(rec.shown_work_secs), NSTextAlignment::Right, false),
                 "balance" => {
                     let target = m.settings.daily_target(rec.date);
                     if rec.work_secs > 0 {
-                        (rules::fmt_balance(rec.work_secs - target), NSTextAlignment::Right, true)
+                        (rules::fmt_balance(rec.shown_work_secs - target), NSTextAlignment::Right, true)
                     } else {
                         ("–".to_string(), NSTextAlignment::Right, true)
                     }
@@ -928,7 +919,7 @@ fn refresh_summary() {
         // (Arbeit, Pausen, Tage, Soll)
         let sum = |f: &dyn Fn(NaiveDate) -> bool| {
             recs.iter().filter(|r| f(r.date)).fold((0i64, 0i64, 0usize, 0i64), |(w, p, n, t), r| {
-                (w + r.work_secs, p + r.shown_pause_secs, n + 1, t + st.daily_target(r.date))
+                (w + r.shown_work_secs, p + r.shown_pause_secs, n + 1, t + st.daily_target(r.date))
             })
         };
         let (tw, _tp, tn, _) = sum(&|d| d == today);
@@ -1070,9 +1061,9 @@ fn day_subtitle(day: Option<&Day>, settings: &Settings) -> String {
     match day.and_then(|d| d.record(settings)) {
         Some(r) if r.work_secs > 0 => format!(
             "Arbeitszeit {}  ·  Pausen {}  ·  Saldo {}",
-            store::fmt_hm(r.work_secs),
+            store::fmt_hm(r.shown_work_secs),
             store::fmt_hm(r.shown_pause_secs),
-            rules::fmt_balance(r.work_secs - settings.daily_target(r.date))
+            rules::fmt_balance(r.shown_work_secs - settings.daily_target(r.date))
         ),
         Some(_) => "Keine Arbeitszeit im Arbeitszeitrahmen.".to_string(),
         None => "Für diesen Tag ist noch nichts erfasst.".to_string(),
@@ -2267,10 +2258,10 @@ fn build(shot: bool) -> Ui {
     ui
 }
 
-/// Öffnet das Fenster „Aufzeichnungen“ in der Menüleisten-App oder holt es nach vorn:
-/// in der zuletzt benutzten Ansicht oder mit einem Tag in „Tage“. `status` ist der Zustand
-/// der Erfassung, `embed` die Verbindung zur Menüleisten-App.
-pub fn show(open: Open, status: Status, embed: Embed) {
+/// Öffnet das Fenster „Aufzeichnungen“ in der Menüleisten-App (in der zuletzt benutzten
+/// Ansicht) oder holt es nach vorn. `status` ist der Zustand der Erfassung, `embed` die
+/// Verbindung zur Menüleisten-App.
+pub fn show(status: Status, embed: Embed) {
     EMBED.with(|c| c.set(Some(embed)));
     // Mit Fenster gehört Tagwerk ins Dock und in den App-Umschalter (⌘⇥), und die
     // Menüleiste zeigt das Hauptmenü des Fensters.
@@ -2281,25 +2272,20 @@ pub fn show(open: Open, status: Status, embed: Embed) {
     model(|m| m.status = Some(status));
     reload();
     let today = now().date();
-    match open {
-        Open::Day(d) => open_day(d),
-        Open::Last => {
-            let mode = if fresh { stored_mode() } else { mode() };
-            set_mode(mode, false);
-            if mode == Mode::Week {
-                // Neu geöffnet: aktuelle Woche; sonst bleibt die gezeigte Woche.
-                if let Some(snap) = (embed.week)() {
-                    if fresh {
-                        week_view::show_week_of(snap, today);
-                    } else {
-                        week_view::update(snap);
-                    }
-                }
+    let shown = if fresh { stored_mode() } else { mode() };
+    set_mode(shown, false);
+    if shown == Mode::Week {
+        // Neu geöffnet: aktuelle Woche; sonst bleibt die gezeigte Woche.
+        if let Some(snap) = (embed.week)() {
+            if fresh {
+                week_view::show_week_of(snap, today);
+            } else {
+                week_view::update(snap);
             }
         }
     }
     ui.window.makeKeyAndOrderFront(None);
-    if fresh || open != Open::Last {
+    if fresh {
         match mode() {
             Mode::Days => {
                 ui.window.makeFirstResponder(Some(&ui.table));

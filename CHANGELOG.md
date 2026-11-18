@@ -7,6 +7,10 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 ## [Unveröffentlicht]
 
 ### Geändert
+- Status, Kennzahlen (Heute gearbeitet, Pausen heute, Beginn heute, Saldo diese Woche)
+  und Hinweise auf Regelverstöße im Menü sind reine Anzeigefelder: Sie lassen sich nicht
+  mehr anklicken und werden beim Überfahren nicht hervorgehoben; Farben und Schrift
+  bleiben gleich. Bisher öffnete ein Klick den heutigen Tag im Fenster „Aufzeichnungen“.
 - Die Wochenansicht ist jetzt Teil des Fensters „Aufzeichnungen“ statt eines eigenen
   Fensters. Der Umschalter „Tage | Woche“ in der Symbolleiste wechselt zwischen der
   Tabelle mit Inspektor und der Woche als Kalender, ebenso das Menü „Darstellung“ mit
@@ -30,8 +34,17 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   „Pausen“, im Inspektor, in den Übersichtskarten und unter „Pausen heute“ in der
   Menüleiste. Bisher zeigte der Tageskopf z. B. 0:19 h neben einer Pause von 0:20 h.
   Der Export bleibt sekundengenau.
+- Ebenso die Arbeitszeit: Sie ist die Summe der Arbeitsabschnitte nach ihren angezeigten
+  Uhrzeiten. So ergibt Ende − Beginn − Pausen genau die Arbeitszeit, die Tage einer Woche
+  summieren sich genau zur Wochenzeile, und die Salden der Tage zum Saldo der Woche.
+  Bisher wichen sie wegen abgeschnittener Sekunden um 1–2 Min. ab (z. B. 08:18 – 18:05
+  mit 0:59 h Pause als 8:47 h statt 8:48 h). Der Export bleibt sekundengenau.
 
 ### Entfernt
+- Die Übernahme der Daten aus der Vorgängerversion „TrackMyWork“
+  (`~/Library/Application Support/TrackMyWork`). Sie lief bei jeder neu angelegten
+  Datenbank erneut, sodass alte Tage nach dem Löschen von `tagwerk.db` wieder
+  auftauchten.
 - Der Menüpunkt „Wochenansicht …“ (⌘W) in der Menüleiste; die Woche ist über
   „Aufzeichnungen …“ und den Umschalter „Tage | Woche“ erreichbar.
 - Der Doppelklick auf einen Tag in der Wochenansicht (öffnete den Tag im Fenster

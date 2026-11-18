@@ -57,8 +57,8 @@ festlegen oder korrigieren.
 Das Menü zeigt auf einen Blick den Status, die Arbeitszeit von heute samt Soll, die
 Pausen, den Beginn, den Saldo der Woche und Hinweise auf Regelverstöße. Der Status ist
 farbig – **grün** = läuft, **orange** = Pause, **indigo** = Feierabend –, der Saldo
-grün im Plus und rot im Minus. Ein Klick auf eine dieser Zeilen öffnet den heutigen Tag
-im Fenster „Aufzeichnungen“.
+grün im Plus und rot im Minus. Diese Zeilen sind reine Anzeige und lassen sich nicht
+anklicken.
 
 - **Pausen ohne Zutun** – jede Sperre ab der eingestellten Mindestdauer (Standard
   15 Minuten) ist eine Pause, egal ob Mittags- oder Kaffeepause. Kürzere Sperren zählen
@@ -115,6 +115,8 @@ zu „Woche“ zeigt die Woche des ausgewählten Tags. In der Menüleisten-App e
 - Jeder Tageskopf zeigt Arbeitszeit und Pausen des Tages, die Kopfzeile Arbeitszeit,
   Pausen und Saldo der Woche. Pausen zählen überall nach den angezeigten Uhrzeiten
   (15:25 – 15:45 sind 20 Min.), die Summe eines Tages ist die Summe seiner Pausen.
+  Genauso die Arbeitszeit: Ende − Beginn − Pausen ergibt sie genau, und Tage wie Salden
+  summieren sich ohne Rundungsreste zur Woche.
 - Der Tooltip eines Blocks nennt manuelle Grenzen.
 - Ein Klick auf die Uhrzeit von Beginn oder Ende kopiert sie in die Zwischenablage.
 - Tage mit Regelverstößen tragen ein Warnschild; ein Klick auf den Tageskopf zeigt die
@@ -322,10 +324,9 @@ dort übernimmt die laufende App automatisch.
 
 **Ältere Versionen:** Die Markdown-Datei `tagwerk.md` früherer Versionen wird beim
 ersten Start einmalig in die Datenbank übernommen und danach in `tagwerk.md.importiert`
-umbenannt. Daten der Vorgängerversion „TrackMyWork“ werden ebenfalls übernommen; der
-alte Ordner bleibt unverändert. Ab Version 1.2.0 nutzt die Datenbank Schema 3; Tagwerk
-1.1 und älter können sie danach nicht mehr öffnen – zurück geht es nur mit einem Backup
-aus `backups/` von einem Tag vor dem Update.
+umbenannt. Ab Version 1.2.0 nutzt die Datenbank Schema 3; Tagwerk 1.1 und älter können
+sie danach nicht mehr öffnen – zurück geht es nur mit einem Backup aus `backups/` von
+einem Tag vor dem Update.
 
 ## Entwicklung
 
