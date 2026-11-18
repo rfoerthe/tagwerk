@@ -37,6 +37,10 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   mit 0:59 h Pause als 8:47 h statt 8:48 h). Der Export bleibt sekundengenau.
 
 ### Entfernt
+- Die Übernahme der Daten aus der Vorgängerversion „TrackMyWork“
+  (`~/Library/Application Support/TrackMyWork`). Sie lief bei jeder neu angelegten
+  Datenbank erneut, sodass alte Tage nach dem Löschen von `tagwerk.db` wieder
+  auftauchten.
 - Der Menüpunkt „Wochenansicht …“ (⌘W) in der Menüleiste; die Woche ist über
   „Aufzeichnungen …“ und den Umschalter „Tage | Woche“ erreichbar.
 - Der Doppelklick auf einen Tag in der Wochenansicht (öffnete den Tag im Fenster

@@ -324,10 +324,9 @@ dort übernimmt die laufende App automatisch.
 
 **Ältere Versionen:** Die Markdown-Datei `tagwerk.md` früherer Versionen wird beim
 ersten Start einmalig in die Datenbank übernommen und danach in `tagwerk.md.importiert`
-umbenannt. Daten der Vorgängerversion „TrackMyWork“ werden ebenfalls übernommen; der
-alte Ordner bleibt unverändert. Ab Version 1.2.0 nutzt die Datenbank Schema 3; Tagwerk
-1.1 und älter können sie danach nicht mehr öffnen – zurück geht es nur mit einem Backup
-aus `backups/` von einem Tag vor dem Update.
+umbenannt. Ab Version 1.2.0 nutzt die Datenbank Schema 3; Tagwerk 1.1 und älter können
+sie danach nicht mehr öffnen – zurück geht es nur mit einem Backup aus `backups/` von
+einem Tag vor dem Update.
 
 ## Entwicklung
 

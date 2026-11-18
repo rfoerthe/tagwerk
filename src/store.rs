@@ -123,18 +123,18 @@ pub struct Db {
 
 impl Db {
     /// Öffnet (oder erstellt) `tagwerk.db` im Datenordner und übernimmt beim ersten Mal
-    /// vorhandene Daten (`tagwerk.md`, sonst „TrackMyWork“).
+    /// ein vorhandenes `tagwerk.md`.
     pub fn open() -> Result<Db> {
-        Self::open_in(&data_dir(), std::env::var_os("TAGWERK_DIR").is_none())
+        Self::open_in(&data_dir())
     }
 
-    fn open_in(dir: &Path, import_trackmywork: bool) -> Result<Db> {
+    fn open_in(dir: &Path) -> Result<Db> {
         fs::create_dir_all(dir)?;
         let mut conn = Connection::open(dir.join(DB_FILE))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
         conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0))?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
-        init_schema(&mut conn, dir, import_trackmywork)?;
+        init_schema(&mut conn, dir)?;
         let mut db = Db { conn, dir: dir.to_path_buf(), data_version: 0 };
         db.data_version = db.read_data_version()?;
         Ok(db)
@@ -276,7 +276,7 @@ impl Db {
     }
 }
 
-fn init_schema(conn: &mut Connection, dir: &Path, import_trackmywork: bool) -> Result<()> {
+fn init_schema(conn: &mut Connection, dir: &Path) -> Result<()> {
     let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let version: i32 = tx.query_row("PRAGMA user_version", [], |r| r.get(0))?;
     if version > SCHEMA_VERSION {
@@ -294,16 +294,11 @@ fn init_schema(conn: &mut Connection, dir: &Path, import_trackmywork: bool) -> R
     if version == 0 {
         tx.execute_batch(SCHEMA)?;
         let legacy = dir.join(LEGACY_FILE);
-        let days = if legacy.exists() {
+        if legacy.exists() {
             imported_file = Some(legacy.clone());
-            parse_file(&fs::read_to_string(&legacy)?)
-        } else if import_trackmywork {
-            trackmywork_days(dir)?
-        } else {
-            Vec::new()
-        };
-        for d in &days {
-            write_day(&tx, d)?;
+            for d in &parse_file(&fs::read_to_string(&legacy)?) {
+                write_day(&tx, d)?;
+            }
         }
     }
     tx.commit()?;
@@ -313,31 +308,6 @@ fn init_schema(conn: &mut Connection, dir: &Path, import_trackmywork: bool) -> R
         }
     }
     Ok(())
-}
-
-/// Daten der früheren Version „TrackMyWork“ (`Application Support/TrackMyWork/track-my-work.md`).
-/// Deren Backups werden in den Backup-Ordner kopiert; der alte Ordner bleibt unverändert.
-fn trackmywork_days(dir: &Path) -> Result<Vec<Day>> {
-    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else { return Ok(Vec::new()) };
-    let old_dir = home.join("Library").join("Application Support").join("TrackMyWork");
-    let old_file = old_dir.join("track-my-work.md");
-    if !old_file.exists() {
-        return Ok(Vec::new());
-    }
-    let bdir = dir.join("backups");
-    if let Ok(entries) = fs::read_dir(old_dir.join("backups")) {
-        fs::create_dir_all(&bdir)?;
-        for e in entries.flatten() {
-            let name = e.file_name().to_string_lossy().to_string();
-            if let Some(rest) = name.strip_prefix("track-my-work-") {
-                let target = bdir.join(format!("tagwerk-{rest}"));
-                if !target.exists() {
-                    fs::copy(e.path(), target)?;
-                }
-            }
-        }
-    }
-    Ok(parse_file(&fs::read_to_string(&old_file)?))
 }
 
 fn load_between(conn: &Connection, from: &str, to: &str) -> Result<Vec<Day>> {
@@ -869,7 +839,7 @@ mod tests {
     #[test]
     fn db_roundtrip_and_partial_save() {
         let dir = temp_dir("roundtrip");
-        let mut db = Db::open_in(&dir, false).unwrap();
+        let mut db = Db::open_in(&dir).unwrap();
         let days = sample_days();
         db.save_days(&days, &[], now()).unwrap();
         assert_eq!(db.load().unwrap(), days);
@@ -890,8 +860,8 @@ mod tests {
     #[test]
     fn edit_day_and_external_change() {
         let dir = temp_dir("edit");
-        let mut a = Db::open_in(&dir, false).unwrap();
-        let mut b = Db::open_in(&dir, false).unwrap();
+        let mut a = Db::open_in(&dir).unwrap();
+        let mut b = Db::open_in(&dir).unwrap();
         a.save_days(&sample_days(), &[], now()).unwrap();
         assert!(!a.changed_externally(), "eigene Änderung zählt nicht");
         assert!(b.changed_externally());
@@ -907,14 +877,14 @@ mod tests {
         let dir = temp_dir("import");
         let days = sample_days();
         fs::write(dir.join(LEGACY_FILE), export_markdown(&days, date(1), date(30), now(), &st())).unwrap();
-        let db = Db::open_in(&dir, false).unwrap();
+        let db = Db::open_in(&dir).unwrap();
         assert_eq!(db.load().unwrap(), days);
         assert!(!dir.join(LEGACY_FILE).exists());
         assert!(dir.join(LEGACY_IMPORTED).exists());
         drop(db);
         // Erneutes Öffnen importiert nichts doppelt, auch wenn wieder eine Datei daliegt.
         fs::write(dir.join(LEGACY_FILE), "| Mo, 02.11.2026 | 08:00:00 | 09:00:00 | 01:00:00 | 0 |\n").unwrap();
-        let db = Db::open_in(&dir, false).unwrap();
+        let db = Db::open_in(&dir).unwrap();
         assert_eq!(db.load().unwrap(), days);
         assert!(dir.join(LEGACY_FILE).exists());
         let _ = fs::remove_dir_all(&dir);
@@ -950,7 +920,7 @@ mod tests {
             conn.execute("INSERT INTO periods VALUES ('2026-11-16', 0, 28800, 36000)", []).unwrap();
             conn.execute("INSERT INTO breaks VALUES ('2026-11-16', 0, 36000, NULL)", []).unwrap();
         }
-        let mut db = Db::open_in(&dir, false).unwrap();
+        let mut db = Db::open_in(&dir).unwrap();
         assert_eq!(db.load_settings().unwrap(), Settings::default());
         let days = db.load().unwrap();
         assert_eq!(days.len(), 1);
@@ -964,7 +934,7 @@ mod tests {
             frame_to: h(20, 0),
             icon_set: rules::IconSet::Schlossuhr,
         };
-        let mut other = Db::open_in(&dir, false).unwrap();
+        let mut other = Db::open_in(&dir).unwrap();
         other.save_settings(&custom).unwrap();
         assert!(db.changed_externally(), "Einstellungen ändern die Datenbank");
         assert_eq!(db.load_settings().unwrap(), custom);
@@ -997,7 +967,7 @@ mod tests {
     #[test]
     fn daily_backup_keeps_last_15() {
         let dir = temp_dir("backup");
-        let mut db = Db::open_in(&dir, false).unwrap();
+        let mut db = Db::open_in(&dir).unwrap();
         let start = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
         for i in 0..20 {
             let day = start + Duration::days(i);
