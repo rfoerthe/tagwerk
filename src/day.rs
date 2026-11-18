@@ -209,10 +209,20 @@ pub struct DayRecord {
     pub last_end: i64,
     /// Arbeitszeit in Sekunden.
     pub work_secs: i64,
+    /// Pausen zum Anzeigen: Summe der einzelnen Pausen nach ihren angezeigten Uhrzeiten
+    /// (siehe [`shown_len`]) – passt so zu den Pausen, die einzeln aufgelistet sind.
+    pub shown_pause_secs: i64,
+}
+
+/// Dauer zwischen den angezeigten Uhrzeiten (ohne Sekunden): `17:00:19 – 17:30` ergibt
+/// 30 Min. wie angezeigt, nicht 29.
+pub fn shown_len(from: i64, to: i64) -> i64 {
+    (to / 60 - from / 60).max(0) * 60
 }
 
 impl DayRecord {
-    /// Pausen = Zeit zwischen Beginn und Ende, in der nicht gearbeitet wurde.
+    /// Pausen = Zeit zwischen Beginn und Ende, in der nicht gearbeitet wurde (sekundengenau,
+    /// etwa für den Export; angezeigt wird [`DayRecord::shown_pause_secs`]).
     pub fn pause_secs(&self) -> i64 {
         ((self.last_end - self.first_start) - self.work_secs).max(0)
     }
@@ -442,7 +452,8 @@ impl Day {
                 (first, first)
             }
         };
-        Some(DayRecord { date: self.date, first_start: first, last_end: last, work_secs: work })
+        let shown_pause_secs = spans.windows(2).map(|w| shown_len(w[0].to, w[1].from)).sum();
+        Some(DayRecord { date: self.date, first_start: first, last_end: last, work_secs: work, shown_pause_secs })
     }
 
     /// Summe der Pausen von mindestens 15 Minuten zwischen Arbeitsabschnitten
@@ -589,6 +600,18 @@ mod tests {
         let r = d.record(&st()).unwrap();
         assert_eq!((r.first_start, r.last_end), (h(8, 12), h(17, 30)));
         assert_eq!(r.pause_secs(), h(0, 43));
+    }
+
+    #[test]
+    fn shown_pauses_follow_shown_minutes() {
+        // Gesperrt 15:25:40 – 15:45:10: angezeigt 15:25 – 15:45, also 20 Min. Pause (nicht 19).
+        let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 18).unwrap());
+        d.add_period(h(8, 0), h(15, 25) + 40);
+        d.add_period(h(15, 45) + 10, h(17, 0));
+        let r = d.record(&st()).unwrap();
+        assert_eq!(r.pause_secs(), h(0, 19) + 30);
+        assert_eq!(r.shown_pause_secs, h(0, 20));
+        assert_eq!(shown_len(h(17, 0) + 19, h(17, 30)), h(0, 30));
     }
 
     #[test]

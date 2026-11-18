@@ -306,7 +306,7 @@ impl Tracker {
         let Some(d) = snap.iter().find(|d| d.date == date) else { return info };
         if let Some(rec) = d.record(s) {
             info.work_secs = rec.work_secs;
-            info.pause_secs = rec.pause_secs();
+            info.pause_secs = rec.shown_pause_secs;
             info.first_start = (rec.work_secs > 0 || d.start.is_some()).then_some(rec.first_start);
         }
         info.start_manual = d.start.is_some();

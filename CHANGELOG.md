@@ -25,6 +25,11 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 - „Pause als Arbeitszeit zählen“ in der Menüleiste zeigt die Dauer einer Pause jetzt wie
   die Wochenansicht nach den angezeigten Uhrzeiten (15:25 – 15:45 sind 20 Min., bisher
   je nach Sekunden 19 Min.).
+- Auch die Pausen eines Tages zählen jetzt nach den angezeigten Uhrzeiten: Die Summe ist
+  die Summe der einzelnen Pausen – im Tageskopf der Wochenansicht, in der Spalte
+  „Pausen“, im Inspektor, in den Übersichtskarten und unter „Pausen heute“ in der
+  Menüleiste. Bisher zeigte der Tageskopf z. B. 0:19 h neben einer Pause von 0:20 h.
+  Der Export bleibt sekundengenau.
 
 ### Entfernt
 - Der Menüpunkt „Wochenansicht …“ (⌘W) in der Menüleiste; die Woche ist über

@@ -113,7 +113,8 @@ zu „Woche“ zeigt die Woche des ausgewählten Tags. In der Menüleisten-App e
 
 - Blättern mit ‹ › oder den Pfeiltasten, **Heute** (⌘T) springt zur aktuellen Woche.
 - Jeder Tageskopf zeigt Arbeitszeit und Pausen des Tages, die Kopfzeile Arbeitszeit,
-  Pausen und Saldo der Woche.
+  Pausen und Saldo der Woche. Pausen zählen überall nach den angezeigten Uhrzeiten
+  (15:25 – 15:45 sind 20 Min.), die Summe eines Tages ist die Summe seiner Pausen.
 - Der Tooltip eines Blocks nennt manuelle Grenzen.
 - Ein Klick auf die Uhrzeit von Beginn oder Ende kopiert sie in die Zwischenablage.
 - Tage mit Regelverstößen tragen ein Warnschild; ein Klick auf den Tageskopf zeigt die
@@ -178,8 +179,8 @@ wird ein frei wählbarer Zeitraum als Markdown-Datei gespeichert – vorbelegt s
 letzten vier Wochen, „Dieser Monat“ und „Letzter Monat“ sind einen Klick entfernt. Die
 Datei enthält:
 
-1. eine **Übersichtstabelle** mit Beginn, Ende, Arbeits- und Pausenzeit sowie Saldo je
-   Tag und einer Summenzeile,
+1. eine **Übersichtstabelle** mit Beginn, Ende, Arbeits- und Pausenzeit (sekundengenau)
+   sowie Saldo je Tag und einer Summenzeile,
 2. **`## Hinweise`** – Verstöße gegen die [Regeln](#regeln),
 3. **`## Korrekturen`** – die manuellen Entscheidungen samt Arbeit ohne Mac mit Notiz,
 4. **`## Erfasste Perioden`** – die automatisch erfassten Zeiten.

@@ -79,11 +79,7 @@ pub(crate) fn min_work_text(min_work: i64) -> String {
     format!("Arbeit ohne Mac dauert mindestens {} Min. (siehe Einstellungen).", min_work / 60)
 }
 
-/// Dauer zwischen den angezeigten Uhrzeiten (ohne Sekunden): `17:00:19 – 17:30` ergibt
-/// 30 Min. wie angezeigt, nicht 29.
-pub(crate) fn shown_len(from: i64, to: i64) -> i64 {
-    (to / 60 - from / 60).max(0) * 60
-}
+pub(crate) use crate::day::shown_len;
 
 fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
@@ -878,7 +874,7 @@ fn cell_view(m: &Model, column: Option<&str>, row: NSInteger) -> Option<Retained
                         ("–".to_string(), NSTextAlignment::Right, true)
                     }
                 }
-                "pause" => (store::fmt_hm(rec.pause_secs()), NSTextAlignment::Right, false),
+                "pause" => (store::fmt_hm(rec.shown_pause_secs), NSTextAlignment::Right, false),
                 _ => return None,
             };
             let t = label(&text);
@@ -932,7 +928,7 @@ fn refresh_summary() {
         // (Arbeit, Pausen, Tage, Soll)
         let sum = |f: &dyn Fn(NaiveDate) -> bool| {
             recs.iter().filter(|r| f(r.date)).fold((0i64, 0i64, 0usize, 0i64), |(w, p, n, t), r| {
-                (w + r.work_secs, p + r.pause_secs(), n + 1, t + st.daily_target(r.date))
+                (w + r.work_secs, p + r.shown_pause_secs, n + 1, t + st.daily_target(r.date))
             })
         };
         let (tw, _tp, tn, _) = sum(&|d| d == today);
@@ -1075,7 +1071,7 @@ fn day_subtitle(day: Option<&Day>, settings: &Settings) -> String {
         Some(r) if r.work_secs > 0 => format!(
             "Arbeitszeit {}  ·  Pausen {}  ·  Saldo {}",
             store::fmt_hm(r.work_secs),
-            store::fmt_hm(r.pause_secs()),
+            store::fmt_hm(r.shown_pause_secs),
             rules::fmt_balance(r.work_secs - settings.daily_target(r.date))
         ),
         Some(_) => "Keine Arbeitszeit im Arbeitszeitrahmen.".to_string(),
