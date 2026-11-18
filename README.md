@@ -328,12 +328,16 @@ Menüleiste zeichnet die App selbst (`src/glyphs.rs`).
 <summary>Testdaten</summary>
 <br>
 
-`testdata/testdb.sh` erzeugt eine Testdatenbank mit sechs Wochen Arbeitszeiten
-(KW 41–46/2026 plus Montag der KW 47, Wochensummen um 39 Stunden ± 10 %) und einigen
-Regelverstößen: zu kurze Ruhezeit, Arbeit vor 7 und nach 22 Uhr, zu wenig Pause.
+`testdata/testdb.sh` erzeugt eine Testdatenbank, die immer bis gestern reicht: sechs
+volle Wochen plus die Tage der laufenden Woche, Wochensummen um 39 Stunden ± 10 %,
+bundesweite Feiertage frei. An rund 20 % der Tage gibt es Arbeit ohne Mac (Meeting,
+Telefonat, Sonstiges – bei gesperrtem Mac, vor dem Beginn oder nach dem Ende), dazu
+einige Regelverstöße: zu kurze Ruhezeit, Arbeit vor 7 und nach 22 Uhr, zu wenig Pause.
+Datenbank und Markdown-Quelle landen in `target/testdata/` und werden bei jedem Aufruf
+neu erzeugt.
 
 ```bash
-testdata/testdb.sh             # testdata/tagwerk.db neu bauen
+testdata/testdb.sh             # target/testdata/tagwerk.db neu bauen
 testdata/testdb.sh --install   # zusätzlich als zentrale Datenbank einsetzen
 testdata/testdb.sh --restore   # die echten Daten zurückholen
 ```
@@ -346,7 +350,7 @@ beendet und – wenn sie als App liefen – danach neu gestartet. Ohne Austausch
 die Testdatenbank auch direkt öffnen:
 
 ```bash
-TAGWERK_DIR=testdata cargo run -- --records
+TAGWERK_DIR=target/testdata cargo run -- --records
 ```
 
 </details>

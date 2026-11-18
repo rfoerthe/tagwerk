@@ -2,10 +2,15 @@
 # ---------------------------------------------------------------------------
 # Tagwerk – Testdatenbank bauen und bei Bedarf als zentrale Datenbank einsetzen.
 #
-#   testdata/testdb.sh             Testdaten erzeugen und testdata/tagwerk.db neu bauen
+#   testdata/testdb.sh             Testdaten erzeugen und target/testdata/tagwerk.db
+#                                  neu bauen
 #   testdata/testdb.sh --install   zusätzlich die zentrale Datenbank durch die
 #                                  Testdatenbank ersetzen (vorher wird sie gesichert)
 #   testdata/testdb.sh --restore   die zuletzt gesicherte zentrale Datenbank zurückholen
+#
+# Die Testdaten reichen immer bis gestern (sechs Wochen plus die laufende Woche, siehe
+# generate_testdata.py) und werden bei jedem Aufruf neu erzeugt – samt Markdown-Quelle
+# target/testdata/testdaten.md. Nichts davon liegt im Repository.
 #
 # Laufende Tagwerk-Instanzen, die die zentrale Datenbank benutzen, werden vor dem
 # Austausch beendet und danach wieder gestartet (sofern sie als App-Bundle liefen).
@@ -25,21 +30,24 @@ for arg in "$@"; do
   case "$arg" in
     --install) MODE="install" ;;
     --restore) MODE="restore" ;;
-    -h|--help) sed -n '2,20p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,25p' "$0"; exit 0 ;;
     *) echo "Unbekannte Option: $arg" >&2; exit 2 ;;
   esac
 done
 
 HERE="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$HERE/.." && pwd)"
-TEST_DB="$HERE/tagwerk.db"
-TEST_MD="$HERE/testdaten.md"
+TEST_DIR="$ROOT/target/testdata"
+TEST_DB="$TEST_DIR/tagwerk.db"
+TEST_MD="$TEST_DIR/testdaten.md"
 BIN="$ROOT/target/debug/Tagwerk"
 DATA_DIR="${TAGWERK_DIR:-$HOME/Library/Application Support/Tagwerk}"
 CENTRAL_DB="$DATA_DIR/tagwerk.db"
 SAFE_DIR="$DATA_DIR/vor-testdaten"
 # Kennung der Testdatenbank ("TWKT"); Tagwerk selbst ändert die application_id nie.
 TEST_MARK=1414990676
+# Datenbankschema, für das generate_testdata.py schreibt (src/store.rs, SCHEMA_VERSION)
+SCHEMA_VERSION=3
 
 step() { printf '\n\033[1;34m==>\033[0m %s\n' "$*"; }
 fail() { printf '\033[1;31mFehler:\033[0m %s\n' "$*" >&2; exit 1; }
@@ -68,7 +76,8 @@ build_test_db() {
   command -v cargo >/dev/null || fail "cargo (Rust) wurde nicht gefunden."
   step "Baue Tagwerk (Debug)"
   (cd "$ROOT" && cargo build --quiet)
-  step "Erzeuge Testdaten"
+  mkdir -p "$TEST_DIR"
+  step "Erzeuge Testdaten bis gestern"
   python3 "$HERE/generate_testdata.py" > "$TEST_MD"
   step "Baue $TEST_DB"
   rm -f "$TEST_DB" "$TEST_DB-wal" "$TEST_DB-shm"
@@ -76,10 +85,19 @@ build_test_db() {
   local tmp
   tmp="$(mktemp -d)"
   TAGWERK_DIR="$tmp" "$BIN" --import "$TEST_MD"
-  sqlite3 "$tmp/tagwerk.db" "PRAGMA application_id = $TEST_MARK;"
-  seal "$tmp/tagwerk.db" || fail "Die Testdatenbank ist beschädigt."
-  cp "$tmp/tagwerk.db" "$TEST_DB"
+  local db="$tmp/tagwerk.db" version blocks
+  version="$(sqlite3 "$db" 'PRAGMA user_version')"
+  [[ "$version" == "$SCHEMA_VERSION" ]] \
+    || fail "Tagwerk hat Schema $version angelegt, die Testdaten sind für Schema $SCHEMA_VERSION – generate_testdata.py anpassen."
+  blocks="$(sqlite3 "$db" 'SELECT count(*) FROM work_blocks')"
+  [[ "$blocks" -gt 0 ]] || fail "Die Testdatenbank enthält keine Arbeit ohne Mac."
+  sqlite3 "$db" "PRAGMA application_id = $TEST_MARK;"
+  seal "$db" || fail "Die Testdatenbank ist beschädigt."
+  cp "$db" "$TEST_DB"
   rm -rf "$tmp"
+  echo "$(sqlite3 "$TEST_DB" 'SELECT count(DISTINCT date) FROM periods') Tage," \
+    "$(sqlite3 "$TEST_DB" 'SELECT count(DISTINCT date) FROM work_blocks') davon mit Arbeit ohne Mac" \
+    "($(sqlite3 "$TEST_DB" 'SELECT min(date) || " bis " || max(date) FROM periods'))"
 }
 
 # ---------- Laufende Instanzen ----------------------------------------------

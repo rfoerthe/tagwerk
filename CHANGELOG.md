@@ -25,6 +25,9 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 - Datenbankschema 3 (neue Tabelle `work_blocks`); vorhandene Datenbanken werden beim
   Start automatisch erweitert. Ältere Tagwerk-Versionen können eine Datenbank im
   Schema 3 nicht mehr öffnen.
+- Testdaten (`testdata/testdb.sh`): Der Zeitraum endet immer gestern (sechs Wochen plus
+  die laufende Woche), an rund 20 % der Tage gibt es Arbeit ohne Mac, und die
+  Testdatenbank wird nach `target/testdata/` geschrieben statt ins Repository.
 
 ## [1.1.0] - 2026-11-17
 
