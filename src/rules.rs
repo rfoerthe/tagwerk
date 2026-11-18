@@ -10,7 +10,8 @@
 //! - **Pausen** (§ 4 ArbZG) – mehr als 6 Std. Arbeit: 30 Min., mehr als 9 Std.: 45 Min.;
 //!   gezählt werden Abschnitte von mindestens 15 Min.
 //! - **Ruhezeit** (§ 5 ArbZG) – mindestens 11 Std. zwischen zwei Arbeitstagen.
-//! - **Höchstarbeitszeit** – mehr als 10 Std. am Tag gelten als Verstoß.
+//! - **Höchstarbeitszeit** – mehr als 10 Std. am Tag gelten als Verstoß; bei 9:45 und 10 Std.
+//!   kommt eine Mitteilung (siehe [`LimitWatch`]).
 
 use crate::day::{fmt_clock, Day, Span, DAY_END};
 use chrono::{Datelike, NaiveDate, Weekday};
@@ -315,6 +316,87 @@ pub fn balance(days: &[Day], from: NaiveDate, to: NaiveDate, s: &Settings) -> (i
         .fold((0, 0), |(w, t), r| (w + r.shown_work_secs, t + s.daily_target(r.date)))
 }
 
+/// Vorwarnung vor der Höchstarbeitszeit: so lange vorher kommt eine Mitteilung.
+pub const MAX_DAILY_WORK_NOTICE: i64 = 15 * 60;
+
+/// Mitteilung zur Höchstarbeitszeit (in der Mitteilungszentrale von macOS).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum LimitAlert {
+    /// Noch 15 Minuten bis 10 Stunden (ab 9:45 Std.).
+    Soon,
+    /// 10 Stunden erreicht.
+    Reached,
+}
+
+impl LimitAlert {
+    /// Höchste Stufe, die `work` Sekunden Arbeit erreicht haben.
+    pub fn level(work: i64) -> Option<Self> {
+        if work >= MAX_DAILY_WORK {
+            Some(LimitAlert::Reached)
+        } else if work >= MAX_DAILY_WORK - MAX_DAILY_WORK_NOTICE {
+            Some(LimitAlert::Soon)
+        } else {
+            None
+        }
+    }
+
+    /// Kennung der Mitteilung (eine neue ersetzt eine ältere mit derselben Kennung).
+    pub fn id(self) -> &'static str {
+        match self {
+            LimitAlert::Soon => "max-hours-soon",
+            LimitAlert::Reached => "max-hours-reached",
+        }
+    }
+
+    pub fn title(self) -> String {
+        match self {
+            LimitAlert::Soon => format!("Noch {} Min. bis 10 Std. Arbeitszeit", MAX_DAILY_WORK_NOTICE / 60),
+            LimitAlert::Reached => "10 Std. Arbeitszeit erreicht".to_string(),
+        }
+    }
+
+    pub fn body(self) -> String {
+        match self {
+            LimitAlert::Soon => format!(
+                "Heute {} gearbeitet – mehr als 10 Std. am Tag sind nicht erlaubt (§ 3 ArbZG).",
+                fmt_hm(MAX_DAILY_WORK - MAX_DAILY_WORK_NOTICE)
+            ),
+            LimitAlert::Reached => {
+                "Die Höchstarbeitszeit ist erreicht – mehr als 10 Std. am Tag sind nicht erlaubt (§ 3 ArbZG).".to_string()
+            }
+        }
+    }
+}
+
+/// Merkt sich, welche Mitteilung zur Höchstarbeitszeit heute schon kam, damit jede Schwelle
+/// nur einmal gemeldet wird – beim Überschreiten, nicht schon beim Start der App.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LimitWatch {
+    date: Option<NaiveDate>,
+    level: Option<LimitAlert>,
+}
+
+impl LimitWatch {
+    /// Stand ohne Mitteilung übernehmen (beim Start: bereits erreichte Schwellen nicht melden).
+    pub fn init(date: NaiveDate, work: i64) -> Self {
+        Self { date: Some(date), level: LimitAlert::level(work) }
+    }
+
+    /// Neue Arbeitszeit von heute. Gibt die fällige Mitteilung zurück, wenn eine Schwelle
+    /// gerade überschritten wurde und gerade gearbeitet wird (`working`). Wer z. B. im Fenster
+    /// „Aufzeichnungen“ nachträglich Zeit einträgt, bekommt keine Mitteilung. Sinkt die
+    /// Arbeitszeit wieder unter eine Schwelle (Korrektur), wird sie erneut gemeldet.
+    /// Springt die Zeit über beide Schwellen, kommt nur die Mitteilung „erreicht“.
+    pub fn update(&mut self, date: NaiveDate, work: i64, working: bool) -> Option<LimitAlert> {
+        if self.date != Some(date) {
+            *self = Self { date: Some(date), level: None };
+        }
+        let level = LimitAlert::level(work);
+        let prev = std::mem::replace(&mut self.level, level);
+        (working && level > prev).then_some(level).flatten()
+    }
+}
+
 /// `+1:05 h` bzw. `−0:30 h`
 pub fn fmt_balance(secs: i64) -> String {
     let m = secs.abs() / 60;
@@ -432,6 +514,34 @@ mod tests {
         assert!(many.text().starts_with("4 Zeiträume (0:40 Std.) außerhalb"), "{}", many.text());
         let late = Warning::OutsideFrame { spans: vec![Span::new(h(23, 22) + 34, DAY_END - 1)], frame: s.frame_text() };
         assert!(late.text().starts_with("23:23–24:00 Uhr außerhalb"), "{}", late.text());
+    }
+
+    #[test]
+    fn limit_alerts_at_9_45_and_10_hours() {
+        assert_eq!(LimitAlert::level(h(9, 44)), None);
+        assert_eq!(LimitAlert::level(h(9, 45)), Some(LimitAlert::Soon));
+        assert_eq!(LimitAlert::level(h(10, 0)), Some(LimitAlert::Reached));
+        assert_eq!(LimitAlert::Soon.title(), "Noch 15 Min. bis 10 Std. Arbeitszeit");
+        assert!(LimitAlert::Soon.body().starts_with("Heute 9:45 Std. gearbeitet"), "{}", LimitAlert::Soon.body());
+
+        let mut w = LimitWatch::init(date(16), h(9, 0));
+        assert_eq!(w.update(date(16), h(9, 44), true), None);
+        assert_eq!(w.update(date(16), h(9, 45), true), Some(LimitAlert::Soon));
+        assert_eq!(w.update(date(16), h(9, 50), true), None, "nur einmal");
+        assert_eq!(w.update(date(16), h(10, 0), true), Some(LimitAlert::Reached));
+        assert_eq!(w.update(date(16), h(10, 30), true), None);
+        // Korrektur nach unten, danach wieder erreicht
+        assert_eq!(w.update(date(16), h(9, 30), false), None);
+        assert_eq!(w.update(date(16), h(10, 0), true), Some(LimitAlert::Reached), "Sprung: nur „erreicht“");
+        // Neuer Tag
+        assert_eq!(w.update(date(17), h(9, 45), true), Some(LimitAlert::Soon));
+        // Nachgetragen, während nicht gearbeitet wird: keine Mitteilung, auch nicht später
+        assert_eq!(w.update(date(17), h(10, 5), false), None);
+        assert_eq!(w.update(date(17), h(10, 6), true), None);
+        // Beim Start schon über 9:45 Std.: nur noch „erreicht“
+        let mut w = LimitWatch::init(date(18), h(9, 50));
+        assert_eq!(w.update(date(18), h(9, 55), true), None);
+        assert_eq!(w.update(date(18), h(10, 0), true), Some(LimitAlert::Reached));
     }
 
     #[test]

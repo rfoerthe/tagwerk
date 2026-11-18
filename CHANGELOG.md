@@ -6,6 +6,14 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt
+- Mitteilungen zur Höchstarbeitszeit über die Mitteilungszentrale von macOS: bei 9:45 Std.
+  Arbeit „Noch 15 Min. bis 10 Std. Arbeitszeit“, bei 10 Std. „10 Std. Arbeitszeit
+  erreicht“. Jede Schwelle wird einmal am Tag gemeldet, sobald sie während der Arbeit
+  (auch ohne Mac) überschritten wird – nicht für nachträglich eingetragene Zeit und nicht
+  noch einmal nach einem Neustart der App. Beim ersten Start fragt macOS nach der
+  Erlaubnis; nur in der installierten App (`Tagwerk.app`).
+
 ## [1.3.0] - 2026-11-18
 
 ### Zusammenfassung
