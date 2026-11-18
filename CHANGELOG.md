@@ -15,13 +15,17 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 - „Wochenansicht …“ in der Menüleiste (⌘W) öffnet „Aufzeichnungen“ direkt in der Ansicht
   „Woche“ mit der aktuellen Woche. Ein Wechsel von „Tage“ zu „Woche“ zeigt die Woche des
   ausgewählten Tags.
-- Ein Doppelklick auf einen Tag in der Woche wechselt zur Ansicht „Tage“, wählt den Tag
-  aus und blendet den Inspektor ein.
 - In der Ansicht „Woche“ ersetzt die Wochenleiste (‹ › Heute, Kalenderwoche, Hinweise,
   Wochensumme) die Übersichtskarten; die Fußzeile bleibt.
 - Auch eigenständig (`Tagwerk --records`) gibt es die Wochenansicht; Arbeit ohne Mac
   wird dann direkt in der Datenbank eingetragen bzw. gelöscht.
 - `--week-screenshot` speichert das Fenster „Aufzeichnungen“ in der Ansicht „Woche“.
+- Ein Klick auf einen freien Bereich der Woche öffnet den Dialog „Arbeit ohne Mac
+  eintragen“ sofort (bisher erst nach der Doppelklick-Zeit).
+
+### Entfernt
+- Der Doppelklick auf einen Tag in der Wochenansicht (öffnete den Tag im Fenster
+  „Aufzeichnungen“).
 
 ## [1.2.0] - 2026-11-18
 

@@ -9,8 +9,7 @@
 //! Stand ([`update`]): in der Menüleisten-App den der Erfassung samt laufender Periode,
 //! eigenständig den der Datenbank. Blättern mit ‹ › oder den Pfeiltasten, „Heute“ (⌘T)
 //! springt zur aktuellen Woche. Ein Klick auf die Uhrzeit von Beginn oder Ende eines
-//! Abschnitts kopiert sie, ein Klick auf einen Tageskopf mit Warnschild zeigt die Hinweise,
-//! ein Doppelklick auf einen Tag zeigt ihn in der Ansicht „Tage“.
+//! Abschnitts kopiert sie, ein Klick auf einen Tageskopf mit Warnschild zeigt die Hinweise.
 //! Arbeit ohne Mac (Telefonat, Meeting …) ist schraffiert; ein Klick darauf bietet an, sie
 //! wieder zu löschen. Ein Klick auf einen freien Bereich öffnet einen Dialog, um Arbeit ohne
 //! Mac einzutragen (von, bis, Grund): in einer Pause ist die ganze Pause vorgeschlagen, vor
@@ -530,7 +529,6 @@ thread_local! {
     }) };
     /// Texte der Tooltips (AppKit hält die Besitzer der Tooltip-Bereiche nicht fest).
     static TIPS: RefCell<Vec<Retained<NSString>>> = const { RefCell::new(Vec::new()) };
-    static OPEN_DAY: Cell<Option<fn(NaiveDate)>> = const { Cell::new(None) };
     static FLASH: RefCell<Option<Flash>> = const { RefCell::new(None) };
     /// Mausposition über dem Raster (für den Rahmen um den freien Bereich darunter).
     static HOVER: Cell<Option<NSPoint>> = const { Cell::new(None) };
@@ -540,8 +538,6 @@ thread_local! {
     static POPOVER: RefCell<Option<Retained<NSPopover>>> = const { RefCell::new(None) };
     /// Arbeit ohne Mac eintragen (Tag, von, bis, Grund) – stellt „Aufzeichnungen“ bereit.
     static ADD_WORK: Cell<Option<AddWork>> = const { Cell::new(None) };
-    /// Zählt bei jedem Klick hoch: Ein Doppelklick verwirft den Dialog des ersten Klicks.
-    static CLICK_GEN: Cell<u64> = const { Cell::new(0) };
     /// Arbeit ohne Mac löschen (Tag, von, bis) – stellt „Aufzeichnungen“ bereit.
     static REMOVE_WORK: Cell<Option<RemoveWork>> = const { Cell::new(None) };
     /// Arbeit ohne Mac, deren Kontextmenü gerade offen ist.
@@ -694,29 +690,19 @@ define_class!(
 
         /// Klick auf eine Uhrzeit: kopieren. Klick auf einen Tageskopf mit Warnschild:
         /// Hinweise zeigen. Klick auf einen freien Bereich: Arbeit ohne Mac eintragen.
-        /// Doppelklick auf einen Tag: in der Ansicht „Tage“ zeigen.
+        /// Weitere Klicks eines Mehrfachklicks tun nichts.
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
+            if event.clickCount() != 1 {
+                return;
+            }
             let p = self.convertPoint_fromView(event.locationInWindow(), None);
-            // Ein weiterer Klick verwirft den noch ausstehenden Dialog (Doppelklick).
-            CLICK_GEN.with(|g| g.set(g.get() + 1));
-            match (hit_test(self, p), event.clickCount()) {
-                (Some(Hit::Time { flash, text, .. }), 1) => copy_time(self, flash, &text),
-                (Some(Hit::Time { .. }), _) => {}
-                (Some(Hit::Warnings { date, warnings, rect }), 1) => show_warnings(self, date, &warnings, rect),
-                (Some(Hit::Free { date, preset }), 1) => add_work_after_click(date, preset),
-                (Some(Hit::Work { date, block, note }), 1) => show_work_menu(self, date, block, &note, p),
-                (_, 2) => {
-                    let date = DATA.with(|d| {
-                        let d = d.try_borrow().ok()?;
-                        let geo = Geo::new(self.bounds(), d.hours);
-                        geo.column_at(p.x).and_then(|c| d.cols.get(c)).map(|c| c.date)
-                    });
-                    if let (Some(date), Some(open)) = (date, OPEN_DAY.with(|o| o.get())) {
-                        open(date);
-                    }
-                }
-                _ => {}
+            match hit_test(self, p) {
+                Some(Hit::Time { flash, text, .. }) => copy_time(self, flash, &text),
+                Some(Hit::Warnings { date, warnings, rect }) => show_warnings(self, date, &warnings, rect),
+                Some(Hit::Free { date, preset }) => show_add_work(date, preset, None),
+                Some(Hit::Work { date, block, note }) => show_work_menu(self, date, block, &note, p),
+                None => {}
             }
         }
     }
@@ -862,18 +848,6 @@ fn fmt_span(sp: Span) -> String {
     let len = records::shown_len(sp.from, sp.to);
     let dur = if len < 3600 { format!("{} Min.", len / 60) } else { store::fmt_hm(len) };
     format!("{} – {} Uhr ({dur})", fmt_clock(sp.from), fmt_clock(sp.to))
-}
-
-/// Klick auf einen freien Bereich: Den Dialog erst nach der Doppelklick-Zeit öffnen – ein
-/// Doppelklick zeigt stattdessen den Tag in der Ansicht „Tage“.
-fn add_work_after_click(date: NaiveDate, preset: Span) {
-    let generation = CLICK_GEN.with(|g| g.get());
-    let block = RcBlock::new(move |_timer| {
-        if CLICK_GEN.with(|g| g.get()) == generation {
-            show_add_work(date, preset, None);
-        }
-    });
-    unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(NSEvent::doubleClickInterval(), false, &block) };
 }
 
 /// Dialog „Arbeit ohne Mac eintragen“ als Sheet am Fenster „Aufzeichnungen“: von, bis und Grund.
@@ -1679,10 +1653,9 @@ pub fn container() -> Retained<NSView> {
     UI.with(|u| u.borrow().as_ref().map(|u| u.root.clone())).expect("Wochenansicht aufgebaut")
 }
 
-/// Was ein Doppelklick auf einen Tag tut und wie sich Arbeit ohne Mac eintragen und löschen
-/// lässt (ohne `add_work`/`remove_work` nur ansehen, etwa für Bildschirmfotos).
-pub fn set_actions(open_day: fn(NaiveDate), add_work: Option<AddWork>, remove_work: Option<RemoveWork>) {
-    OPEN_DAY.with(|o| o.set(Some(open_day)));
+/// Wie sich Arbeit ohne Mac eintragen und löschen lässt (ohne `add_work`/`remove_work` nur
+/// ansehen, etwa für Bildschirmfotos).
+pub fn set_actions(add_work: Option<AddWork>, remove_work: Option<RemoveWork>) {
     ADD_WORK.with(|c| c.set(add_work));
     REMOVE_WORK.with(|c| c.set(remove_work));
 }

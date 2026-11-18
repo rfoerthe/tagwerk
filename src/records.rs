@@ -1460,7 +1460,7 @@ fn validate_menu_item(item: &NSMenuItem) -> bool {
     true
 }
 
-/// Einen Tag in der Ansicht „Tage“ zeigen (auch beim Doppelklick in der Wochenansicht).
+/// Einen Tag in der Ansicht „Tage“ zeigen.
 fn open_day(date: NaiveDate) {
     set_mode(Mode::Days, true);
     go_to(date);
@@ -2284,7 +2284,7 @@ pub fn show(open: Open, status: Status, embed: Embed) {
     NSApplication::sharedApplication(mtm()).setActivationPolicy(NSApplicationActivationPolicy::Regular);
     let fresh = !OPEN.with(|o| o.replace(true));
     let ui = build(false);
-    week_view::set_actions(open_day, Some(embed.add_work), Some(embed.remove_work));
+    week_view::set_actions(Some(embed.add_work), Some(embed.remove_work));
     model(|m| m.status = Some(status));
     reload();
     let today = now().date();
@@ -2381,9 +2381,9 @@ pub fn run(screenshot: Option<PathBuf>, week: bool) -> Result<(), String> {
     let ui = build(shot);
     if shot {
         // Bildschirmfotos nur zum Ansehen.
-        week_view::set_actions(open_day, None, None);
+        week_view::set_actions(None, None);
     } else {
-        week_view::set_actions(open_day, Some(week_add_work), Some(week_remove_work));
+        week_view::set_actions(Some(week_add_work), Some(week_remove_work));
     }
     let mode = match (shot, week) {
         (_, true) => Mode::Week,

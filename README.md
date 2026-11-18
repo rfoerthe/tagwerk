@@ -116,8 +116,7 @@ Tags. In der Menüleisten-App enthält die Woche auch den gerade laufenden Absch
 - Blättern mit ‹ › oder den Pfeiltasten, **Heute** (⌘T) springt zur aktuellen Woche.
 - Jeder Tageskopf zeigt Arbeitszeit und Pausen des Tages, die Kopfzeile Arbeitszeit,
   Pausen und Saldo der Woche.
-- Ein Doppelklick auf einen Tag wechselt zur Ansicht „Tage“ und zeigt den Tag im
-  Inspektor; der Tooltip eines Blocks nennt manuelle Grenzen.
+- Der Tooltip eines Blocks nennt manuelle Grenzen.
 - Ein Klick auf die Uhrzeit von Beginn oder Ende kopiert sie in die Zwischenablage.
 - Tage mit Regelverstößen tragen ein Warnschild; ein Klick auf den Tageskopf zeigt die
   Hinweise.
@@ -131,8 +130,7 @@ Tags. In der Menüleisten-App enthält die Woche auch den gerade laufenden Absch
   Beginn, Ende und Grund (Meeting, Telefonat, Networking, Sonstiges). In einer Pause ist
   die ganze Pause vorgeschlagen, vor dem Arbeitsbeginn und nach dem Feierabend eine halbe
   Stunde ab dem Klick. Fährt die Maus über einen freien Bereich, zeigt ein Rahmen genau
-  diesen Vorschlag. Zukünftige Zeiten lassen sich nicht eintragen; ein Doppelklick
-  zeigt weiterhin den Tag in der Ansicht „Tage“.
+  diesen Vorschlag. Zukünftige Zeiten lassen sich nicht eintragen.
 
 <details>
 <summary>Weitere Ansichten</summary>
