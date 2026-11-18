@@ -207,8 +207,12 @@ pub struct DayRecord {
     pub first_start: i64,
     /// Ende (letztes Sperren oder manuell festgelegt, spätestens Ende des Rahmens).
     pub last_end: i64,
-    /// Arbeitszeit in Sekunden.
+    /// Arbeitszeit in Sekunden (sekundengenau, etwa für den Export und die Hinweise).
     pub work_secs: i64,
+    /// Arbeitszeit zum Anzeigen: Summe der einzelnen Arbeitsabschnitte nach ihren angezeigten
+    /// Uhrzeiten (siehe [`shown_len`]). Mit [`DayRecord::shown_pause_secs`] ergibt sie genau
+    /// Ende − Beginn wie angezeigt, und Tage summieren sich zur Woche ohne Rundungsreste.
+    pub shown_work_secs: i64,
     /// Pausen zum Anzeigen: Summe der einzelnen Pausen nach ihren angezeigten Uhrzeiten
     /// (siehe [`shown_len`]) – passt so zu den Pausen, die einzeln aufgelistet sind.
     pub shown_pause_secs: i64,
@@ -452,8 +456,16 @@ impl Day {
                 (first, first)
             }
         };
+        let shown_work_secs = spans.iter().map(|sp| shown_len(sp.from, sp.to)).sum();
         let shown_pause_secs = spans.windows(2).map(|w| shown_len(w[0].to, w[1].from)).sum();
-        Some(DayRecord { date: self.date, first_start: first, last_end: last, work_secs: work, shown_pause_secs })
+        Some(DayRecord {
+            date: self.date,
+            first_start: first,
+            last_end: last,
+            work_secs: work,
+            shown_work_secs,
+            shown_pause_secs,
+        })
     }
 
     /// Summe der Pausen von mindestens 15 Minuten zwischen Arbeitsabschnitten
@@ -612,6 +624,20 @@ mod tests {
         assert_eq!(r.pause_secs(), h(0, 19) + 30);
         assert_eq!(r.shown_pause_secs, h(0, 20));
         assert_eq!(shown_len(h(17, 0) + 19, h(17, 30)), h(0, 30));
+    }
+
+    #[test]
+    fn shown_work_follows_shown_minutes() {
+        // 08:18:50 – 12:00:30 und 12:59:10 – 18:05:20: angezeigt 08:18 – 18:05 mit 59 Min. Pause,
+        // also 8:48 Std. Arbeit – sekundengenau wären es nur 8:47:50.
+        let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 10, 30).unwrap());
+        d.add_period(h(8, 18) + 50, h(12, 0) + 30);
+        d.add_period(h(12, 59) + 10, h(18, 5) + 20);
+        let r = d.record(&st()).unwrap();
+        assert_eq!(r.work_secs, h(8, 47) + 50);
+        assert_eq!(r.shown_pause_secs, h(0, 59));
+        assert_eq!(r.shown_work_secs, h(8, 48));
+        assert_eq!(r.shown_work_secs + r.shown_pause_secs, shown_len(r.first_start, r.last_end));
     }
 
     #[test]

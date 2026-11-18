@@ -30,6 +30,11 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   „Pausen“, im Inspektor, in den Übersichtskarten und unter „Pausen heute“ in der
   Menüleiste. Bisher zeigte der Tageskopf z. B. 0:19 h neben einer Pause von 0:20 h.
   Der Export bleibt sekundengenau.
+- Ebenso die Arbeitszeit: Sie ist die Summe der Arbeitsabschnitte nach ihren angezeigten
+  Uhrzeiten. So ergibt Ende − Beginn − Pausen genau die Arbeitszeit, die Tage einer Woche
+  summieren sich genau zur Wochenzeile, und die Salden der Tage zum Saldo der Woche.
+  Bisher wichen sie wegen abgeschnittener Sekunden um 1–2 Min. ab (z. B. 08:18 – 18:05
+  mit 0:59 h Pause als 8:47 h statt 8:48 h). Der Export bleibt sekundengenau.
 
 ### Entfernt
 - Der Menüpunkt „Wochenansicht …“ (⌘W) in der Menüleiste; die Woche ist über

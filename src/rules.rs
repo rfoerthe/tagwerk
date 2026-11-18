@@ -304,14 +304,15 @@ pub fn day_warnings(days: &[Day], date: NaiveDate, s: &Settings) -> Vec<Warning>
     out
 }
 
-/// Arbeitszeit und Soll der Tage von `from` bis `to`. Soll gibt es nur für Tage, an denen
-/// gearbeitet wurde – Urlaub, Feiertage oder Krankheit drücken den Saldo also nicht.
+/// Arbeitszeit (wie angezeigt, in ganzen Minuten) und Soll der Tage von `from` bis `to`. Soll
+/// gibt es nur für Tage, an denen gearbeitet wurde – Urlaub, Feiertage oder Krankheit drücken
+/// den Saldo also nicht.
 pub fn balance(days: &[Day], from: NaiveDate, to: NaiveDate, s: &Settings) -> (i64, i64) {
     days.iter()
         .filter(|d| d.date >= from && d.date <= to)
         .filter_map(|d| d.record(s))
         .filter(|r| r.work_secs > 0)
-        .fold((0, 0), |(w, t), r| (w + r.work_secs, t + s.daily_target(r.date)))
+        .fold((0, 0), |(w, t), r| (w + r.shown_work_secs, t + s.daily_target(r.date)))
 }
 
 /// `+1:05 h` bzw. `−0:30 h`
@@ -442,5 +443,25 @@ mod tests {
         sat.add_period(h(10, 0), h(11, 0)); // Wochenende: kein Soll
         let (work, target) = balance(&[mon, sat], date(16), date(22), &s);
         assert_eq!((work, target), (h(10, 0), h(7, 48)));
+    }
+
+    #[test]
+    fn balance_adds_up_shown_minutes() {
+        // Zwei Tage mit je 7:34:40 Std.: angezeigt je 7:34 h und −0:14 h, die Woche also
+        // 15:08 h und −0:28 h – nicht 15:09 h und −0:26 h aus den Sekunden.
+        let s = Settings::default();
+        let days: Vec<Day> = [16, 17]
+            .iter()
+            .map(|&n| {
+                let mut d = Day::new(date(n));
+                d.add_period(h(8, 0) + 10, h(15, 34) + 50);
+                d
+            })
+            .collect();
+        let rec = days[0].record(&s).unwrap();
+        assert_eq!(fmt_balance(rec.shown_work_secs - s.daily_target(rec.date)), "−0:14 h");
+        let (work, target) = balance(&days, date(16), date(22), &s);
+        assert_eq!(work, h(15, 8));
+        assert_eq!(fmt_balance(work - target), "−0:28 h");
     }
 }

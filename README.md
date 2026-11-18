@@ -115,6 +115,8 @@ zu „Woche“ zeigt die Woche des ausgewählten Tags. In der Menüleisten-App e
 - Jeder Tageskopf zeigt Arbeitszeit und Pausen des Tages, die Kopfzeile Arbeitszeit,
   Pausen und Saldo der Woche. Pausen zählen überall nach den angezeigten Uhrzeiten
   (15:25 – 15:45 sind 20 Min.), die Summe eines Tages ist die Summe seiner Pausen.
+  Genauso die Arbeitszeit: Ende − Beginn − Pausen ergibt sie genau, und Tage wie Salden
+  summieren sich ohne Rundungsreste zur Woche.
 - Der Tooltip eines Blocks nennt manuelle Grenzen.
 - Ein Klick auf die Uhrzeit von Beginn oder Ende kopiert sie in die Zwischenablage.
 - Tage mit Regelverstößen tragen ein Warnschild; ein Klick auf den Tageskopf zeigt die

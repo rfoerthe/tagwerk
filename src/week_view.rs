@@ -178,7 +178,7 @@ fn columns(snap: &Snapshot, monday: NaiveDate) -> Vec<Column> {
                 running: false,
                 notes: Vec::new(),
             }));
-            let (work_secs, pause_secs) = day.record(s).map(|r| (r.work_secs, r.shown_pause_secs)).unwrap_or((0, 0));
+            let (work_secs, pause_secs) = day.record(s).map(|r| (r.shown_work_secs, r.shown_pause_secs)).unwrap_or((0, 0));
             let warnings = rules::day_warnings(&snap.days, date, s).iter().map(Warning::text).collect();
             let manual = day
                 .counted_work(s)

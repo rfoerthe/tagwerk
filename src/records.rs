@@ -338,7 +338,7 @@ impl Model {
             let j = recs[i..].iter().position(|(_, r)| r.date.iso_week() != week).map_or(recs.len(), |n| i + n);
             let monday = recs[i].1.date - Duration::days(recs[i].1.date.weekday().num_days_from_monday() as i64);
             let sunday = monday + Duration::days(6);
-            let total: i64 = recs[i..j].iter().map(|(_, r)| r.work_secs).sum();
+            let total: i64 = recs[i..j].iter().map(|(_, r)| r.shown_work_secs).sum();
             let (_, target) = rules::balance(&self.days, monday, sunday, s);
             rows.push(Row::Week {
                 title: format!(
@@ -865,11 +865,11 @@ fn cell_view(m: &Model, column: Option<&str>, row: NSInteger) -> Option<Retained
                         (fmt_clock(rec.last_end), NSTextAlignment::Right, false)
                     }
                 }
-                "work" => (store::fmt_hm(rec.work_secs), NSTextAlignment::Right, false),
+                "work" => (store::fmt_hm(rec.shown_work_secs), NSTextAlignment::Right, false),
                 "balance" => {
                     let target = m.settings.daily_target(rec.date);
                     if rec.work_secs > 0 {
-                        (rules::fmt_balance(rec.work_secs - target), NSTextAlignment::Right, true)
+                        (rules::fmt_balance(rec.shown_work_secs - target), NSTextAlignment::Right, true)
                     } else {
                         ("–".to_string(), NSTextAlignment::Right, true)
                     }
@@ -928,7 +928,7 @@ fn refresh_summary() {
         // (Arbeit, Pausen, Tage, Soll)
         let sum = |f: &dyn Fn(NaiveDate) -> bool| {
             recs.iter().filter(|r| f(r.date)).fold((0i64, 0i64, 0usize, 0i64), |(w, p, n, t), r| {
-                (w + r.work_secs, p + r.shown_pause_secs, n + 1, t + st.daily_target(r.date))
+                (w + r.shown_work_secs, p + r.shown_pause_secs, n + 1, t + st.daily_target(r.date))
             })
         };
         let (tw, _tp, tn, _) = sum(&|d| d == today);
@@ -1070,9 +1070,9 @@ fn day_subtitle(day: Option<&Day>, settings: &Settings) -> String {
     match day.and_then(|d| d.record(settings)) {
         Some(r) if r.work_secs > 0 => format!(
             "Arbeitszeit {}  ·  Pausen {}  ·  Saldo {}",
-            store::fmt_hm(r.work_secs),
+            store::fmt_hm(r.shown_work_secs),
             store::fmt_hm(r.shown_pause_secs),
-            rules::fmt_balance(r.work_secs - settings.daily_target(r.date))
+            rules::fmt_balance(r.shown_work_secs - settings.daily_target(r.date))
         ),
         Some(_) => "Keine Arbeitszeit im Arbeitszeitrahmen.".to_string(),
         None => "Für diesen Tag ist noch nichts erfasst.".to_string(),
