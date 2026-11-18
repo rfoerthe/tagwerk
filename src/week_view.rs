@@ -1,15 +1,16 @@
-//! Fenster „Wochenansicht“: eine Kalenderwoche als Kalender (wie Termine in Outlook
-//! oder Kalender). Jeder Tag ist eine Spalte, jeder Arbeitsabschnitt ein Block von
-//! Beginn bis Ende. Gezeigt wird das Ergebnis aus automatischer Erfassung und manuellen
-//! Korrekturen (Arbeitsbeginn, Feierabend, Pausen) – also genau die Abschnitte, die als
-//! Arbeitszeit zählen. Arbeit außerhalb des Arbeitszeitrahmens erscheint orange als
+//! Ansicht „Woche“ im Fenster „Aufzeichnungen“: eine Kalenderwoche als Kalender (wie
+//! Termine in Outlook oder Kalender). Jeder Tag ist eine Spalte, jeder Arbeitsabschnitt ein
+//! Block von Beginn bis Ende. Gezeigt wird das Ergebnis aus automatischer Erfassung und
+//! manuellen Korrekturen (Arbeitsbeginn, Feierabend, Pausen) – also genau die Abschnitte,
+//! die als Arbeitszeit zählen. Arbeit außerhalb des Arbeitszeitrahmens erscheint orange als
 //! „nicht gezählt“, Tage mit Regelverstößen tragen ein Warnschild im Tageskopf.
 //!
-//! Das Fenster läuft in der Menüleisten-App (wie „Einstellungen“) und bekommt von ihr
-//! den aktuellen Stand samt laufender Periode. Blättern mit ‹ › oder den Pfeiltasten,
-//! „Heute“ (⌘T) springt zur aktuellen Woche. Ein Klick auf die Uhrzeit von Beginn oder
-//! Ende eines Abschnitts kopiert sie, ein Klick auf einen Tageskopf mit Warnschild zeigt
-//! die Hinweise, ein Doppelklick auf einen Tag öffnet ihn im Fenster „Aufzeichnungen“.
+//! Das Fenster „Aufzeichnungen“ bettet die Ansicht ein ([`container`]) und übergibt ihr den
+//! Stand ([`update`]): in der Menüleisten-App den der Erfassung samt laufender Periode,
+//! eigenständig den der Datenbank. Blättern mit ‹ › oder den Pfeiltasten, „Heute“ (⌘T)
+//! springt zur aktuellen Woche. Ein Klick auf die Uhrzeit von Beginn oder Ende eines
+//! Abschnitts kopiert sie, ein Klick auf einen Tageskopf mit Warnschild zeigt die Hinweise,
+//! ein Doppelklick auf einen Tag zeigt ihn in der Ansicht „Tage“.
 //! Arbeit ohne Mac (Telefonat, Meeting …) ist schraffiert; ein Klick darauf bietet an, sie
 //! wieder zu löschen. Ein Klick auf einen freien Bereich öffnet einen Dialog, um Arbeit ohne
 //! Mac einzutragen (von, bis, Grund): in einer Pause ist die ganze Pause vorgeschlagen, vor
@@ -44,7 +45,7 @@ const FLASH_SECS: f64 = 1.2;
 
 // ---------- Daten ----------
 
-/// Stand, den die Menüleisten-App übergibt.
+/// Stand, den das Fenster „Aufzeichnungen“ übergibt.
 #[derive(Clone)]
 pub struct Snapshot {
     /// Alle Tage inklusive der laufenden Periode bis `now`, nach Datum sortiert.
@@ -499,7 +500,8 @@ fn hit_rect(p: &Piece) -> NSRect {
 // ---------- Zustand ----------
 
 struct Ui {
-    window: Retained<NSWindow>,
+    /// Wochenleiste, Trennlinie und Raster (wird ins Fenster „Aufzeichnungen“ eingebettet).
+    root: Retained<NSView>,
     view: Retained<WeekView>,
     title: Retained<NSTextField>,
     warn_row: Retained<NSStackView>,
@@ -536,11 +538,11 @@ thread_local! {
     static HOVER_SPAN: Cell<Option<(NaiveDate, Span)>> = const { Cell::new(None) };
     static FLASH_GEN: Cell<u64> = const { Cell::new(0) };
     static POPOVER: RefCell<Option<Retained<NSPopover>>> = const { RefCell::new(None) };
-    /// Arbeit ohne Mac eintragen (Tag, von, bis, Grund) – stellt die Menüleisten-App bereit.
+    /// Arbeit ohne Mac eintragen (Tag, von, bis, Grund) – stellt „Aufzeichnungen“ bereit.
     static ADD_WORK: Cell<Option<AddWork>> = const { Cell::new(None) };
     /// Zählt bei jedem Klick hoch: Ein Doppelklick verwirft den Dialog des ersten Klicks.
     static CLICK_GEN: Cell<u64> = const { Cell::new(0) };
-    /// Arbeit ohne Mac löschen (Tag, von, bis) – stellt die Menüleisten-App bereit.
+    /// Arbeit ohne Mac löschen (Tag, von, bis) – stellt „Aufzeichnungen“ bereit.
     static REMOVE_WORK: Cell<Option<RemoveWork>> = const { Cell::new(None) };
     /// Arbeit ohne Mac, deren Kontextmenü gerade offen ist.
     static PENDING_WORK: Cell<Option<(NaiveDate, Span)>> = const { Cell::new(None) };
@@ -690,28 +692,9 @@ define_class!(
             }
         }
 
-        #[unsafe(method(performKeyEquivalent:))]
-        fn perform_key_equivalent(&self, event: &NSEvent) -> bool {
-            let cmd = event.modifierFlags().contains(NSEventModifierFlags::Command);
-            let key = event.charactersIgnoringModifiers().map(|s| s.to_string()).unwrap_or_default();
-            match (cmd, key.as_str()) {
-                (true, "w") => {
-                    if let Some(w) = self.window() {
-                        w.performClose(None);
-                    }
-                    true
-                }
-                (true, "t") => {
-                    go_today();
-                    true
-                }
-                _ => unsafe { msg_send![super(self), performKeyEquivalent: event] },
-            }
-        }
-
         /// Klick auf eine Uhrzeit: kopieren. Klick auf einen Tageskopf mit Warnschild:
         /// Hinweise zeigen. Klick auf einen freien Bereich: Arbeit ohne Mac eintragen.
-        /// Doppelklick auf einen Tag: im Fenster „Aufzeichnungen“ öffnen.
+        /// Doppelklick auf einen Tag: in der Ansicht „Tage“ zeigen.
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             let p = self.convertPoint_fromView(event.locationInWindow(), None);
@@ -882,7 +865,7 @@ fn fmt_span(sp: Span) -> String {
 }
 
 /// Klick auf einen freien Bereich: Den Dialog erst nach der Doppelklick-Zeit öffnen – ein
-/// Doppelklick öffnet stattdessen den Tag im Fenster „Aufzeichnungen“.
+/// Doppelklick zeigt stattdessen den Tag in der Ansicht „Tage“.
 fn add_work_after_click(date: NaiveDate, preset: Span) {
     let generation = CLICK_GEN.with(|g| g.get());
     let block = RcBlock::new(move |_timer| {
@@ -893,10 +876,10 @@ fn add_work_after_click(date: NaiveDate, preset: Span) {
     unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(NSEvent::doubleClickInterval(), false, &block) };
 }
 
-/// Dialog „Arbeit ohne Mac eintragen“ als Sheet der Wochenansicht: von, bis und Grund.
+/// Dialog „Arbeit ohne Mac eintragen“ als Sheet am Fenster „Aufzeichnungen“: von, bis und Grund.
 /// `error` zeigt einen Hinweis zur vorigen Eingabe (dann sind die Felder schon gefüllt).
 fn show_add_work(date: NaiveDate, preset: Span, error: Option<(&str, Span, Activity)>) {
-    let Some(window) = UI.with(|u| u.borrow().as_ref().map(|u| u.window.clone())) else { return };
+    let Some(window) = UI.with(|u| u.borrow().as_ref().and_then(|u| u.view.window())) else { return };
     if window.attachedSheet().is_some() {
         return;
     }
@@ -1573,24 +1556,33 @@ fn render() {
         u.summary.setStringValue(&ns(&summary));
         u.warn_label.setStringValue(&ns(&warn));
         u.warn_row.setHidden(warn.is_empty());
-        Some((u.view.clone(), u.window.clone()))
+        Some(u.view.clone())
     });
-    if let Some((v, w)) = view {
+    if let Some(v) = view {
         v.setNeedsDisplay(true);
         update_tooltips(&v);
-        w.invalidateCursorRectsForView(&v);
+        if let Some(w) = v.window() {
+            w.invalidateCursorRectsForView(&v);
+        }
     }
 }
 
-/// Ist das Fenster offen (dann soll die App es regelmäßig aktualisieren)?
-pub fn is_open() -> bool {
-    UI.with(|u| u.borrow().as_ref().is_some_and(|u| u.window.isVisible()))
+/// Ist die Ansicht zu sehen (dann soll die Menüleisten-App sie regelmäßig aktualisieren)?
+pub fn is_visible() -> bool {
+    UI.with(|u| {
+        u.borrow()
+            .as_ref()
+            .is_some_and(|u| !u.root.isHidden() && u.view.window().is_some_and(|w| w.isVisible()))
+    })
 }
 
 /// Neuen Stand übernehmen (die angezeigte Woche bleibt).
 pub fn update(snap: Snapshot) {
     DATA.with(|d| {
         let mut d = d.borrow_mut();
+        if d.monday == NaiveDate::MIN {
+            d.monday = monday_of(snap.now.date());
+        }
         d.snap = Some(snap);
         d.rebuild();
     });
@@ -1662,23 +1654,7 @@ fn build() -> Ui {
 
     let view = WeekView::new(mtm);
 
-    let window = unsafe {
-        NSWindow::initWithContentRect_styleMask_backing_defer(
-            NSWindow::alloc(mtm),
-            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(980.0, 680.0)),
-            NSWindowStyleMask::Titled
-                | NSWindowStyleMask::Closable
-                | NSWindowStyleMask::Miniaturizable
-                | NSWindowStyleMask::Resizable,
-            NSBackingStoreType::Buffered,
-            false,
-        )
-    };
-    unsafe { window.setReleasedWhenClosed(false) };
-    window.setTitle(&ns("Wochenansicht"));
-    window.setTabbingMode(NSWindowTabbingMode::Disallowed);
-    window.setContentMinSize(NSSize::new(720.0, 460.0));
-    let root = window.contentView().expect("contentView");
+    let root = NSView::new(mtm);
     for v in [&*bar as &NSView, &line, &view] {
         v.setTranslatesAutoresizingMaskIntoConstraints(false);
         root.addSubview(v);
@@ -1689,99 +1665,67 @@ fn build() -> Ui {
     line.topAnchor().constraintEqualToAnchor(&bar.bottomAnchor()).setActive(true);
     view.topAnchor().constraintEqualToAnchor(&line.bottomAnchor()).setActive(true);
     view.bottomAnchor().constraintEqualToAnchor(&root.bottomAnchor()).setActive(true);
-    window.center();
-    window.setFrameAutosaveName(&ns("Wochenansicht"));
 
-    Ui { window, view, title, warn_row, warn_label, summary, _controller: controller }
+    Ui { root, view, title, warn_row, warn_label, summary, _controller: controller }
 }
 
-/// Öffnet die Wochenansicht (oder holt sie nach vorn). Ein neu geöffnetes Fenster zeigt
-/// die aktuelle Woche. `open_day` öffnet einen Tag im Fenster „Aufzeichnungen“,
-/// `add_work` trägt Arbeit ohne Mac ein, `remove_work` löscht sie.
-pub fn show(snap: Snapshot, open_day: fn(NaiveDate), add_work: AddWork, remove_work: RemoveWork) {
-    ADD_WORK.with(|c| c.set(Some(add_work)));
-    REMOVE_WORK.with(|c| c.set(Some(remove_work)));
-    show_inner(snap, open_day, true);
-}
-
-fn show_inner(snap: Snapshot, open_day: fn(NaiveDate), activate: bool) {
-    OPEN_DAY.with(|o| o.set(Some(open_day)));
-    let fresh = !is_open();
+/// Die Ansicht zum Einbetten (beim ersten Aufruf aufgebaut). Zeigt zunächst die aktuelle
+/// Woche, sobald ein Stand da ist.
+pub fn container() -> Retained<NSView> {
     if UI.with(|u| u.borrow().is_none()) {
         let ui = build();
         UI.with(|u| *u.borrow_mut() = Some(ui));
     }
+    UI.with(|u| u.borrow().as_ref().map(|u| u.root.clone())).expect("Wochenansicht aufgebaut")
+}
+
+/// Was ein Doppelklick auf einen Tag tut und wie sich Arbeit ohne Mac eintragen und löschen
+/// lässt (ohne `add_work`/`remove_work` nur ansehen, etwa für Bildschirmfotos).
+pub fn set_actions(open_day: fn(NaiveDate), add_work: Option<AddWork>, remove_work: Option<RemoveWork>) {
+    OPEN_DAY.with(|o| o.set(Some(open_day)));
+    ADD_WORK.with(|c| c.set(add_work));
+    REMOVE_WORK.with(|c| c.set(remove_work));
+}
+
+/// Neuen Stand übernehmen und die Woche von `date` zeigen.
+pub fn show_week_of(snap: Snapshot, date: NaiveDate) {
     DATA.with(|d| {
         let mut d = d.borrow_mut();
-        if fresh {
-            d.monday = monday_of(snap.now.date());
-        }
+        d.monday = monday_of(date);
         d.snap = Some(snap);
         d.rebuild();
     });
     render();
-    let ui = UI.with(|u| u.borrow().as_ref().map(|u| (u.window.clone(), u.view.clone())));
-    if let Some((window, view)) = ui {
-        if activate {
-            #[allow(deprecated)]
-            NSApplication::sharedApplication(mtm()).activateIgnoringOtherApps(true);
-            window.makeKeyAndOrderFront(None);
-        } else {
-            window.orderFront(None);
+}
+
+/// Zur aktuellen Woche springen („Heute“, ⌘T).
+pub fn today() {
+    go_today();
+}
+
+/// Tastatureingaben (Pfeiltasten) an das Raster.
+pub fn focus() {
+    if let Some(v) = UI.with(|u| u.borrow().as_ref().map(|u| u.view.clone())) {
+        if let Some(w) = v.window() {
+            w.makeFirstResponder(Some(&v));
         }
-        window.makeFirstResponder(Some(&view));
     }
 }
 
-/// Zum Testen: Wochenansicht mit dem Stand der Datenbank öffnen, ein Bild speichern und
-/// beenden (`Tagwerk --week-screenshot <png>`; Woche über `TAGWERK_SELECT=TT.MM.JJJJ`,
-/// Rückmeldung „kopiert“ für den Beginn des ersten Abschnitts mit `TAGWERK_FLASH=1`).
-pub fn screenshot(path: &std::path::Path) -> Result<(), String> {
-    let mtm = MainThreadMarker::new().ok_or("Das Fenster muss im Hauptthread laufen.")?;
-    let app = NSApplication::sharedApplication(mtm);
-    app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
-    if let Ok(a) = std::env::var("TAGWERK_APPEARANCE") {
-        let name = if a == "dark" { unsafe { NSAppearanceNameDarkAqua } } else { unsafe { NSAppearanceNameAqua } };
-        app.setAppearance(NSAppearance::appearanceNamed(name).as_deref());
+/// Zum Testen: Rückmeldung „kopiert“ für den Beginn des ersten Abschnitts der Woche zeigen
+/// (`TAGWERK_FLASH=1` bei `--week-screenshot`).
+pub fn flash_first_block() {
+    let flash = DATA.with(|d| {
+        let d = d.borrow();
+        d.cols.iter().find_map(|c| {
+            let b = c.blocks.iter().find(|b| b.kind == Kind::Work)?;
+            Some(Flash { date: c.date, from: b.from, kind: b.kind, part: Part::Start, generation: 0 })
+        })
+    });
+    FLASH.with(|f| *f.borrow_mut() = flash);
+    if let Some(v) = UI.with(|u| u.borrow().as_ref().map(|u| u.view.clone())) {
+        v.setNeedsDisplay(true);
     }
-    let db = store::Db::open().map_err(|e| e.to_string())?;
-    let days = db.load().map_err(|e| e.to_string())?;
-    let settings = db.load_settings().map_err(|e| e.to_string())?;
-    let now = chrono::Local::now().naive_local();
-    let running = matches!(store::read_status(), Some(store::Status::Running | store::Status::Away(..)));
-    show_inner(Snapshot { days, settings, now, running }, |_| {}, false);
-    if let Some(d) = std::env::var("TAGWERK_SELECT").ok().and_then(|s| store::parse_date(&s)) {
-        DATA.with(|data| {
-            let mut data = data.borrow_mut();
-            data.monday = monday_of(d);
-            data.rebuild();
-        });
-        render();
-    }
-
-    let window = UI.with(|u| u.borrow().as_ref().map(|u| u.window.clone())).ok_or("kein Fenster")?;
-    let content = window.contentView().ok_or("kein Inhalt")?;
-    let frame_view = unsafe { content.superview() }.unwrap_or(content);
-    frame_view.layoutSubtreeIfNeeded();
-    if std::env::var("TAGWERK_FLASH").is_ok() {
-        let flash = DATA.with(|d| {
-            let d = d.borrow();
-            d.cols.iter().find_map(|c| {
-                let b = c.blocks.iter().find(|b| b.kind == Kind::Work)?;
-                Some(Flash { date: c.date, from: b.from, kind: b.kind, part: Part::Start, generation: 0 })
-            })
-        });
-        FLASH.with(|f| *f.borrow_mut() = flash);
-        frame_view.setNeedsDisplay(true);
-    }
-    frame_view.displayIfNeeded();
-    let bounds = frame_view.bounds();
-    let rep = frame_view.bitmapImageRepForCachingDisplayInRect(bounds).ok_or("kein Bildpuffer")?;
-    frame_view.cacheDisplayInRect_toBitmapImageRep(bounds, &rep);
-    let props = NSDictionary::new();
-    let data = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &props) }
-        .ok_or("PNG konnte nicht erzeugt werden")?;
-    std::fs::write(path, data.to_vec()).map_err(|e| e.to_string())
 }
 
 #[cfg(test)]

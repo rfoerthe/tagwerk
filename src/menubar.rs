@@ -13,7 +13,7 @@ use crate::rules::{self, IconSet};
 use crate::settings_window;
 use crate::store;
 use crate::tracker::{PauseReason, Tracker};
-use crate::week_window;
+use crate::week_view;
 use chrono::{DateTime, Duration, Local, NaiveDateTime, TimeZone};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
@@ -219,28 +219,19 @@ define_class!(
 
         #[unsafe(method(showRecords:))]
         fn show_records(&self, _sender: Option<&AnyObject>) {
-            open_records(None);
+            open_records(records::Open::Last);
         }
 
         /// Klick auf einen Hinweis: heutigen Tag im Fenster „Aufzeichnungen“ zeigen.
         #[unsafe(method(showToday:))]
         fn show_today(&self, _sender: Option<&AnyObject>) {
-            open_records(Some(now().date()));
+            open_records(records::Open::Day(now().date()));
         }
 
         #[unsafe(method(showWeek:))]
+        /// „Wochenansicht …“: „Aufzeichnungen“ in der Ansicht „Woche“ mit der aktuellen Woche.
         fn show_week(&self, _sender: Option<&AnyObject>) {
-            let snap = with_state(|s| {
-                let t = now();
-                s.sync_from_db(t);
-                if s.tracker.roll_over(t) {
-                    s.persist(t);
-                }
-                s.week_snapshot(t)
-            });
-            if let Some(snap) = snap {
-                week_window::show(snap, open_day_in_records, add_work_block, remove_work_block);
-            }
+            open_records(records::Open::Week);
         }
 
         #[unsafe(method(showSettings:))]
@@ -372,14 +363,22 @@ fn resume_auto() {
     });
 }
 
-/// Doppelklick auf einen Tag in der Wochenansicht: im Fenster „Aufzeichnungen“ zeigen.
-fn open_day_in_records(date: chrono::NaiveDate) {
-    open_records(Some(date));
+/// Stand für die Wochenansicht in „Aufzeichnungen“ (inklusive laufender Periode).
+fn week_snapshot() -> Option<week_view::Snapshot> {
+    with_state(|s| {
+        let t = now();
+        s.sync_from_db(t);
+        if s.tracker.roll_over(t) {
+            s.persist(t);
+        }
+        s.week_snapshot(t)
+    })
 }
 
 /// Dialog in der Wochenansicht: Arbeit ohne Mac eintragen.
 fn add_work_block(date: chrono::NaiveDate, from: i64, to: i64, activity: Activity) {
     act(|s, _| s.tracker.add_work(date, from, to, activity.note()));
+    records::reload_if_open();
 }
 
 /// Klick auf Arbeit ohne Mac in der Wochenansicht: löschen (die Zeit wird wieder zur Pause).
@@ -390,11 +389,13 @@ fn remove_work_block(date: chrono::NaiveDate, from: i64, to: i64) {
             s.tracker.start(t);
         }
     });
+    records::reload_if_open();
 }
 
-/// Öffnet das Fenster „Aufzeichnungen“ (oder holt es nach vorn), auf Wunsch mit
-/// ausgewähltem Tag. Vorher speichern, damit es den aktuellen Stand zeigt.
-fn open_records(select: Option<chrono::NaiveDate>) {
+/// Öffnet das Fenster „Aufzeichnungen“ (oder holt es nach vorn): in der zuletzt benutzten
+/// Ansicht, mit einem Tag oder in der Wochenansicht. Vorher speichern, damit es den
+/// aktuellen Stand zeigt.
+fn open_records(open: records::Open) {
     let status = with_state(|s| {
         let t = now();
         s.sync_from_db(t);
@@ -403,7 +404,13 @@ fn open_records(select: Option<chrono::NaiveDate>) {
     });
     // Außerhalb von `with_state`: Das Fenster meldet Änderungen über `records_changed`.
     if let Some(status) = status {
-        records::show(select, status, records_changed);
+        let embed = records::Embed {
+            on_change: records_changed,
+            week: week_snapshot,
+            add_work: add_work_block,
+            remove_work: remove_work_block,
+        };
+        records::show(open, status, embed);
     }
 }
 
@@ -605,8 +612,8 @@ impl AppState {
         self.items.count_pause.setHidden(self.items.count_pause_list.is_empty());
         self.items.close.setHidden(closed);
         self.items.reopen.setHidden(!closed);
-        if week_window::is_open() {
-            week_window::update(self.week_snapshot(t));
+        if week_view::is_visible() {
+            week_view::update(self.week_snapshot(t));
         }
         records::set_status(status);
 
@@ -636,8 +643,8 @@ impl AppState {
     }
 
     /// Stand für die Wochenansicht (inklusive laufender Periode).
-    fn week_snapshot(&self, t: NaiveDateTime) -> week_window::Snapshot {
-        week_window::Snapshot {
+    fn week_snapshot(&self, t: NaiveDateTime) -> week_view::Snapshot {
+        week_view::Snapshot {
             days: self.tracker.snapshot(t),
             settings: self.tracker.settings,
             now: t,
