@@ -72,8 +72,14 @@ pub struct Joined {
 }
 
 impl Joined {
-    /// Hinweis nach dem Eintragen (`None`, wenn nichts dazugerechnet wurde).
+    /// Hinweis nach dem Eintragen (`None`, wenn nichts Nennenswertes dazugerechnet wurde).
+    ///
+    /// Reste unter einer Minute bleiben unerwähnt: Sie entstehen nur, weil die Eingabe
+    /// minutengenau ist, die Aufzeichnung aber sekundengenau (Eingabe bis 15:50, entsperrt
+    /// um 15:50:40) – angezeigt wäre das eine „Lücke von 15:50 bis 15:50“.
     pub fn note(&self, min_pause: i64) -> Option<String> {
+        let visible = |spans: &[Span]| spans.iter().copied().filter(|s| s.len() >= 60).collect::<Vec<_>>();
+        let (gaps, rests) = (visible(&self.gaps), visible(&self.rests));
         let mins = |secs: i64| if secs < 60 { "unter 1 Min.".to_string() } else { format!("{} Min.", secs / 60) };
         let list = |spans: &[Span]| {
             spans
@@ -83,20 +89,20 @@ impl Joined {
                 .join(" und ")
         };
         let mut out = Vec::new();
-        match self.rests.len() {
+        match rests.len() {
             0 => {}
-            1 => out.push(format!("Von der manuellen Pause bliebe nur {} übrig.", list(&self.rests))),
-            _ => out.push(format!("Von den manuellen Pausen blieben nur {} übrig.", list(&self.rests))),
+            1 => out.push(format!("Von der manuellen Pause bliebe nur {} übrig.", list(&rests))),
+            _ => out.push(format!("Von den manuellen Pausen blieben nur {} übrig.", list(&rests))),
         }
-        match self.gaps.len() {
+        match gaps.len() {
             0 => {}
-            1 => out.push(format!("Zur Arbeitszeit daneben bliebe eine Lücke {}.", list(&self.gaps))),
-            _ => out.push(format!("Zur Arbeitszeit daneben blieben Lücken {}.", list(&self.gaps))),
+            1 => out.push(format!("Zur Arbeitszeit daneben bliebe eine Lücke {}.", list(&gaps))),
+            _ => out.push(format!("Zur Arbeitszeit daneben blieben Lücken {}.", list(&gaps))),
         }
         if out.is_empty() {
             return None;
         }
-        let that = if self.gaps.len() + self.rests.len() == 1 { "Das ist" } else { "Das ist jeweils" };
+        let that = if gaps.len() + rests.len() == 1 { "Das ist" } else { "Das ist jeweils" };
         out.push(format!(
             "{that} kürzer als die Mindestpause von {}; die Zeit wurde dem neuen Abschnitt \
              dazugerechnet. Er reicht jetzt von {} bis {} Uhr.",
@@ -827,6 +833,28 @@ mod tests {
         // Auch vor dem Abschnitt; ab der Mindestpause bleibt die Lücke eine Pause.
         let j = d.join_work_gaps(h(12, 50), h(13, 5), 15 * 60);
         assert_eq!((j.span, j.gaps.len()), (Span::new(h(12, 42), h(13, 5)), 1));
+    }
+
+    #[test]
+    fn gaps_under_a_minute_join_without_a_note() {
+        // Pause 15:29:10–15:50:40, eingetragen minutengenau 15:29–15:50: Die 40 Sek. bis
+        // zum Entsperren gehören dazu, ein Hinweis „von 15:50 bis 15:50“ wäre aber verwirrend.
+        let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 17).unwrap());
+        d.add_period(h(13, 13), h(15, 29) + 10);
+        d.add_period(h(15, 50) + 40, h(17, 16));
+        let j = d.join_work_gaps(h(15, 29), h(15, 50), 15 * 60);
+        assert_eq!(j.span, Span::new(h(15, 29), h(15, 50) + 40));
+        assert_eq!(j.gaps, vec![Span::new(h(15, 50), h(15, 50) + 40)]);
+        assert_eq!(j.note(15 * 60), None);
+        // Neben einer echten Lücke wird nur diese genannt.
+        let j = d.join_work_gaps(h(15, 35), h(15, 50), 15 * 60);
+        assert_eq!(j.gaps.len(), 2);
+        assert_eq!(
+            j.note(15 * 60).unwrap(),
+            "Zur Arbeitszeit daneben bliebe eine Lücke von 15:29 bis 15:35 (5 Min.). Das ist kürzer \
+             als die Mindestpause von 15 Min.; die Zeit wurde dem neuen Abschnitt dazugerechnet. Er \
+             reicht jetzt von 15:29 bis 15:50 Uhr."
+        );
     }
 
     #[test]
