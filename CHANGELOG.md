@@ -6,6 +6,15 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+## [1.3.0] - 2026-11-18
+
+### Zusammenfassung
+Die Wochenansicht ist jetzt Teil des Fensters „Aufzeichnungen“ und über den Umschalter
+„Tage | Woche“ erreichbar. Arbeitszeit und Pausen zählen überall nach den angezeigten
+Uhrzeiten, sodass sich Tage, Wochen und Salden ohne Rundungsreste aufsummieren. Die
+Kennzahlen im Menü sind reine Anzeige, und Daten von „TrackMyWork“ werden nicht mehr
+übernommen.
+
 ### Geändert
 - Status, Kennzahlen (Heute gearbeitet, Pausen heute, Beginn heute, Saldo diese Woche)
   und Hinweise auf Regelverstöße im Menü sind reine Anzeigefelder: Sie lassen sich nicht
@@ -187,7 +196,8 @@ als Markdown. Alle Daten bleiben lokal auf dem Mac.
   notarisiert es und installiert sie auf Wunsch nach `/Applications`.
 - `github-release.sh` veröffentlicht ein geprüftes DMG als Release auf GitHub.
 
-[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.2.0...HEAD
+[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/rfoerthe/tagwerk/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/rfoerthe/tagwerk/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/rfoerthe/tagwerk/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/rfoerthe/tagwerk/releases/tag/v1.0.0
