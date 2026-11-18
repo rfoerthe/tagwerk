@@ -13,7 +13,7 @@ use crate::rules::{self, IconSet};
 use crate::settings_window;
 use crate::store;
 use crate::tracker::{PauseReason, Tracker};
-use crate::week_window;
+use crate::week_view;
 use chrono::{DateTime, Duration, Local, NaiveDateTime, TimeZone};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
@@ -219,28 +219,13 @@ define_class!(
 
         #[unsafe(method(showRecords:))]
         fn show_records(&self, _sender: Option<&AnyObject>) {
-            open_records(None);
+            open_records(records::Open::Last);
         }
 
         /// Klick auf einen Hinweis: heutigen Tag im Fenster „Aufzeichnungen“ zeigen.
         #[unsafe(method(showToday:))]
         fn show_today(&self, _sender: Option<&AnyObject>) {
-            open_records(Some(now().date()));
-        }
-
-        #[unsafe(method(showWeek:))]
-        fn show_week(&self, _sender: Option<&AnyObject>) {
-            let snap = with_state(|s| {
-                let t = now();
-                s.sync_from_db(t);
-                if s.tracker.roll_over(t) {
-                    s.persist(t);
-                }
-                s.week_snapshot(t)
-            });
-            if let Some(snap) = snap {
-                week_window::show(snap, open_day_in_records, add_work_block, remove_work_block);
-            }
+            open_records(records::Open::Day(now().date()));
         }
 
         #[unsafe(method(showSettings:))]
@@ -372,14 +357,22 @@ fn resume_auto() {
     });
 }
 
-/// Doppelklick auf einen Tag in der Wochenansicht: im Fenster „Aufzeichnungen“ zeigen.
-fn open_day_in_records(date: chrono::NaiveDate) {
-    open_records(Some(date));
+/// Stand für die Wochenansicht in „Aufzeichnungen“ (inklusive laufender Periode).
+fn week_snapshot() -> Option<week_view::Snapshot> {
+    with_state(|s| {
+        let t = now();
+        s.sync_from_db(t);
+        if s.tracker.roll_over(t) {
+            s.persist(t);
+        }
+        s.week_snapshot(t)
+    })
 }
 
 /// Dialog in der Wochenansicht: Arbeit ohne Mac eintragen.
 fn add_work_block(date: chrono::NaiveDate, from: i64, to: i64, activity: Activity) {
     act(|s, _| s.tracker.add_work(date, from, to, activity.note()));
+    records::reload_if_open();
 }
 
 /// Klick auf Arbeit ohne Mac in der Wochenansicht: löschen (die Zeit wird wieder zur Pause).
@@ -390,11 +383,12 @@ fn remove_work_block(date: chrono::NaiveDate, from: i64, to: i64) {
             s.tracker.start(t);
         }
     });
+    records::reload_if_open();
 }
 
-/// Öffnet das Fenster „Aufzeichnungen“ (oder holt es nach vorn), auf Wunsch mit
-/// ausgewähltem Tag. Vorher speichern, damit es den aktuellen Stand zeigt.
-fn open_records(select: Option<chrono::NaiveDate>) {
+/// Öffnet das Fenster „Aufzeichnungen“ (oder holt es nach vorn): in der zuletzt benutzten
+/// Ansicht oder mit einem Tag. Vorher speichern, damit es den aktuellen Stand zeigt.
+fn open_records(open: records::Open) {
     let status = with_state(|s| {
         let t = now();
         s.sync_from_db(t);
@@ -403,7 +397,13 @@ fn open_records(select: Option<chrono::NaiveDate>) {
     });
     // Außerhalb von `with_state`: Das Fenster meldet Änderungen über `records_changed`.
     if let Some(status) = status {
-        records::show(select, status, records_changed);
+        let embed = records::Embed {
+            on_change: records_changed,
+            week: week_snapshot,
+            add_work: add_work_block,
+            remove_work: remove_work_block,
+        };
+        records::show(open, status, embed);
     }
 }
 
@@ -595,7 +595,7 @@ impl AppState {
         if pauses != self.items.count_pause_list {
             self.items.count_pause_menu.removeAllItems();
             for p in &pauses {
-                let title = format!("{} – {} Uhr  ({})", fmt_clock(p.from), fmt_clock(p.to), fmt_minutes(p.len()));
+                let title = pause_title(*p);
                 let item = menu_item(mtm, &title, Some(sel!(countPause:)), "", &self.items.controller);
                 item.setTag(p.from as isize);
                 self.items.count_pause_menu.addItem(&item);
@@ -605,8 +605,8 @@ impl AppState {
         self.items.count_pause.setHidden(self.items.count_pause_list.is_empty());
         self.items.close.setHidden(closed);
         self.items.reopen.setHidden(!closed);
-        if week_window::is_open() {
-            week_window::update(self.week_snapshot(t));
+        if week_view::is_visible() {
+            week_view::update(self.week_snapshot(t));
         }
         records::set_status(status);
 
@@ -636,8 +636,8 @@ impl AppState {
     }
 
     /// Stand für die Wochenansicht (inklusive laufender Periode).
-    fn week_snapshot(&self, t: NaiveDateTime) -> week_window::Snapshot {
-        week_window::Snapshot {
+    fn week_snapshot(&self, t: NaiveDateTime) -> week_view::Snapshot {
+        week_view::Snapshot {
             days: self.tracker.snapshot(t),
             settings: self.tracker.settings,
             now: t,
@@ -698,6 +698,13 @@ fn away_text(since: NaiveDateTime, t: NaiveDateTime, activity: Activity) -> Stri
         "" => format!("Ohne Mac seit {at}"),
         note => format!("Ohne Mac seit {at} – {note}"),
     }
+}
+
+/// Eintrag unter „Pause als Arbeitszeit zählen“: `15:25 – 15:45 Uhr  (20 Min.)`. Die Dauer
+/// richtet sich wie in der Wochenansicht nach den angezeigten Uhrzeiten.
+fn pause_title(p: Span) -> String {
+    let len = records::shown_len(p.from, p.to);
+    format!("{} – {} Uhr  ({})", fmt_clock(p.from), fmt_clock(p.to), fmt_minutes(len))
 }
 
 /// `55 Min.` bzw. `1:20 h`
@@ -1083,7 +1090,6 @@ pub fn run() {
         controller: controller.clone(),
     };
     let records = menu_item(mtm, "Aufzeichnungen …", Some(sel!(showRecords:)), "a", &controller);
-    let week = menu_item(mtm, "Wochenansicht …", Some(sel!(showWeek:)), "w", &controller);
     let settings = menu_item(mtm, "Einstellungen …", Some(sel!(showSettings:)), ",", &controller);
     let about = menu_item(mtm, "Über Tagwerk", Some(sel!(showAbout:)), "", &controller);
     let quit = menu_item(mtm, "Tagwerk beenden", Some(sel!(quit:)), "q", &controller);
@@ -1099,7 +1105,6 @@ pub fn run() {
         (&items.close, "moon", "Feierabend"),
         (&items.reopen, "arrow.uturn.backward", "Feierabend aufheben"),
         (&records, "tablecells", "Aufzeichnungen"),
-        (&week, "calendar", "Wochenansicht"),
         (&settings, "gearshape", "Einstellungen"),
         (&about, "info.circle", "Über Tagwerk"),
         (&quit, "power", "Beenden"),
@@ -1130,7 +1135,6 @@ pub fn run() {
     menu.addItem(&items.reopen);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&records);
-    menu.addItem(&week);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&settings);
     menu.addItem(&about);
@@ -1259,6 +1263,14 @@ mod tests {
         NSAttributedStringNSStringDrawing, NSBezierPath, NSBitmapImageFileType, NSBitmapImageRep, NSDeviceRGBColorSpace, NSGraphicsContext,
     };
     use objc2_foundation::NSSize;
+
+    #[test]
+    fn pause_titles_follow_shown_minutes() {
+        // 15:25:40 – 15:45:10 zeigt 15:25 – 15:45 und damit 20 Min. (nicht 19).
+        let hms = |h: i64, m: i64, s: i64| h * 3600 + m * 60 + s;
+        assert_eq!(pause_title(Span::new(hms(15, 25, 40), hms(15, 45, 10))), "15:25 – 15:45 Uhr  (20 Min.)");
+        assert_eq!(pause_title(Span::new(hms(12, 0, 0), hms(13, 5, 0))), "12:00 – 13:05 Uhr  (1:05 h)");
+    }
 
     #[test]
     fn away_outside_frame_shows_outside() {

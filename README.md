@@ -38,7 +38,7 @@ festlegen oder korrigieren.
 - 🔒 **Kein Starten, kein Stoppen** – Sperren, Entsperren, Ruhezustand und Benutzerwechsel werden automatisch erkannt.
 - ⚖️ **Regeln im Blick** – Pausen, Ruhezeit und Höchstarbeitszeit nach Arbeitszeitgesetz werden geprüft.
 - 📊 **Soll und Saldo** – je Tag, Woche und Monat, auf Basis deiner Regelwochenarbeitszeit.
-- 🗓️ **Wochenansicht** – jede Kalenderwoche übersichtlich wie in einem Kalender.
+- 🗓️ **Wochenansicht** – jede Kalenderwoche übersichtlich wie in einem Kalender, direkt im Fenster „Aufzeichnungen“.
 - 🏠 **Lokal und privat** – alle Daten liegen in einer SQLite-Datenbank auf deinem Mac, nichts verlässt das Gerät.
 - 🦀 **Nativ** – in Rust geschrieben, mit AppKit-Oberfläche, Hell- und Dunkelmodus.
 
@@ -84,9 +84,13 @@ im Fenster „Aufzeichnungen“.
 
 ### Aufzeichnungen
 
-Ein natives macOS-Fenster (⌘A bei geöffnetem Menü) mit Kennzahlen für heute, die Woche,
-den Monat und den Durchschnitt pro Arbeitstag, einer Tabelle aller Tage mit Saldo und
-Wochensummen sowie einem **Inspektor**. Dort lassen sich Arbeitsbeginn, Pausen, Arbeit
+Ein natives macOS-Fenster (⌘A bei geöffnetem Menü) mit zwei Ansichten, zwischen denen der
+Umschalter **Tage | Woche** in der Symbolleiste wechselt (Menü „Darstellung“, ⌘1 und ⌘2).
+Das Fenster öffnet in der zuletzt benutzten Ansicht.
+
+Die Ansicht **Tage** zeigt Kennzahlen für heute, die Woche, den Monat und den
+Durchschnitt pro Arbeitstag, eine Tabelle aller Tage mit Saldo und Wochensummen sowie
+einen **Inspektor**. Dort lassen sich Arbeitsbeginn, Pausen, Arbeit
 ohne Mac und Feierabend eines Tages korrigieren – auch für Tage ohne Aufzeichnung.
 **Arbeit ohne Mac** (Telefonat, Meeting … bei gesperrtem Mac) zählt als Arbeitszeit,
 mit einem Grund aus der Auswahlbox (Meeting, Telefonat, Networking, Sonstiges); eine
@@ -102,15 +106,16 @@ Stift.
 
 <img src="doc/screenshots/wochenansicht-hinweise.png" alt="Wochenansicht mit Hinweisen zu Regelverstößen und nicht gezählter Arbeit" width="860">
 
-Die Wochenansicht (⌘W bei geöffnetem Menü) zeigt eine Kalenderwoche wie einen Kalender:
-je Tag eine Spalte, jeder Arbeitsabschnitt ein Block von Beginn bis Ende – das Ergebnis
-aus automatischer Erfassung und manuellen Korrekturen.
+Die Ansicht **Woche** im Fenster „Aufzeichnungen“ zeigt eine Kalenderwoche wie einen
+Kalender: je Tag eine Spalte, jeder Arbeitsabschnitt ein Block von Beginn bis Ende – das
+Ergebnis aus automatischer Erfassung und manuellen Korrekturen. Ein Wechsel von „Tage“
+zu „Woche“ zeigt die Woche des ausgewählten Tags. In der Menüleisten-App enthält die Woche auch den gerade laufenden Abschnitt.
 
 - Blättern mit ‹ › oder den Pfeiltasten, **Heute** (⌘T) springt zur aktuellen Woche.
 - Jeder Tageskopf zeigt Arbeitszeit und Pausen des Tages, die Kopfzeile Arbeitszeit,
-  Pausen und Saldo der Woche.
-- Ein Doppelklick auf einen Tag öffnet das Fenster „Aufzeichnungen“; der Tooltip eines
-  Blocks nennt manuelle Grenzen.
+  Pausen und Saldo der Woche. Pausen zählen überall nach den angezeigten Uhrzeiten
+  (15:25 – 15:45 sind 20 Min.), die Summe eines Tages ist die Summe seiner Pausen.
+- Der Tooltip eines Blocks nennt manuelle Grenzen.
 - Ein Klick auf die Uhrzeit von Beginn oder Ende kopiert sie in die Zwischenablage.
 - Tage mit Regelverstößen tragen ein Warnschild; ein Klick auf den Tageskopf zeigt die
   Hinweise.
@@ -124,8 +129,7 @@ aus automatischer Erfassung und manuellen Korrekturen.
   Beginn, Ende und Grund (Meeting, Telefonat, Networking, Sonstiges). In einer Pause ist
   die ganze Pause vorgeschlagen, vor dem Arbeitsbeginn und nach dem Feierabend eine halbe
   Stunde ab dem Klick. Fährt die Maus über einen freien Bereich, zeigt ein Rahmen genau
-  diesen Vorschlag. Zukünftige Zeiten lassen sich nicht eintragen; ein Doppelklick
-  öffnet weiterhin den Tag im Fenster „Aufzeichnungen“.
+  diesen Vorschlag. Zukünftige Zeiten lassen sich nicht eintragen.
 
 <details>
 <summary>Weitere Ansichten</summary>
@@ -175,8 +179,8 @@ wird ein frei wählbarer Zeitraum als Markdown-Datei gespeichert – vorbelegt s
 letzten vier Wochen, „Dieser Monat“ und „Letzter Monat“ sind einen Klick entfernt. Die
 Datei enthält:
 
-1. eine **Übersichtstabelle** mit Beginn, Ende, Arbeits- und Pausenzeit sowie Saldo je
-   Tag und einer Summenzeile,
+1. eine **Übersichtstabelle** mit Beginn, Ende, Arbeits- und Pausenzeit (sekundengenau)
+   sowie Saldo je Tag und einer Summenzeile,
 2. **`## Hinweise`** – Verstöße gegen die [Regeln](#regeln),
 3. **`## Korrekturen`** – die manuellen Entscheidungen samt Arbeit ohne Mac mit Notiz,
 4. **`## Erfasste Perioden`** – die automatisch erfassten Zeiten.
@@ -291,7 +295,8 @@ Tagwerk --export [--from TT.MM.JJJJ] [--to TT.MM.JJJJ] [-o datei.md]
 Tagwerk --import <datei.md>   Tage aus einem Markdown-Export übernehmen
 Tagwerk --screenshot <png>    Fenster „Aufzeichnungen“ als Bild speichern und beenden
 Tagwerk --week-screenshot <png>
-                              Fenster „Wochenansicht“ als Bild speichern und beenden
+                              Fenster „Aufzeichnungen“ in der Ansicht „Woche“ als Bild
+                              speichern und beenden
 Tagwerk --settings-screenshot <png>
                               Fenster „Einstellungen“ als Bild speichern und beenden
 ```

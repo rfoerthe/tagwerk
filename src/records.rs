@@ -3,10 +3,15 @@
 //! Korrigieren eines Tages (Arbeitsbeginn, Pausen, Arbeit ohne Mac, Feierabend) und Export als Markdown
 //! über den Sichern-Dialog.
 //!
+//! Der Umschalter „Tage | Woche“ in der Symbolleiste (⌘1, ⌘2) wechselt zwischen der Tabelle
+//! mit Inspektor und der Wochenansicht als Kalender ([`week_view`]). Das Fenster merkt sich
+//! die zuletzt benutzte Ansicht.
+//!
 //! Die Menüleisten-App öffnet das Fenster in ihrem eigenen Prozess ([`show`]). Solange es
 //! offen ist, hat Tagwerk ein Symbol im Dock und ein Hauptmenü. Das Fenster liest und
 //! schreibt über eine eigene Datenbankverbindung und meldet Änderungen sofort an die
-//! Menüleisten-App; den Zustand der Erfassung bekommt es von ihr ([`set_status`]).
+//! Menüleisten-App; den Zustand der Erfassung bekommt es von ihr ([`set_status`]), ebenso
+//! den Stand der Wochenansicht samt laufender Periode ([`Embed`]).
 //!
 //! `Tagwerk --records` öffnet das Fenster ohne Menüleisten-App ([`run`]).
 
@@ -15,6 +20,7 @@ use crate::day::{fmt_clock, secs_of, Activity, Day, DayRecord, Span, DAY_END};
 use crate::rules::{self, Settings, Warning};
 use crate::settings_window;
 use crate::store::{self, Status};
+use crate::week_view;
 use block2::RcBlock;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, TimeZone};
 use objc2::rc::Retained;
@@ -23,7 +29,7 @@ use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::*;
 use objc2_foundation::{
     NSArray, NSCopying, NSDate, NSDictionary, NSEdgeInsets, NSRectEdge, NSIndexSet, NSInteger, NSLocale, NSNotification, NSPoint,
-    NSRect, NSSize, NSString, NSTimer, NSURL,
+    NSRect, NSSize, NSString, NSTimer, NSURL, NSUserDefaults,
 };
 use std::cell::{Cell, RefCell};
 use std::path::PathBuf;
@@ -73,11 +79,7 @@ pub(crate) fn min_work_text(min_work: i64) -> String {
     format!("Arbeit ohne Mac dauert mindestens {} Min. (siehe Einstellungen).", min_work / 60)
 }
 
-/// Dauer zwischen den angezeigten Uhrzeiten (ohne Sekunden): `17:00:19 – 17:30` ergibt
-/// 30 Min. wie angezeigt, nicht 29.
-pub(crate) fn shown_len(from: i64, to: i64) -> i64 {
-    (to / 60 - from / 60).max(0) * 60
-}
+pub(crate) use crate::day::shown_len;
 
 fn plural(n: usize, one: &str, many: &str) -> String {
     format!("{n} {}", if n == 1 { one } else { many })
@@ -373,30 +375,73 @@ struct Ui {
     cards: Vec<(Retained<NSTextField>, Retained<NSTextField>)>,
     footer: Retained<NSTextField>,
     controller: Retained<Controller>,
+    /// Übersichtskarten mit Trennlinie (nur in der Ansicht „Tage“).
+    cards_row: Retained<NSStackView>,
+    top_sep: Retained<NSBox>,
+    /// Ansicht „Woche“.
+    week: Retained<NSView>,
+    switcher: Retained<NSSegmentedControl>,
 }
+
+/// Ansicht im Fenster: Tabelle mit Inspektor oder Woche als Kalender.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Mode {
+    Days,
+    Week,
+}
+
+/// Wie das Fenster geöffnet wird.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Open {
+    /// In der zuletzt benutzten Ansicht.
+    Last,
+    /// In der Ansicht „Tage“ mit diesem Tag.
+    Day(NaiveDate),
+}
+
+/// Verbindung zur Menüleisten-App.
+#[derive(Clone, Copy)]
+pub struct Embed {
+    /// Nach jeder Änderung an der Datenbank.
+    pub on_change: fn(),
+    /// Stand für die Wochenansicht (inklusive laufender Periode).
+    pub week: fn() -> Option<week_view::Snapshot>,
+    /// Arbeit ohne Mac aus der Wochenansicht eintragen bzw. löschen.
+    pub add_work: week_view::AddWork,
+    pub remove_work: week_view::RemoveWork,
+}
+
+/// Schlüssel in den Benutzereinstellungen für die zuletzt benutzte Ansicht.
+const MODE_KEY: &str = "TagwerkRecordsView";
 
 thread_local! {
     static MODEL: RefCell<Model> = RefCell::new(Model::default());
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
     static TICKS: Cell<u64> = const { Cell::new(0) };
     static SCREENSHOT: RefCell<Option<PathBuf>> = const { RefCell::new(None) };
-    /// Rückmeldung an die Menüleisten-App nach einer Änderung (`None`: eigenständig
-    /// über `--records` gestartet).
-    static ON_CHANGE: Cell<Option<fn()>> = const { Cell::new(None) };
+    /// Verbindung zur Menüleisten-App (`None`: eigenständig über `--records` gestartet).
+    static EMBED: Cell<Option<Embed>> = const { Cell::new(None) };
+    static MODE: Cell<Mode> = const { Cell::new(Mode::Days) };
     /// Fenster ist offen (auch im Dock abgelegt).
     static OPEN: Cell<bool> = const { Cell::new(false) };
     static TIMER: RefCell<Option<Retained<NSTimer>>> = const { RefCell::new(None) };
+    /// Umschalter „Tage | Woche“, bevor die Symbolleiste ihn abholt.
+    static SWITCHER: RefCell<Option<Retained<NSSegmentedControl>>> = const { RefCell::new(None) };
 }
 
 fn embedded() -> bool {
-    ON_CHANGE.with(|c| c.get().is_some())
+    EMBED.with(|c| c.get().is_some())
 }
 
 /// Meldet der Menüleisten-App, dass sich die Datenbank geändert hat.
 fn notify_change() {
-    if let Some(f) = ON_CHANGE.with(|c| c.get()) {
-        f();
+    if let Some(e) = EMBED.with(|c| c.get()) {
+        (e.on_change)();
     }
+}
+
+fn mode() -> Mode {
+    MODE.with(|m| m.get())
 }
 
 fn ui() -> Ui {
@@ -426,6 +471,7 @@ const TB_RELOAD: &str = "reload";
 const TB_ADD: &str = "add";
 const TB_EXPORT: &str = "export";
 const TB_INSPECTOR: &str = "inspector";
+const TB_VIEW: &str = "view";
 
 /// Vorgaben im Export-Dialog (Tag des Menüpunkts).
 const PRESET_4W: isize = 0;
@@ -515,6 +561,21 @@ define_class!(
         }
     }
 
+    unsafe impl NSMenuItemValidation for Controller {
+        /// „Tage“/„Woche“ mit Häkchen; Inspektor nur in „Tage“, „Heute“ nur in „Woche“.
+        #[unsafe(method(validateMenuItem:))]
+        fn validate_menu_item(&self, item: &NSMenuItem) -> bool {
+            validate_menu_item(item)
+        }
+    }
+
+    unsafe impl NSToolbarItemValidation for Controller {
+        #[unsafe(method(validateToolbarItem:))]
+        fn validate_toolbar_item(&self, item: &NSToolbarItem) -> bool {
+            item.action() != Some(sel!(toggleInspector:)) || mode() == Mode::Days
+        }
+    }
+
     unsafe impl NSWindowDelegate for Controller {
         #[unsafe(method(windowWillClose:))]
         fn window_will_close(&self, _n: &NSNotification) {
@@ -532,6 +593,9 @@ define_class!(
         #[unsafe(method(reload:))]
         fn reload_action(&self, _sender: Option<&AnyObject>) {
             reload();
+            if mode() == Mode::Week {
+                refresh_week(None);
+            }
         }
 
         #[unsafe(method(addDay:))]
@@ -549,6 +613,28 @@ define_class!(
             let ui = ui();
             ui.inspector_pane.setHidden(!ui.inspector_pane.isHidden());
             ui.split.adjustSubviews();
+        }
+
+        #[unsafe(method(showDays:))]
+        fn show_days(&self, _sender: Option<&AnyObject>) {
+            set_mode(Mode::Days, true);
+        }
+
+        #[unsafe(method(showWeek:))]
+        fn show_week(&self, _sender: Option<&AnyObject>) {
+            set_mode(Mode::Week, true);
+        }
+
+        /// Umschalter „Tage | Woche“ in der Symbolleiste.
+        #[unsafe(method(switchView:))]
+        fn switch_view(&self, sender: Option<&NSSegmentedControl>) {
+            let week = sender.is_some_and(|s| s.selectedSegment() == 1);
+            set_mode(if week { Mode::Week } else { Mode::Days }, true);
+        }
+
+        #[unsafe(method(goToday:))]
+        fn go_today(&self, _sender: Option<&AnyObject>) {
+            week_view::today();
         }
 
         #[unsafe(method(showAbout:))]
@@ -788,7 +874,7 @@ fn cell_view(m: &Model, column: Option<&str>, row: NSInteger) -> Option<Retained
                         ("–".to_string(), NSTextAlignment::Right, true)
                     }
                 }
-                "pause" => (store::fmt_hm(rec.pause_secs()), NSTextAlignment::Right, false),
+                "pause" => (store::fmt_hm(rec.shown_pause_secs), NSTextAlignment::Right, false),
                 _ => return None,
             };
             let t = label(&text);
@@ -842,7 +928,7 @@ fn refresh_summary() {
         // (Arbeit, Pausen, Tage, Soll)
         let sum = |f: &dyn Fn(NaiveDate) -> bool| {
             recs.iter().filter(|r| f(r.date)).fold((0i64, 0i64, 0usize, 0i64), |(w, p, n, t), r| {
-                (w + r.work_secs, p + r.pause_secs(), n + 1, t + st.daily_target(r.date))
+                (w + r.work_secs, p + r.shown_pause_secs, n + 1, t + st.daily_target(r.date))
             })
         };
         let (tw, _tp, tn, _) = sum(&|d| d == today);
@@ -896,6 +982,7 @@ fn reload() {
     reload_table();
     refresh_summary();
     refresh_inspector(false);
+    week_from_model();
 }
 
 /// Einstellungen wurden im Fenster „Einstellungen“ geändert.
@@ -914,11 +1001,20 @@ enum Edit {
     RemoveBreak(usize),
     AddWork(i64, i64, String),
     RemoveWork(usize),
+    /// Arbeit ohne Mac in diesem Bereich löschen (aus der Wochenansicht).
+    CutWork(i64, i64),
 }
 
 fn apply(edit: Edit, rebuild: bool) {
+    let Some(date) = model(|m| m.inspector.as_ref().map(|i| i.date)) else { return };
+    if let Err(e) = save(date, edit, rebuild) {
+        show_inspector_error(&format!("Speichern fehlgeschlagen: {e}"));
+    }
+}
+
+/// Änderung an einem Tag speichern und anzeigen. `rebuild` baut den Inspektor neu auf.
+fn save(date: NaiveDate, edit: Edit, rebuild: bool) -> Result<(), String> {
     let result = model(|m| {
-        let date = m.inspector.as_ref()?.date;
         let db = m.db.as_mut()?;
         Some(db.edit_day(date, now(), |d| match edit {
             Edit::SetStart(s) => d.start = s,
@@ -935,11 +1031,12 @@ fn apply(edit: Edit, rebuild: bool) {
                     d.work.remove(i);
                 }
             }
+            Edit::CutWork(from, to) => d.cut_work(from, to),
         }))
     });
     match result {
-        None => {}
-        Some(Err(e)) => show_inspector_error(&format!("Speichern fehlgeschlagen: {e}")),
+        None => Ok(()),
+        Some(Err(e)) => Err(e.to_string()),
         Some(Ok(())) => {
             model(|m| {
                 m.load();
@@ -953,7 +1050,9 @@ fn apply(edit: Edit, rebuild: bool) {
             reload_table();
             refresh_summary();
             refresh_inspector(rebuild);
+            week_from_model();
             notify_change();
+            Ok(())
         }
     }
 }
@@ -972,7 +1071,7 @@ fn day_subtitle(day: Option<&Day>, settings: &Settings) -> String {
         Some(r) if r.work_secs > 0 => format!(
             "Arbeitszeit {}  ·  Pausen {}  ·  Saldo {}",
             store::fmt_hm(r.work_secs),
-            store::fmt_hm(r.pause_secs()),
+            store::fmt_hm(r.shown_pause_secs),
             rules::fmt_balance(r.work_secs - settings.daily_target(r.date))
         ),
         Some(_) => "Keine Arbeitszeit im Arbeitszeitrahmen.".to_string(),
@@ -1339,6 +1438,107 @@ fn go_to(date: NaiveDate) {
     refresh_inspector(true);
 }
 
+fn validate_menu_item(item: &NSMenuItem) -> bool {
+    let Some(action) = item.action() else { return true };
+    let mode = mode();
+    let check = |on: bool| item.setState(if on { NSControlStateValueOn } else { NSControlStateValueOff });
+    if action == sel!(showDays:) {
+        check(mode == Mode::Days);
+    } else if action == sel!(showWeek:) {
+        check(mode == Mode::Week);
+    } else if action == sel!(toggleInspector:) {
+        return mode == Mode::Days;
+    } else if action == sel!(goToday:) {
+        return mode == Mode::Week;
+    }
+    true
+}
+
+/// Einen Tag in der Ansicht „Tage“ zeigen.
+fn open_day(date: NaiveDate) {
+    set_mode(Mode::Days, true);
+    go_to(date);
+}
+
+// ---------- Ansicht „Tage“ oder „Woche“ ----------
+
+/// Zuletzt benutzte Ansicht aus den Benutzereinstellungen.
+fn stored_mode() -> Mode {
+    let n = NSUserDefaults::standardUserDefaults().integerForKey(&ns(MODE_KEY));
+    if n == 1 { Mode::Week } else { Mode::Days }
+}
+
+/// Zwischen „Tage“ und „Woche“ wechseln. Die Woche zeigt die Woche des ausgewählten Tags
+/// (ohne Auswahl die aktuelle). `focus` gibt der Ansicht die Tastatur.
+fn set_mode(new: Mode, focus: bool) {
+    let Some(ui) = UI.with(|u| u.borrow().clone()) else { return };
+    let old = MODE.with(|m| m.replace(new));
+    let days = new == Mode::Days;
+    for v in [&*ui.cards_row as &NSView, &ui.top_sep, &ui.split] {
+        v.setHidden(!days);
+    }
+    ui.week.setHidden(days);
+    ui.switcher.setSelectedSegment(if days { 0 } else { 1 });
+    if SCREENSHOT.with(|s| s.borrow().is_none()) {
+        NSUserDefaults::standardUserDefaults().setInteger_forKey(if days { 0 } else { 1 }, &ns(MODE_KEY));
+    }
+    if !days && old != new {
+        let date = model(|m| m.selected).unwrap_or_else(|| now().date());
+        refresh_week(Some(date));
+    }
+    if focus {
+        if days {
+            ui.window.makeFirstResponder(Some(&ui.table));
+        } else {
+            week_view::focus();
+        }
+    }
+}
+
+/// Stand der Wochenansicht neu holen: von der Menüleisten-App (samt laufender Periode) oder
+/// eigenständig aus der Datenbank. Mit `date` die Woche dieses Tags zeigen.
+fn refresh_week(date: Option<NaiveDate>) {
+    let snap = match EMBED.with(|c| c.get()) {
+        Some(e) => (e.week)(),
+        None => Some(model_snapshot()),
+    };
+    match (snap, date) {
+        (Some(snap), Some(date)) => week_view::show_week_of(snap, date),
+        (Some(snap), None) => week_view::update(snap),
+        (None, _) => {}
+    }
+}
+
+/// Eigenständig gestartet: Die Wochenansicht zeigt den Stand der Datenbank. (In der
+/// Menüleisten-App aktualisiert diese die Wochenansicht selbst.)
+fn week_from_model() {
+    if !embedded() && UI.with(|u| u.borrow().is_some()) {
+        week_view::update(model_snapshot());
+    }
+}
+
+fn model_snapshot() -> week_view::Snapshot {
+    model(|m| week_view::Snapshot {
+        days: m.days.clone(),
+        settings: m.settings,
+        now: now(),
+        running: matches!(m.status, Some(Status::Running | Status::Away(..))),
+    })
+}
+
+/// Eigenständig gestartet: Arbeit ohne Mac aus der Wochenansicht direkt speichern.
+fn week_add_work(date: NaiveDate, from: i64, to: i64, activity: Activity) {
+    if let Err(e) = save(date, Edit::AddWork(from, to, activity.note().to_string()), true) {
+        show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e);
+    }
+}
+
+fn week_remove_work(date: NaiveDate, from: i64, to: i64) {
+    if let Err(e) = save(date, Edit::CutWork(from, to), true) {
+        show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e);
+    }
+}
+
 /// „Tag nachtragen …“: Datum im Kalender wählen.
 fn ask_day() {
     let ui = ui();
@@ -1365,7 +1565,7 @@ fn ask_day() {
     let handler = RcBlock::new(move |response: NSModalResponse| {
         if response == NSAlertFirstButtonReturn {
             if let Some(d) = from_nsdate(&p.dateValue()) {
-                go_to(d.date().min(now().date()));
+                open_day(d.date().min(now().date()));
             }
         }
     });
@@ -1584,11 +1784,38 @@ fn reveal(path: &std::path::Path) {
 
 fn toolbar_ids() -> Retained<NSArray<NSString>> {
     let flex: Retained<NSString> = unsafe { NSToolbarFlexibleSpaceItemIdentifier }.copy();
-    NSArray::from_retained_slice(&[flex, ns(TB_RELOAD), ns(TB_ADD), ns(TB_EXPORT), ns(TB_INSPECTOR)])
+    NSArray::from_retained_slice(&[ns(TB_VIEW), flex, ns(TB_RELOAD), ns(TB_ADD), ns(TB_EXPORT), ns(TB_INSPECTOR)])
+}
+
+/// Umschalter „Tage | Woche“ (in der Symbolleiste).
+fn view_switcher(target: &Controller) -> Retained<NSSegmentedControl> {
+    let labels = NSArray::from_retained_slice(&[ns("Tage"), ns("Woche")]);
+    let seg = unsafe {
+        NSSegmentedControl::segmentedControlWithLabels_trackingMode_target_action(
+            &labels,
+            NSSegmentSwitchTracking::SelectOne,
+            Some(target),
+            Some(sel!(switchView:)),
+            mtm(),
+        )
+    };
+    seg.setToolTip_forSegment(Some(&ns("Tabelle mit Inspektor (⌘1)")), 0);
+    seg.setToolTip_forSegment(Some(&ns("Woche als Kalender (⌘2)")), 1);
+    seg.setSelectedSegment(0);
+    seg
 }
 
 fn toolbar_item(target: &Controller, id: &NSString) -> Option<Retained<NSToolbarItem>> {
     let mtm = mtm();
+    if id.to_string() == TB_VIEW {
+        let seg = SWITCHER.with(|s| s.borrow().clone())?;
+        let item = NSToolbarItem::initWithItemIdentifier(NSToolbarItem::alloc(mtm), id);
+        item.setLabel(&ns("Ansicht"));
+        item.setPaletteLabel(&ns("Ansicht"));
+        item.setToolTip(Some(&ns("Zwischen Tagen und Woche wechseln")));
+        item.setView(Some(&seg));
+        return Some(item);
+    }
     let (label, tip, image, action) = match id.to_string().as_str() {
         TB_RELOAD => ("Aktualisieren", "Aufzeichnungen neu laden", "arrow.clockwise", sel!(reload:)),
         TB_ADD => ("Tag bearbeiten", "Einen beliebigen Tag öffnen und Zeiten nachtragen", "calendar.badge.plus", sel!(addDay:)),
@@ -1679,6 +1906,10 @@ fn build_main_menu(app: &NSApplication, target: &Controller) {
     submenu(
         "Darstellung",
         vec![
+            Some(menu_item("Tage", Some(sel!(showDays:)), "1", cmd, Some(target))),
+            Some(menu_item("Woche", Some(sel!(showWeek:)), "2", cmd, Some(target))),
+            None,
+            Some(menu_item("Heute", Some(sel!(goToday:)), "t", cmd, Some(target))),
             Some(menu_item("Aktualisieren", Some(sel!(reload:)), "r", cmd, Some(target))),
             Some(menu_item("Informationen ein-/ausblenden", Some(sel!(toggleInspector:)), "i", cmd | NSEventModifierFlags::Option, Some(target))),
             None,
@@ -1765,6 +1996,8 @@ fn build_window(controller: &Retained<Controller>, shot: bool) -> Ui {
     window.setToolbarStyle(NSWindowToolbarStyle::Unified);
     window.setTabbingMode(NSWindowTabbingMode::Disallowed);
 
+    let switcher = view_switcher(controller);
+    SWITCHER.with(|s| *s.borrow_mut() = Some(switcher.clone()));
     let toolbar = NSToolbar::initWithIdentifier(NSToolbar::alloc(mtm), &ns("TagwerkRecordsToolbar"));
     toolbar.setDelegate(Some(ProtocolObject::from_ref(&**controller)));
     toolbar.setDisplayMode(NSToolbarDisplayMode::IconOnly);
@@ -1863,7 +2096,11 @@ fn build_window(controller: &Retained<Controller>, shot: bool) -> Ui {
     footer.setFont(Some(&NSFont::systemFontOfSize(small_size())));
     footer.setTextColor(Some(&NSColor::secondaryLabelColor()));
 
-    for v in [&*cards_row as &NSView, &top_sep, &split, &footer] {
+    // Woche (statt Übersicht und Tabelle; die Fußzeile bleibt).
+    let week = week_view::container();
+    week.setHidden(true);
+
+    for v in [&*cards_row as &NSView, &top_sep, &split, &week, &footer] {
         v.setTranslatesAutoresizingMaskIntoConstraints(false);
         root.addSubview(v);
     }
@@ -1879,6 +2116,10 @@ fn build_window(controller: &Retained<Controller>, shot: bool) -> Ui {
     c(split.leadingAnchor().constraintEqualToAnchor(&root.leadingAnchor()));
     c(split.trailingAnchor().constraintEqualToAnchor(&root.trailingAnchor()));
     c(split.bottomAnchor().constraintEqualToAnchor_constant(&root.bottomAnchor(), -footer_height));
+    c(week.topAnchor().constraintEqualToAnchor(&root.topAnchor()));
+    c(week.leadingAnchor().constraintEqualToAnchor(&root.leadingAnchor()));
+    c(week.trailingAnchor().constraintEqualToAnchor(&root.trailingAnchor()));
+    c(week.bottomAnchor().constraintEqualToAnchor_constant(&root.bottomAnchor(), -footer_height));
     c(footer.leadingAnchor().constraintEqualToAnchor_constant(&root.leadingAnchor(), 20.0));
     c(footer.trailingAnchor().constraintLessThanOrEqualToAnchor_constant(&root.trailingAnchor(), -20.0));
     c(footer.centerYAnchor().constraintEqualToAnchor_constant(&root.bottomAnchor(), -footer_height / 2.0));
@@ -1904,6 +2145,10 @@ fn build_window(controller: &Retained<Controller>, shot: bool) -> Ui {
         cards,
         footer,
         controller: controller.clone(),
+        cards_row,
+        top_sep,
+        week,
+        switcher,
     }
 }
 
@@ -2022,24 +2267,45 @@ fn build(shot: bool) -> Ui {
     ui
 }
 
-/// Öffnet das Fenster „Aufzeichnungen“ in der Menüleisten-App oder holt es nach vorn,
-/// auf Wunsch mit ausgewähltem Tag. `status` ist der Zustand der Erfassung; `on_change`
-/// wird nach jeder Änderung an der Datenbank aufgerufen.
-pub fn show(select: Option<NaiveDate>, status: Status, on_change: fn()) {
-    ON_CHANGE.with(|c| c.set(Some(on_change)));
+/// Öffnet das Fenster „Aufzeichnungen“ in der Menüleisten-App oder holt es nach vorn:
+/// in der zuletzt benutzten Ansicht oder mit einem Tag in „Tage“. `status` ist der Zustand
+/// der Erfassung, `embed` die Verbindung zur Menüleisten-App.
+pub fn show(open: Open, status: Status, embed: Embed) {
+    EMBED.with(|c| c.set(Some(embed)));
     // Mit Fenster gehört Tagwerk ins Dock und in den App-Umschalter (⌘⇥), und die
     // Menüleiste zeigt das Hauptmenü des Fensters.
     NSApplication::sharedApplication(mtm()).setActivationPolicy(NSApplicationActivationPolicy::Regular);
     let fresh = !OPEN.with(|o| o.replace(true));
     let ui = build(false);
+    week_view::set_actions(Some(embed.add_work), Some(embed.remove_work));
     model(|m| m.status = Some(status));
     reload();
-    if let Some(d) = select {
-        go_to(d);
+    let today = now().date();
+    match open {
+        Open::Day(d) => open_day(d),
+        Open::Last => {
+            let mode = if fresh { stored_mode() } else { mode() };
+            set_mode(mode, false);
+            if mode == Mode::Week {
+                // Neu geöffnet: aktuelle Woche; sonst bleibt die gezeigte Woche.
+                if let Some(snap) = (embed.week)() {
+                    if fresh {
+                        week_view::show_week_of(snap, today);
+                    } else {
+                        week_view::update(snap);
+                    }
+                }
+            }
+        }
     }
     ui.window.makeKeyAndOrderFront(None);
-    if fresh {
-        ui.window.makeFirstResponder(Some(&ui.table));
+    if fresh || open != Open::Last {
+        match mode() {
+            Mode::Days => {
+                ui.window.makeFirstResponder(Some(&ui.table));
+            }
+            Mode::Week => week_view::focus(),
+        }
     }
     activate();
     start_timer(&ui.controller, 1.0);
@@ -2080,9 +2346,10 @@ fn closed() {
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
 }
 
-/// Öffnet das Fenster „Aufzeichnungen“ ohne Menüleisten-App (`Tagwerk --records`). Mit
-/// `screenshot` wird ein Bild des Fensters gespeichert und das Programm danach beendet.
-pub fn run(screenshot: Option<PathBuf>) -> Result<(), String> {
+/// Öffnet das Fenster „Aufzeichnungen“ ohne Menüleisten-App (`Tagwerk --records`) in der
+/// zuletzt benutzten Ansicht. Mit `screenshot` wird ein Bild des Fensters gespeichert und
+/// das Programm danach beendet, mit `week` in der Ansicht „Woche“ (sonst „Tage“).
+pub fn run(screenshot: Option<PathBuf>, week: bool) -> Result<(), String> {
     let mtm = MainThreadMarker::new().ok_or("Das Fenster muss im Hauptthread laufen.")?;
     let shot = screenshot.is_some();
     SCREENSHOT.with(|s| *s.borrow_mut() = screenshot);
@@ -2099,6 +2366,18 @@ pub fn run(screenshot: Option<PathBuf>) -> Result<(), String> {
     model(|m| m.status = store::read_status());
     OPEN.with(|o| o.set(true));
     let ui = build(shot);
+    if shot {
+        // Bildschirmfotos nur zum Ansehen.
+        week_view::set_actions(None, None);
+    } else {
+        week_view::set_actions(Some(week_add_work), Some(week_remove_work));
+    }
+    let mode = match (shot, week) {
+        (_, true) => Mode::Week,
+        (true, false) => Mode::Days,
+        (false, false) => stored_mode(),
+    };
+    set_mode(mode, false);
 
     // Zum Testen/für Screenshots: TAGWERK_SELECT=latest oder =TT.MM.JJJJ
     let select = std::env::var("TAGWERK_SELECT").ok().and_then(|sel| {
@@ -2110,13 +2389,25 @@ pub fn run(screenshot: Option<PathBuf>) -> Result<(), String> {
     });
     if let Some(d) = select {
         go_to(d);
+        if mode == Mode::Week {
+            refresh_week(Some(d));
+        }
+    }
+    // Zum Testen: Rückmeldung „kopiert“ in der Wochenansicht (TAGWERK_FLASH=1).
+    if mode == Mode::Week && std::env::var("TAGWERK_FLASH").is_ok() {
+        week_view::flash_first_block();
     }
 
     if shot {
         ui.window.orderFront(None);
     } else {
         ui.window.makeKeyAndOrderFront(None);
-        ui.window.makeFirstResponder(Some(&ui.table));
+        match mode {
+            Mode::Days => {
+                ui.window.makeFirstResponder(Some(&ui.table));
+            }
+            Mode::Week => week_view::focus(),
+        }
         activate();
     }
 

@@ -9,7 +9,8 @@
 //!   Tagwerk --import <datei.md>   Tage aus einem Markdown-Export übernehmen
 //!   Tagwerk --screenshot <png>    Fenster "Aufzeichnungen" öffnen, Bild speichern, beenden
 //!   Tagwerk --week-screenshot <png>
-//!                                 Fenster "Wochenansicht" öffnen, Bild speichern, beenden
+//!                                 Fenster "Aufzeichnungen" in der Ansicht "Woche" öffnen,
+//!                                 Bild speichern, beenden
 //!   Tagwerk --settings-screenshot <png>
 //!                                 Fenster "Einstellungen" öffnen, Bild speichern, beenden
 
@@ -30,7 +31,7 @@ mod settings_window;
 mod store;
 mod tracker;
 #[cfg(target_os = "macos")]
-mod week_window;
+mod week_view;
 
 use chrono::{Duration, Local};
 use std::path::PathBuf;
@@ -70,7 +71,7 @@ fn main() {
             std::process::exit(2);
         };
         #[cfg(target_os = "macos")]
-        if let Err(e) = records::run(Some(PathBuf::from(path))) {
+        if let Err(e) = records::run(Some(PathBuf::from(path)), false) {
             fail(e);
         }
         return;
@@ -82,7 +83,7 @@ fn main() {
             std::process::exit(2);
         };
         #[cfg(target_os = "macos")]
-        if let Err(e) = week_window::screenshot(std::path::Path::new(&path)) {
+        if let Err(e) = records::run(Some(PathBuf::from(path)), true) {
             fail(e);
         }
         return;
@@ -102,7 +103,7 @@ fn main() {
 
     if has("--records") {
         #[cfg(target_os = "macos")]
-        if let Err(e) = records::run(None) {
+        if let Err(e) = records::run(None, false) {
             fail(e);
         }
         return;

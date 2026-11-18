@@ -6,6 +6,37 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Geändert
+- Die Wochenansicht ist jetzt Teil des Fensters „Aufzeichnungen“ statt eines eigenen
+  Fensters. Der Umschalter „Tage | Woche“ in der Symbolleiste wechselt zwischen der
+  Tabelle mit Inspektor und der Woche als Kalender, ebenso das Menü „Darstellung“ mit
+  „Tage“ (⌘1) und „Woche“ (⌘2); „Heute“ (⌘T) springt zur aktuellen Woche. Das Fenster
+  öffnet in der zuletzt benutzten Ansicht.
+- Ein Wechsel von „Tage“ zu „Woche“ zeigt die Woche des ausgewählten Tags.
+- In der Ansicht „Woche“ ersetzt die Wochenleiste (‹ › Heute, Kalenderwoche, Hinweise,
+  Wochensumme) die Übersichtskarten; die Fußzeile bleibt.
+- Auch eigenständig (`Tagwerk --records`) gibt es die Wochenansicht; Arbeit ohne Mac
+  wird dann direkt in der Datenbank eingetragen bzw. gelöscht.
+- `--week-screenshot` speichert das Fenster „Aufzeichnungen“ in der Ansicht „Woche“.
+- Ein Klick auf einen freien Bereich der Woche öffnet den Dialog „Arbeit ohne Mac
+  eintragen“ sofort (bisher erst nach der Doppelklick-Zeit).
+
+### Behoben
+- „Pause als Arbeitszeit zählen“ in der Menüleiste zeigt die Dauer einer Pause jetzt wie
+  die Wochenansicht nach den angezeigten Uhrzeiten (15:25 – 15:45 sind 20 Min., bisher
+  je nach Sekunden 19 Min.).
+- Auch die Pausen eines Tages zählen jetzt nach den angezeigten Uhrzeiten: Die Summe ist
+  die Summe der einzelnen Pausen – im Tageskopf der Wochenansicht, in der Spalte
+  „Pausen“, im Inspektor, in den Übersichtskarten und unter „Pausen heute“ in der
+  Menüleiste. Bisher zeigte der Tageskopf z. B. 0:19 h neben einer Pause von 0:20 h.
+  Der Export bleibt sekundengenau.
+
+### Entfernt
+- Der Menüpunkt „Wochenansicht …“ (⌘W) in der Menüleiste; die Woche ist über
+  „Aufzeichnungen …“ und den Umschalter „Tage | Woche“ erreichbar.
+- Der Doppelklick auf einen Tag in der Wochenansicht (öffnete den Tag im Fenster
+  „Aufzeichnungen“).
+
 ## [1.2.0] - 2026-11-18
 
 ### Zusammenfassung
