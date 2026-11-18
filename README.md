@@ -60,6 +60,14 @@ farbig – **grün** = läuft, **orange** = Pause, **indigo** = Feierabend –, 
 grün im Plus und rot im Minus. Diese Zeilen sind reine Anzeige und lassen sich nicht
 anklicken.
 
+- **Mitteilungen zur Höchstarbeitszeit** – über die Mitteilungszentrale von macOS kommt
+  bei **9:45 Std.** Arbeit eine Vorwarnung („Noch 15 Min. bis 10 Std. Arbeitszeit“) und
+  bei **10 Std.** die Meldung „10 Std. Arbeitszeit erreicht“ – jeweils einmal am Tag,
+  solange gearbeitet wird (auch ohne Mac). Beim ersten Start fragt macOS, ob Tagwerk
+  Mitteilungen senden darf; den Stand zeigen die [Einstellungen](#einstellungen), ändern
+  lässt er sich unter Systemeinstellungen › Mitteilungen › Tagwerk. Nur in der
+  installierten App.
+
 - **Pausen ohne Zutun** – jede Sperre ab der eingestellten Mindestdauer (Standard
   15 Minuten) ist eine Pause, egal ob Mittags- oder Kaffeepause. Kürzere Sperren zählen
   zum laufenden Arbeitsblock.
@@ -157,6 +165,7 @@ Titelleiste zeigt den Datenordner im Finder.
 | Einstellung           | Bedeutung                                                              | Standard        |
 |-----------------------|------------------------------------------------------------------------|-----------------|
 | Bei Anmeldung starten | Tagwerk als Anmeldeobjekt eintragen (nur in der installierten App)     | ein             |
+| Mitteilungen          | Zeigt, ob Tagwerk Mitteilungen senden darf; wenn nicht, öffnet „Systemeinstellungen öffnen“ die Mitteilungseinstellungen von Tagwerk | – |
 | Arbeitszeitrahmen     | Nur Mo–Fr in diesem Zeitraum wird Arbeitszeit bzw. Pause gezählt        | 07:00–22:00 Uhr |
 | Regelarbeitszeit      | Wochenarbeitszeit, daraus ergibt sich das Tagessoll                     | 39 Std. (7:48 h/Tag) |
 | Mindestpause          | Ab dieser Sperrdauer gilt eine Unterbrechung als Pause                 | 15 Min.         |
@@ -203,7 +212,7 @@ verändert.
 | Sollarbeitszeit      | Regelwochenarbeitszeit / 5 je Arbeitstag (39 Std. → 7:48 Std.)          |
 | Pausen (§ 4 ArbZG)   | mehr als 6 Std. Arbeit: 30 Min., mehr als 9 Std.: 45 Min.; es zählen Pausen ab 15 Min. |
 | Ruhezeit (§ 5 ArbZG) | mindestens 11 Std. zwischen dem Ende eines Arbeitstags und dem nächsten Beginn |
-| Höchstarbeitszeit    | mehr als 10 Std. Arbeit an einem Tag                                    |
+| Höchstarbeitszeit    | mehr als 10 Std. Arbeit an einem Tag; Mitteilung bei 9:45 und 10 Std.   |
 | Erfassung            | Beginn und Ende durch Entsperren/Sperren, Arbeit unterbrechen/Weiter arbeiten oder Ohne Mac weiterarbeiten; keine Einträge in der Zukunft |
 
 > [!NOTE]

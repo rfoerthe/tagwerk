@@ -8,8 +8,9 @@ use crate::about;
 use crate::day::{self, fmt_clock, Activity, Mode, Span};
 use crate::glyphs;
 use crate::login_item;
+use crate::notify;
 use crate::records;
-use crate::rules::{self, IconSet};
+use crate::rules::{self, IconSet, LimitWatch};
 use crate::settings_window;
 use crate::store;
 use crate::tracker::{PauseReason, Tracker};
@@ -96,6 +97,8 @@ struct AppState {
     last_icon: Option<IconKind>,
     /// Zuletzt gezeigtes Symbol in der Menüleiste (Zustand, Symbolsatz, Höhe).
     button_icon: Option<(IconKind, IconSet, u32)>,
+    /// Mitteilungen bei 9:45 und 10 Std. Arbeit.
+    limit: LimitWatch,
     db: store::Db,
 }
 
@@ -569,6 +572,9 @@ impl AppState {
 
         let closed = matches!(info.mode, Mode::Closed(_));
         let away = self.tracker.on_away();
+        if let Some(alert) = self.limit.update(t.date(), info.work_secs, running || away) {
+            notify::post(alert);
+        }
         self.items.pause.setHidden(closed);
         let (title, symbol) = if running {
             ("Arbeit unterbrechen", "pause.fill")
@@ -1199,7 +1205,11 @@ pub fn run() {
         tracker.paused_since = Some(t);
     }
 
+    // Bereits erreichte Schwellen der Höchstarbeitszeit nicht noch einmal melden.
+    let limit = LimitWatch::init(t.date(), tracker.today(t).work_secs);
+    notify::init(mtm, running_from_bundle());
     let mut state = AppState {
+        limit,
         tracker,
         status_item,
         items,

@@ -6,6 +6,21 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt
+- Mitteilungen zur Höchstarbeitszeit über die Mitteilungszentrale von macOS: bei 9:45 Std.
+  Arbeit „Noch 15 Min. bis 10 Std. Arbeitszeit“, bei 10 Std. „10 Std. Arbeitszeit
+  erreicht“. Jede Schwelle wird einmal am Tag gemeldet, sobald sie während der Arbeit
+  (auch ohne Mac) überschritten wird – nicht für nachträglich eingetragene Zeit und nicht
+  noch einmal nach einem Neustart der App. Beim ersten Start fragt macOS nach der
+  Erlaubnis; nur in der installierten App (`Tagwerk.app`).
+- Die Einstellungen zeigen unter „Mitteilungen“, ob Tagwerk Mitteilungen senden darf
+  (erlaubt, nicht erlaubt, ausgeblendet oder nur in der installierten App). Ist die
+  Erlaubnis nicht erteilt, öffnet „Systemeinstellungen öffnen“ direkt die
+  Mitteilungseinstellungen von Tagwerk. Der Stand wird jedes Mal abgefragt, wenn das
+  Fenster aktiv wird – auch nach der Rückkehr aus den Systemeinstellungen.
+- `--settings-screenshot`: Stand der Mitteilungen zur Ansicht über
+  `TAGWERK_NOTIFICATIONS=allowed|denied|hidden|undetermined`.
+
 ## [1.3.0] - 2026-11-18
 
 ### Zusammenfassung

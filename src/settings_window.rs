@@ -8,11 +8,16 @@
 //! „Bei Anmeldung starten“ steht nicht in der Datenbank, sondern ist das Anmeldeobjekt
 //! von macOS; „Standardwerte“ lässt es unverändert.
 //!
+//! „Mitteilungen“ zeigt, ob Tagwerk Mitteilungen zeigen darf (Erinnerung an die
+//! Höchstarbeitszeit); wenn nicht, öffnet ein Knopf Systemeinstellungen › Mitteilungen.
+//! Der Stand wird jedes Mal abgefragt, wenn das Fenster aktiv wird.
+//!
 //! Rechts in der Symbolleiste öffnet ein Ordner-Knopf den Datenordner im Finder.
 
 use crate::day::{secs_of, DAY_END};
 use crate::glyphs;
 use crate::login_item;
+use crate::notify::{self, Permission};
 use crate::rules::{self, IconSet, Settings, MIN_PAUSE_RANGE, MIN_WORK_MAX, WEEKLY_RANGE};
 use crate::store;
 use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, TimeZone};
@@ -20,7 +25,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::*;
-use objc2_foundation::{NSArray, NSCopying, NSDate, NSLocale, NSPoint, NSRect, NSSize, NSString, NSURL};
+use objc2_foundation::{NSArray, NSCopying, NSDate, NSLocale, NSNotification, NSPoint, NSRect, NSSize, NSString, NSURL};
 use std::cell::RefCell;
 
 fn ns(s: &str) -> Retained<NSString> {
@@ -53,6 +58,10 @@ struct State {
     db: Option<store::Db>,
     settings: Settings,
     login: Retained<NSButton>,
+    notify_icon: Retained<NSImageView>,
+    notify_status: Retained<NSTextField>,
+    notify_button: Retained<NSButton>,
+    notify_note: Retained<NSTextField>,
     frame_from: Retained<NSDatePicker>,
     frame_to: Retained<NSDatePicker>,
     weekly: Retained<NSTextField>,
@@ -95,6 +104,14 @@ define_class!(
     struct Controller;
 
     unsafe impl NSObjectProtocol for Controller {}
+
+    unsafe impl NSWindowDelegate for Controller {
+        /// Zurück aus den Systemeinstellungen: Stand der Mitteilungen neu abfragen.
+        #[unsafe(method(windowDidBecomeKey:))]
+        fn window_did_become_key(&self, _n: &NSNotification) {
+            refresh_permission();
+        }
+    }
 
     unsafe impl NSToolbarDelegate for Controller {
         #[unsafe(method_id(toolbarDefaultItemIdentifiers:))]
@@ -221,6 +238,11 @@ define_class!(
             });
         }
 
+        #[unsafe(method(openNotificationSettings:))]
+        fn open_notification_settings(&self, _sender: Option<&AnyObject>) {
+            notify::open_settings();
+        }
+
         #[unsafe(method(resetDefaults:))]
         fn reset_defaults(&self, _sender: Option<&AnyObject>) {
             with_state(|s| {
@@ -309,10 +331,32 @@ impl State {
         }
     }
 
+    /// Stand der Mitteilungen anzeigen; Knopf nur, wenn in den Systemeinstellungen etwas zu tun ist.
+    fn set_permission(&self, p: Permission) {
+        let (symbol, color) = match p {
+            Permission::Allowed => ("checkmark.circle.fill", NSColor::systemGreenColor()),
+            Permission::Unavailable => ("bell.slash", NSColor::secondaryLabelColor()),
+            _ => ("exclamationmark.triangle.fill", NSColor::systemOrangeColor()),
+        };
+        self.notify_icon
+            .setImage(NSImage::imageWithSystemSymbolName_accessibilityDescription(&ns(symbol), Some(&ns(p.text()))).as_deref());
+        self.notify_icon.setContentTintColor(Some(&color));
+        self.notify_status.setStringValue(&ns(p.text()));
+        self.notify_note.setStringValue(&ns(p.note()));
+        self.notify_button.setHidden(!p.needs_settings());
+    }
+
     fn show_error(&self, text: &str) {
         self.error.setStringValue(&ns(text));
         self.error.setHidden(false);
     }
+}
+
+/// Stand der Mitteilungen abfragen und anzeigen (Antwort kommt später im Hauptthread).
+fn refresh_permission() {
+    notify::permission(|p| {
+        with_state(|s| s.set_permission(p));
+    });
 }
 
 /// Speichern, Felder angleichen und die App benachrichtigen.
@@ -487,6 +531,21 @@ fn build(on_change: fn()) -> State {
     let login = unsafe {
         NSButton::checkboxWithTitle_target_action(&ns("Bei Anmeldung starten"), Some(target), Some(sel!(loginChanged:)), mtm)
     };
+    let notify_icon = NSImageView::new(mtm);
+    notify_icon.setImageScaling(NSImageScaling::ScaleNone);
+    let notify_status = label("");
+    let notify_button = unsafe {
+        NSButton::buttonWithTitle_target_action(
+            &ns("Systemeinstellungen öffnen"),
+            Some(target),
+            Some(sel!(openNotificationSettings:)),
+            mtm,
+        )
+    };
+    notify_button.setControlSize(NSControlSize::Small);
+    notify_button.setFont(Some(&NSFont::systemFontOfSize(NSFont::smallSystemFontSize())));
+    notify_button.setHidden(true);
+    let notify_note = caption("");
     let frame_from = time_picker(target);
     let frame_to = time_picker(target);
     let weekly = number_field(target, sel!(weeklyChanged:));
@@ -522,6 +581,8 @@ fn build(on_change: fn()) -> State {
         )
     };
 
+    let notify_row = hstack(&[&notify_icon, &notify_status, &notify_button]);
+    notify_row.setCustomSpacing_afterView(10.0, &notify_status);
     let frame_row = hstack(&[&frame_from, &label("bis"), &frame_to, &label("Uhr")]);
     let weekly_row = hstack(&[&weekly, &weekly_stepper, &label("Stunden pro Woche")]);
     let pause_row = hstack(&[&pause, &pause_stepper, &label("Minuten")]);
@@ -529,6 +590,8 @@ fn build(on_change: fn()) -> State {
     let empty = || NSGridCell::emptyContentView(mtm);
     let rows: Vec<Retained<NSArray<NSView>>> = vec![
         NSArray::from_retained_slice(&[view(&label("Allgemein:")), view(&login)]),
+        NSArray::from_retained_slice(&[view(&label("Mitteilungen:")), view(&notify_row)]),
+        NSArray::from_retained_slice(&[empty(), view(&notify_note)]),
         NSArray::from_retained_slice(&[view(&label("Arbeitszeitrahmen:")), view(&frame_row)]),
         NSArray::from_retained_slice(&[
             empty(),
@@ -568,13 +631,13 @@ fn build(on_change: fn()) -> State {
     grid.setColumnSpacing(8.0);
     grid.setRowSpacing(4.0);
     grid.columnAtIndex(0).setXPlacement(NSGridCellPlacement::Trailing);
-    for r in [1, 3, 5, 7, 9, 13] {
+    for r in [1, 3, 5, 7, 9, 11, 15] {
         grid.rowAtIndex(r).setTopPadding(14.0);
     }
     // Bilder haben keine Grundlinie
-    grid.rowAtIndex(10).setRowAlignment(NSGridRowAlignment::None);
-    grid.rowAtIndex(10).setTopPadding(6.0);
-    grid.rowAtIndex(10).setBottomPadding(2.0);
+    grid.rowAtIndex(12).setRowAlignment(NSGridRowAlignment::None);
+    grid.rowAtIndex(12).setTopPadding(6.0);
+    grid.rowAtIndex(12).setBottomPadding(2.0);
     grid.setTranslatesAutoresizingMaskIntoConstraints(false);
 
     let size = grid.fittingSize();
@@ -590,6 +653,7 @@ fn build(on_change: fn()) -> State {
     };
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(&ns("Einstellungen"));
+    window.setDelegate(Some(ProtocolObject::from_ref(target)));
     window.setTabbingMode(NSWindowTabbingMode::Disallowed);
     window.setToolbarStyle(NSWindowToolbarStyle::Unified);
     let toolbar = NSToolbar::initWithIdentifier(NSToolbar::alloc(mtm), &ns("TagwerkSettingsToolbar"));
@@ -620,6 +684,10 @@ fn build(on_change: fn()) -> State {
         db,
         settings,
         login,
+        notify_icon,
+        notify_status,
+        notify_button,
+        notify_note,
         frame_from,
         frame_to,
         weekly,
@@ -634,6 +702,10 @@ fn build(on_change: fn()) -> State {
         error,
         on_change,
     };
+    // Bis zur Antwort der Mitteilungszentrale der letzte bekannte Stand (sonst leer).
+    if let Some(p) = notify::last_permission() {
+        state.set_permission(p);
+    }
     if let Some(e) = err {
         state.show_error(&format!("Die Datenbank konnte nicht gelesen werden: {e}"));
     }
@@ -662,11 +734,14 @@ pub fn show(on_change: fn()) {
         NSApplication::sharedApplication(mtm()).activateIgnoringOtherApps(true);
         s.window.makeKeyAndOrderFront(None);
     });
+    // Falls das Fenster schon aktiv war (dann kommt kein windowDidBecomeKey).
+    refresh_permission();
 }
 
 /// Zum Testen: Fenster „Einstellungen“ mit dem Stand der Datenbank öffnen, ein Bild
 /// speichern und beenden (`Tagwerk --settings-screenshot <png>`; Symbolsatz zur Ansicht
-/// über `TAGWERK_ICON_SET=0|1|2`, Erscheinungsbild über `TAGWERK_APPEARANCE=dark`).
+/// über `TAGWERK_ICON_SET=0|1|2`, Erscheinungsbild über `TAGWERK_APPEARANCE=dark`, Stand der
+/// Mitteilungen über `TAGWERK_NOTIFICATIONS=allowed|denied|hidden|undetermined`).
 /// Es wird nichts gespeichert.
 pub fn screenshot(path: &std::path::Path) -> Result<(), String> {
     let mtm = MainThreadMarker::new().ok_or("Das Fenster muss im Hauptthread laufen.")?;
@@ -683,6 +758,14 @@ pub fn screenshot(path: &std::path::Path) -> Result<(), String> {
             s.settings.icon_set = IconSet::from_id(id);
         }
         s.fill();
+        let permission = match std::env::var("TAGWERK_NOTIFICATIONS").as_deref() {
+            Ok("allowed") => Permission::Allowed,
+            Ok("denied") => Permission::Denied,
+            Ok("hidden") => Permission::Hidden,
+            Ok("undetermined") => Permission::NotDetermined,
+            _ => Permission::Unavailable,
+        };
+        s.set_permission(permission);
         s.window.orderFront(None);
     });
     let window = with_state(|s| s.window.clone()).ok_or("kein Fenster")?;

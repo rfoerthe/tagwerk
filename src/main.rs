@@ -24,6 +24,8 @@ mod login_item;
 #[cfg(target_os = "macos")]
 mod menubar;
 #[cfg(target_os = "macos")]
+mod notify;
+#[cfg(target_os = "macos")]
 mod records;
 mod rules;
 #[cfg(target_os = "macos")]
