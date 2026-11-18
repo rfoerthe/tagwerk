@@ -6,6 +6,14 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+## [1.2.0] - 2026-11-18
+
+### Zusammenfassung
+Telefonate, Meetings und Termine bei gesperrtem Mac zählen jetzt als Arbeitszeit:
+„Ohne Mac weiterarbeiten“ in der Menüleiste, nachträglich per Klick in der
+Wochenansicht oder im Fenster „Aufzeichnungen“. Die Datenbank wird dafür auf Schema 3
+erweitert – ältere Tagwerk-Versionen können sie danach nicht mehr öffnen.
+
 ### Hinzugefügt
 - **Arbeit ohne Mac:** Telefonate, Meetings oder Termine bei gesperrtem Mac zählen jetzt
   als Arbeitszeit. Sie liegen als eigene Korrektur über den erfassten Perioden und lassen
@@ -135,6 +143,7 @@ als Markdown. Alle Daten bleiben lokal auf dem Mac.
   notarisiert es und installiert sie auf Wunsch nach `/Applications`.
 - `github-release.sh` veröffentlicht ein geprüftes DMG als Release auf GitHub.
 
-[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.1.0...HEAD
+[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/rfoerthe/tagwerk/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/rfoerthe/tagwerk/compare/v1.0.0...v1.1.0
 [1.0.0]: https://github.com/rfoerthe/tagwerk/releases/tag/v1.0.0
