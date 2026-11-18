@@ -228,12 +228,6 @@ define_class!(
             open_records(records::Open::Day(now().date()));
         }
 
-        #[unsafe(method(showWeek:))]
-        /// „Wochenansicht …“: „Aufzeichnungen“ in der Ansicht „Woche“ mit der aktuellen Woche.
-        fn show_week(&self, _sender: Option<&AnyObject>) {
-            open_records(records::Open::Week);
-        }
-
         #[unsafe(method(showSettings:))]
         fn show_settings(&self, _sender: Option<&AnyObject>) {
             settings_window::show(settings_changed);
@@ -393,8 +387,7 @@ fn remove_work_block(date: chrono::NaiveDate, from: i64, to: i64) {
 }
 
 /// Öffnet das Fenster „Aufzeichnungen“ (oder holt es nach vorn): in der zuletzt benutzten
-/// Ansicht, mit einem Tag oder in der Wochenansicht. Vorher speichern, damit es den
-/// aktuellen Stand zeigt.
+/// Ansicht oder mit einem Tag. Vorher speichern, damit es den aktuellen Stand zeigt.
 fn open_records(open: records::Open) {
     let status = with_state(|s| {
         let t = now();
@@ -1090,7 +1083,6 @@ pub fn run() {
         controller: controller.clone(),
     };
     let records = menu_item(mtm, "Aufzeichnungen …", Some(sel!(showRecords:)), "a", &controller);
-    let week = menu_item(mtm, "Wochenansicht …", Some(sel!(showWeek:)), "w", &controller);
     let settings = menu_item(mtm, "Einstellungen …", Some(sel!(showSettings:)), ",", &controller);
     let about = menu_item(mtm, "Über Tagwerk", Some(sel!(showAbout:)), "", &controller);
     let quit = menu_item(mtm, "Tagwerk beenden", Some(sel!(quit:)), "q", &controller);
@@ -1106,7 +1098,6 @@ pub fn run() {
         (&items.close, "moon", "Feierabend"),
         (&items.reopen, "arrow.uturn.backward", "Feierabend aufheben"),
         (&records, "tablecells", "Aufzeichnungen"),
-        (&week, "calendar", "Wochenansicht"),
         (&settings, "gearshape", "Einstellungen"),
         (&about, "info.circle", "Über Tagwerk"),
         (&quit, "power", "Beenden"),
@@ -1137,7 +1128,6 @@ pub fn run() {
     menu.addItem(&items.reopen);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&records);
-    menu.addItem(&week);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&settings);
     menu.addItem(&about);

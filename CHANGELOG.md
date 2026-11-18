@@ -12,9 +12,7 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   Tabelle mit Inspektor und der Woche als Kalender, ebenso das Menü „Darstellung“ mit
   „Tage“ (⌘1) und „Woche“ (⌘2); „Heute“ (⌘T) springt zur aktuellen Woche. Das Fenster
   öffnet in der zuletzt benutzten Ansicht.
-- „Wochenansicht …“ in der Menüleiste (⌘W) öffnet „Aufzeichnungen“ direkt in der Ansicht
-  „Woche“ mit der aktuellen Woche. Ein Wechsel von „Tage“ zu „Woche“ zeigt die Woche des
-  ausgewählten Tags.
+- Ein Wechsel von „Tage“ zu „Woche“ zeigt die Woche des ausgewählten Tags.
 - In der Ansicht „Woche“ ersetzt die Wochenleiste (‹ › Heute, Kalenderwoche, Hinweise,
   Wochensumme) die Übersichtskarten; die Fußzeile bleibt.
 - Auch eigenständig (`Tagwerk --records`) gibt es die Wochenansicht; Arbeit ohne Mac
@@ -24,6 +22,8 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   eintragen“ sofort (bisher erst nach der Doppelklick-Zeit).
 
 ### Entfernt
+- Der Menüpunkt „Wochenansicht …“ (⌘W) in der Menüleiste; die Woche ist über
+  „Aufzeichnungen …“ und den Umschalter „Tage | Woche“ erreichbar.
 - Der Doppelklick auf einen Tag in der Wochenansicht (öffnete den Tag im Fenster
   „Aufzeichnungen“).
 

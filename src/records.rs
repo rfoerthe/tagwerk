@@ -401,8 +401,6 @@ pub enum Open {
     Last,
     /// In der Ansicht „Tage“ mit diesem Tag.
     Day(NaiveDate),
-    /// In der Ansicht „Woche“ mit der aktuellen Woche.
-    Week,
 }
 
 /// Verbindung zur Menüleisten-App.
@@ -2274,9 +2272,8 @@ fn build(shot: bool) -> Ui {
 }
 
 /// Öffnet das Fenster „Aufzeichnungen“ in der Menüleisten-App oder holt es nach vorn:
-/// in der zuletzt benutzten Ansicht, mit einem Tag in „Tage“ oder mit der aktuellen Woche
-/// in „Woche“. `status` ist der Zustand der Erfassung, `embed` die Verbindung zur
-/// Menüleisten-App.
+/// in der zuletzt benutzten Ansicht oder mit einem Tag in „Tage“. `status` ist der Zustand
+/// der Erfassung, `embed` die Verbindung zur Menüleisten-App.
 pub fn show(open: Open, status: Status, embed: Embed) {
     EMBED.with(|c| c.set(Some(embed)));
     // Mit Fenster gehört Tagwerk ins Dock und in den App-Umschalter (⌘⇥), und die
@@ -2290,12 +2287,6 @@ pub fn show(open: Open, status: Status, embed: Embed) {
     let today = now().date();
     match open {
         Open::Day(d) => open_day(d),
-        Open::Week => {
-            set_mode(Mode::Week, false);
-            if let Some(snap) = (embed.week)() {
-                week_view::show_week_of(snap, today);
-            }
-        }
         Open::Last => {
             let mode = if fresh { stored_mode() } else { mode() };
             set_mode(mode, false);

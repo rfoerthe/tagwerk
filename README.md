@@ -108,10 +108,8 @@ Stift.
 
 Die Ansicht **Woche** im Fenster „Aufzeichnungen“ zeigt eine Kalenderwoche wie einen
 Kalender: je Tag eine Spalte, jeder Arbeitsabschnitt ein Block von Beginn bis Ende – das
-Ergebnis aus automatischer Erfassung und manuellen Korrekturen. „Wochenansicht …“ in der
-Menüleiste (⌘W bei geöffnetem Menü) öffnet „Aufzeichnungen“ direkt in dieser Ansicht mit
-der aktuellen Woche; ein Wechsel von „Tage“ zu „Woche“ zeigt die Woche des ausgewählten
-Tags. In der Menüleisten-App enthält die Woche auch den gerade laufenden Abschnitt.
+Ergebnis aus automatischer Erfassung und manuellen Korrekturen. Ein Wechsel von „Tage“
+zu „Woche“ zeigt die Woche des ausgewählten Tags. In der Menüleisten-App enthält die Woche auch den gerade laufenden Abschnitt.
 
 - Blättern mit ‹ › oder den Pfeiltasten, **Heute** (⌘T) springt zur aktuellen Woche.
 - Jeder Tageskopf zeigt Arbeitszeit und Pausen des Tages, die Kopfzeile Arbeitszeit,
