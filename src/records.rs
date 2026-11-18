@@ -11,7 +11,7 @@
 //! `Tagwerk --records` öffnet das Fenster ohne Menüleisten-App ([`run`]).
 
 use crate::about;
-use crate::day::{fmt_clock, secs_of, Day, DayRecord, Span, DAY_END};
+use crate::day::{fmt_clock, secs_of, Activity, Day, DayRecord, Span, DAY_END};
 use crate::rules::{self, Settings, Warning};
 use crate::settings_window;
 use crate::store::{self, Status};
@@ -66,6 +66,17 @@ fn fmt_dur(secs: i64) -> String {
     } else {
         store::fmt_hm(secs)
     }
+}
+
+/// Fehlertext, wenn Arbeit ohne Mac kürzer als die Mindestdauer `min_work` ist.
+pub(crate) fn min_work_text(min_work: i64) -> String {
+    format!("Arbeit ohne Mac dauert mindestens {} Min. (siehe Einstellungen).", min_work / 60)
+}
+
+/// Dauer zwischen den angezeigten Uhrzeiten (ohne Sekunden): `17:00:19 – 17:30` ergibt
+/// 30 Min. wie angezeigt, nicht 29.
+pub(crate) fn shown_len(from: i64, to: i64) -> i64 {
+    (to / 60 - from / 60).max(0) * 60
 }
 
 fn plural(n: usize, one: &str, many: &str) -> String {
@@ -165,6 +176,17 @@ fn checkbox(title: &str, on: bool, action: Sel, target: &Controller) -> Retained
 
 /// Uhrzeit-Feld (Stunde:Minute) mit Pfeiltasten für den Tag `date`; heute nicht in der Zukunft.
 fn time_picker(date: NaiveDate, secs: i64, action: Sel, target: &Controller) -> Retained<NSDatePicker> {
+    let p = time_field(date, secs);
+    unsafe {
+        p.setTarget(Some(target));
+        p.setAction(Some(action));
+    }
+    p
+}
+
+/// Uhrzeit-Feld (Stunde:Minute) mit Pfeiltasten für den Tag `date`, ohne Aktion; heute nicht
+/// in der Zukunft (auch für die Wochenansicht).
+pub(crate) fn time_field(date: NaiveDate, secs: i64) -> Retained<NSDatePicker> {
     let p = NSDatePicker::new(mtm());
     p.setDatePickerStyle(NSDatePickerStyle::TextFieldAndStepper);
     p.setDatePickerElements(NSDatePickerElementFlags::HourMinute);
@@ -177,16 +199,43 @@ fn time_picker(date: NaiveDate, secs: i64, action: Sel, target: &Controller) -> 
     p.setMinDate(Some(&to_nsdate(min)));
     p.setMaxDate(Some(&to_nsdate(max)));
     p.setDateValue(&to_nsdate(at(date, secs).clamp(min, max)));
-    unsafe {
-        p.setTarget(Some(target));
-        p.setAction(Some(action));
-    }
     p
 }
 
-/// Sekunden seit Mitternacht aus einem Uhrzeit-Feld.
-fn picker_secs(p: &NSDatePicker) -> Option<i64> {
-    from_nsdate(&p.dateValue()).map(|t| secs_of(t.time()))
+/// Sekunden seit Mitternacht aus einem Uhrzeit-Feld, auf die angezeigte Minute abgerundet
+/// (ein Vorschlag mit Sekunden, z. B. das Ende einer Pause, behält sonst seine Sekunden).
+pub(crate) fn picker_secs(p: &NSDatePicker) -> Option<i64> {
+    from_nsdate(&p.dateValue()).map(|t| secs_of(t.time()) / 60 * 60)
+}
+
+/// Hinweis als Sheet am Fenster `window` (nur „OK“; auch für die Wochenansicht).
+pub(crate) fn show_info_sheet(window: &NSWindow, title: &str, text: &str) {
+    if window.attachedSheet().is_some() {
+        return;
+    }
+    let alert = NSAlert::new(mtm());
+    alert.setMessageText(&ns(title));
+    alert.setInformativeText(&ns(text));
+    alert.addButtonWithTitle(&ns("OK"));
+    alert.beginSheetModalForWindow_completionHandler(window, None);
+}
+
+/// Auswahlbox für den Grund von Arbeit ohne Mac (auch für die Wochenansicht).
+pub(crate) fn activity_popup(selected: Activity) -> Retained<NSPopUpButton> {
+    let p = NSPopUpButton::new(mtm());
+    for a in Activity::ALL {
+        p.addItemWithTitle(&ns(a.label()));
+        if let Some(item) = p.lastItem() {
+            item.setTag(a.id());
+        }
+    }
+    p.selectItemWithTag(selected.id());
+    p
+}
+
+/// Gewählter Grund in einer [`activity_popup`].
+pub(crate) fn popup_activity(p: &NSPopUpButton) -> Activity {
+    Activity::from_id(p.selectedTag())
 }
 
 fn pin_width(view: &NSView, to: &NSView, inset: f64) {
@@ -212,7 +261,7 @@ struct Inspector {
     break_to: Retained<NSDatePicker>,
     work_from: Retained<NSDatePicker>,
     work_to: Retained<NSDatePicker>,
-    work_note: Retained<NSTextField>,
+    work_reason: Retained<NSPopUpButton>,
     error: Retained<NSTextField>,
 }
 
@@ -575,11 +624,28 @@ define_class!(
         fn add_work(&self, _sender: Option<&AnyObject>) {
             let input = model(|m| {
                 m.inspector.as_ref().map(|i| {
-                    (picker_secs(&i.work_from), picker_secs(&i.work_to), i.work_note.stringValue().to_string())
+                    (picker_secs(&i.work_from), picker_secs(&i.work_to), popup_activity(&i.work_reason).note().to_string())
                 })
             });
+            let min_work = model(|m| m.settings.min_work);
             match input {
-                Some((Some(from), Some(to), note)) if to > from => apply(Edit::AddWork(from, to, note), true),
+                Some((Some(from), Some(to), _)) if to > from && shown_len(from, to) < min_work => {
+                    show_inspector_error(&min_work_text(min_work))
+                }
+                Some((Some(from), Some(to), note)) if to > from => {
+                    // Kurze Lücken zu benachbarter Arbeit ohne Mac gehören zum neuen Abschnitt.
+                    let (span, hint) = model(|m| {
+                        let date = m.inspector.as_ref()?.date;
+                        let min = m.settings.min_pause;
+                        let j = m.day(date)?.join_work_gaps(from, to, min);
+                        Some((j.span, j.note(min)))
+                    })
+                    .unwrap_or((Span::new(from, to), None));
+                    apply(Edit::AddWork(span.from, span.to, note), true);
+                    if let Some(text) = hint {
+                        show_info_sheet(&ui().window, "Lücke dazugerechnet", &text);
+                    }
+                }
                 Some((Some(_), Some(_), _)) => {
                     show_inspector_error("Das Ende der Arbeit ohne Mac muss nach ihrem Beginn liegen.")
                 }
@@ -1059,7 +1125,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         row.setAlignment(NSLayoutAttribute::CenterY);
         let times = label(&format!("{} – {}", fmt_clock(b.from), fmt_clock(b.to)));
         times.setFont(Some(&font_digits(NSFont::systemFontSize(), font_regular())));
-        let dur = label(&fmt_dur(b.to - b.from));
+        let dur = label(&fmt_dur(shown_len(b.from, b.to)));
         dur.setFont(Some(&font_digits(NSFont::systemFontSize(), font_regular())));
         dur.setTextColor(Some(&NSColor::secondaryLabelColor()));
         let remove = match symbol("minus.circle.fill", "Pause entfernen") {
@@ -1121,7 +1187,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         row.setAlignment(NSLayoutAttribute::CenterY);
         let times = label(&format!("{} – {}", fmt_clock(w.from), fmt_clock(w.to)));
         times.setFont(Some(&font_digits(NSFont::systemFontSize(), font_regular())));
-        let dur = label(&fmt_dur(w.to - w.from));
+        let dur = label(&fmt_dur(shown_len(w.from, w.to)));
         dur.setFont(Some(&font_digits(NSFont::systemFontSize(), font_regular())));
         dur.setTextColor(Some(&NSColor::secondaryLabelColor()));
         let note = label(&w.note);
@@ -1167,15 +1233,13 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     row.addArrangedSubview(&work_to);
     stack.addArrangedSubview(&row);
     stack.setCustomSpacing_afterView(6.0, &row);
-    let work_note = NSTextField::textFieldWithString(&ns(""), mtm());
-    work_note.setPlaceholderString(Some(&ns("Notiz, z. B. Telefonat")));
+    let work_reason = activity_popup(Activity::Meeting);
+    work_reason.setToolTip(Some(&ns("Grund")));
     let add = button("Hinzufügen", sel!(addWork:), target);
     let row = hstack(6.0);
-    row.addArrangedSubview(&work_note);
+    row.addArrangedSubview(&work_reason);
     row.addArrangedSubview(&add);
     stack.addArrangedSubview(&row);
-    pin_width(&row, stack, 40.0);
-    work_note.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
 
     // Feierabend
     let row_view: Retained<NSView> = Retained::into_super(row);
@@ -1223,7 +1287,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         let times = label(&format!("{} – {}", fmt_clock(p.from), fmt_clock(p.to)));
         times.setFont(Some(&font_digits(NSFont::systemFontSize(), font_regular())));
         times.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        let dur = label(&fmt_dur(p.len()));
+        let dur = label(&fmt_dur(shown_len(p.from, p.to)));
         dur.setFont(Some(&font_digits(NSFont::systemFontSize(), font_regular())));
         dur.setTextColor(Some(&NSColor::tertiaryLabelColor()));
         row.addArrangedSubview(&times);
@@ -1248,7 +1312,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
             break_to,
             work_from,
             work_to,
-            work_note,
+            work_reason,
             error,
         });
     });

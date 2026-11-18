@@ -239,7 +239,7 @@ define_class!(
                 s.week_snapshot(t)
             });
             if let Some(snap) = snap {
-                week_window::show(snap, open_day_in_records, count_gap_as_work, remove_work_block);
+                week_window::show(snap, open_day_in_records, add_work_block, remove_work_block);
             }
         }
 
@@ -377,8 +377,8 @@ fn open_day_in_records(date: chrono::NaiveDate) {
     open_records(Some(date));
 }
 
-/// Klick auf eine Pause in der Wochenansicht: als Arbeitszeit zählen.
-fn count_gap_as_work(date: chrono::NaiveDate, from: i64, to: i64, activity: Activity) {
+/// Dialog in der Wochenansicht: Arbeit ohne Mac eintragen.
+fn add_work_block(date: chrono::NaiveDate, from: i64, to: i64, activity: Activity) {
     act(|s, _| s.tracker.add_work(date, from, to, activity.note()));
 }
 
@@ -1030,14 +1030,17 @@ pub fn run() {
     start_sub.addItem(&start_reset);
     let (close, _) = time_menu(mtm, "Feierabend", sel!(closeDay:), &[0, 15, 30], &controller, &mut relative);
 
-    // Ohne Mac weiterarbeiten: Meeting, Telefonat, Sonstiges
+    // Ohne Mac weiterarbeiten: Meeting, Telefonat, Networking, Sonstiges
     let away_sub = NSMenu::new(mtm);
     away_sub.setAutoenablesItems(false);
-    for (activity, title, symbol) in [
-        (Activity::Meeting, "Meeting", "person.2"),
-        (Activity::Call, "Telefonat", "phone"),
-        (Activity::Other, "Sonstiges", "ellipsis.circle"),
-    ] {
+    for activity in Activity::ALL {
+        let title = activity.label();
+        let symbol = match activity {
+            Activity::Meeting => "person.2",
+            Activity::Call => "phone",
+            Activity::Networking => "person.3",
+            Activity::Other => "ellipsis.circle",
+        };
         let it = menu_item(mtm, title, Some(sel!(goAway:)), "", &controller);
         it.setTag(activity.id());
         set_item_symbol(&it, symbol, title);

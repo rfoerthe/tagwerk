@@ -13,7 +13,7 @@
 use crate::day::{secs_of, DAY_END};
 use crate::glyphs;
 use crate::login_item;
-use crate::rules::{self, IconSet, Settings, MIN_PAUSE_RANGE, WEEKLY_RANGE};
+use crate::rules::{self, IconSet, Settings, MIN_PAUSE_RANGE, MIN_WORK_MAX, WEEKLY_RANGE};
 use crate::store;
 use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, TimeZone};
 use objc2::rc::Retained;
@@ -59,6 +59,8 @@ struct State {
     weekly_stepper: Retained<NSStepper>,
     pause: Retained<NSTextField>,
     pause_stepper: Retained<NSStepper>,
+    work: Retained<NSTextField>,
+    work_stepper: Retained<NSStepper>,
     daily_note: Retained<NSTextField>,
     icon_popup: Retained<NSPopUpButton>,
     icon_preview: Vec<Retained<NSImageView>>,
@@ -168,6 +170,24 @@ define_class!(
             save();
         }
 
+        #[unsafe(method(workChanged:))]
+        fn work_changed(&self, _sender: Option<&AnyObject>) {
+            with_state(|s| {
+                let value = s.work.stringValue().to_string().trim().parse::<i64>().ok().map(|m| m * 60);
+                s.set_work(value);
+            });
+            save();
+        }
+
+        #[unsafe(method(workStepped:))]
+        fn work_stepped(&self, _sender: Option<&AnyObject>) {
+            with_state(|s| {
+                let value = s.work_stepper.integerValue() as i64 * 60;
+                s.set_work(Some(value));
+            });
+            save();
+        }
+
         /// Knopf in der Titelleiste: Datenordner im Finder öffnen.
         #[unsafe(method(openDataFolder:))]
         fn open_data_folder(&self, _sender: Option<&AnyObject>) {
@@ -230,6 +250,9 @@ impl State {
         self.weekly_stepper.setDoubleValue(s.weekly_target as f64 / 3600.0);
         self.pause.setStringValue(&ns(&(s.min_pause / 60).to_string()));
         self.pause_stepper.setIntegerValue((s.min_pause / 60) as isize);
+        self.work.setStringValue(&ns(&(s.min_work / 60).to_string()));
+        self.work_stepper.setMinValue((s.min_pause / 60) as f64);
+        self.work_stepper.setIntegerValue((s.min_work / 60) as isize);
         self.daily_note.setStringValue(&ns(&format!(
             "Das sind {} pro Arbeitstag (Montag bis Freitag).",
             store::fmt_hm(s.daily_target_workday())
@@ -259,12 +282,29 @@ impl State {
         match value {
             Some(v) if (MIN_PAUSE_RANGE.0..=MIN_PAUSE_RANGE.1).contains(&v) => {
                 self.settings.min_pause = v;
+                // Arbeit ohne Mac darf nicht kürzer als die Mindestpause sein.
+                self.settings.min_work = self.settings.min_work.max(v);
                 self.error.setHidden(true);
             }
             _ => self.show_error(&format!(
                 "Die Mindestpause muss zwischen {} und {} Minuten liegen.",
                 MIN_PAUSE_RANGE.0 / 60,
                 MIN_PAUSE_RANGE.1 / 60
+            )),
+        }
+    }
+
+    fn set_work(&mut self, value: Option<i64>) {
+        let min = self.settings.min_pause;
+        match value {
+            Some(v) if (min..=MIN_WORK_MAX).contains(&v) => {
+                self.settings.min_work = v;
+                self.error.setHidden(true);
+            }
+            _ => self.show_error(&format!(
+                "Arbeit ohne Mac muss mindestens {} Min. (die Mindestpause) und höchstens {} Min. dauern.",
+                min / 60,
+                MIN_WORK_MAX / 60
             )),
         }
     }
@@ -465,6 +505,8 @@ fn build(on_change: fn()) -> State {
         (MIN_PAUSE_RANGE.1 / 60) as f64,
         1.0,
     );
+    let work = number_field(target, sel!(workChanged:));
+    let work_stepper = stepper(target, sel!(workStepped:), (MIN_PAUSE_RANGE.0 / 60) as f64, (MIN_WORK_MAX / 60) as f64, 5.0);
     let daily_note = caption("");
     let icon_popup = icon_popup(target);
     let (preview_row, icon_preview) = icon_preview();
@@ -483,6 +525,7 @@ fn build(on_change: fn()) -> State {
     let frame_row = hstack(&[&frame_from, &label("bis"), &frame_to, &label("Uhr")]);
     let weekly_row = hstack(&[&weekly, &weekly_stepper, &label("Stunden pro Woche")]);
     let pause_row = hstack(&[&pause, &pause_stepper, &label("Minuten")]);
+    let work_row = hstack(&[&work, &work_stepper, &label("Minuten")]);
     let empty = || NSGridCell::emptyContentView(mtm);
     let rows: Vec<Retained<NSArray<NSView>>> = vec![
         NSArray::from_retained_slice(&[view(&label("Allgemein:")), view(&login)]),
@@ -503,6 +546,14 @@ fn build(on_change: fn()) -> State {
                  Nach dem Arbeitszeitgesetz zählen Pausen erst ab 15 Minuten.",
             )),
         ]),
+        NSArray::from_retained_slice(&[view(&label("Arbeit ohne Mac:")), view(&work_row)]),
+        NSArray::from_retained_slice(&[
+            empty(),
+            view(&caption(
+                "Mindestdauer beim Eintragen; kürzere Abschnitte werden abgelehnt. Nie weniger als \
+                 die Mindestpause – wird sie erhöht, steigt dieser Wert mit.",
+            )),
+        ]),
         NSArray::from_retained_slice(&[view(&label("Menüleiste:")), view(&icon_popup)]),
         NSArray::from_retained_slice(&[empty(), view(&preview_row)]),
         NSArray::from_retained_slice(&[
@@ -517,13 +568,13 @@ fn build(on_change: fn()) -> State {
     grid.setColumnSpacing(8.0);
     grid.setRowSpacing(4.0);
     grid.columnAtIndex(0).setXPlacement(NSGridCellPlacement::Trailing);
-    for r in [1, 3, 5, 7, 11] {
+    for r in [1, 3, 5, 7, 9, 13] {
         grid.rowAtIndex(r).setTopPadding(14.0);
     }
     // Bilder haben keine Grundlinie
-    grid.rowAtIndex(8).setRowAlignment(NSGridRowAlignment::None);
-    grid.rowAtIndex(8).setTopPadding(6.0);
-    grid.rowAtIndex(8).setBottomPadding(2.0);
+    grid.rowAtIndex(10).setRowAlignment(NSGridRowAlignment::None);
+    grid.rowAtIndex(10).setTopPadding(6.0);
+    grid.rowAtIndex(10).setBottomPadding(2.0);
     grid.setTranslatesAutoresizingMaskIntoConstraints(false);
 
     let size = grid.fittingSize();
@@ -575,6 +626,8 @@ fn build(on_change: fn()) -> State {
         weekly_stepper,
         pause,
         pause_stepper,
+        work,
+        work_stepper,
         daily_note,
         icon_popup,
         icon_preview,

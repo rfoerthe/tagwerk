@@ -70,7 +70,7 @@ im Fenster „Aufzeichnungen“.
   Arbeitszeit. Beim Beenden der App (z. B. für ein Update) bleibt die Pause bestehen,
   beim Abmelden oder Neustarten des Macs endet sie.
 - **Ohne Mac weiterarbeiten** – vor einem Meeting, Telefonat oder Termin wählen
-  (Meeting, Telefonat oder Sonstiges). Die Zeit zählt dann als Arbeitszeit, auch wenn
+  (Meeting, Telefonat, Networking oder Sonstiges). Die Zeit zählt dann als Arbeitszeit, auch wenn
   der Mac gesperrt wird oder in den Ruhezustand geht – bis zum nächsten Entsperren oder
   „Zurück am Mac“, spätestens um Mitternacht oder mit dem Feierabend. Sie erscheint als
   „Arbeit ohne Mac“ mit der gewählten Notiz. Beim Beenden der App bleibt der Zustand
@@ -89,9 +89,14 @@ den Monat und den Durchschnitt pro Arbeitstag, einer Tabelle aller Tage mit Sald
 Wochensummen sowie einem **Inspektor**. Dort lassen sich Arbeitsbeginn, Pausen, Arbeit
 ohne Mac und Feierabend eines Tages korrigieren – auch für Tage ohne Aufzeichnung.
 **Arbeit ohne Mac** (Telefonat, Meeting … bei gesperrtem Mac) zählt als Arbeitszeit,
-mit optionaler Notiz; eine manuelle Pause in dieser Zeit entfällt und umgekehrt. Bleibt
-dabei eine Lücke kürzer als die Mindestpause, zählt sie wie eine kurze Sperre mit. Tage mit
-Regelverstößen tragen ein Warnsymbol, manuell korrigierte Tage einen Stift.
+mit einem Grund aus der Auswahlbox (Meeting, Telefonat, Networking, Sonstiges); eine
+manuelle Pause in dieser Zeit entfällt und umgekehrt. Bleibt dabei eine Lücke kürzer als
+die Mindestpause, zählt sie wie eine kurze Sperre mit. Aufeinanderfolgende Einträge bleiben
+eigene Abschnitte; ist die Lücke zur benachbarten Arbeitszeit (erfasst oder Arbeit ohne
+Mac) kürzer als die Mindestpause, wird sie dem neuen Abschnitt dazugerechnet (mit Hinweis).
+Ein Abschnitt dauert mindestens so lange wie in den Einstellungen festgelegt (Standard
+15 Min.). Tage mit Regelverstößen tragen ein Warnsymbol, manuell korrigierte Tage einen
+Stift.
 
 ### Wochenansicht
 
@@ -110,10 +115,17 @@ aus automatischer Erfassung und manuellen Korrekturen.
 - Tage mit Regelverstößen tragen ein Warnschild; ein Klick auf den Tageskopf zeigt die
   Hinweise.
 - Arbeit außerhalb des Arbeitszeitrahmens erscheint orange als „nicht gezählt“.
-- Arbeit ohne Mac ist schraffiert; der Tooltip nennt Uhrzeit und Notiz. Ein Klick auf
-  die Schraffur bietet an, sie zu löschen – dort entsteht dann wieder eine Pause.
-- Ein Klick auf eine Pause zwischen zwei Blöcken bietet an, sie als Arbeitszeit, Meeting
-  oder Telefonat zu zählen.
+- Arbeit ohne Mac ist schraffiert und, wenn Platz ist, dezent mit der Art beschriftet
+  (Meeting, Telefonat …); der Tooltip nennt Uhrzeit und Notiz. Ein Klick auf
+  die Schraffur bietet an, sie zu löschen. Danach gilt dort wieder, was erfasst ist: War
+  der Mac gesperrt, ist es eine Pause, war er entsperrt, Arbeitszeit. Eine manuelle Pause,
+  die die Arbeit ohne Mac beim Eintragen gekürzt hat, kommt nicht zurück.
+- Ein Klick auf einen freien Bereich öffnet den Dialog „Arbeit ohne Mac eintragen“ mit
+  Beginn, Ende und Grund (Meeting, Telefonat, Networking, Sonstiges). In einer Pause ist
+  die ganze Pause vorgeschlagen, vor dem Arbeitsbeginn und nach dem Feierabend eine halbe
+  Stunde ab dem Klick. Fährt die Maus über einen freien Bereich, zeigt ein Rahmen genau
+  diesen Vorschlag. Zukünftige Zeiten lassen sich nicht eintragen; ein Doppelklick
+  öffnet weiterhin den Tag im Fenster „Aufzeichnungen“.
 
 <details>
 <summary>Weitere Ansichten</summary>
@@ -142,6 +154,7 @@ Titelleiste zeigt den Datenordner im Finder.
 | Arbeitszeitrahmen     | Nur Mo–Fr in diesem Zeitraum wird Arbeitszeit bzw. Pause gezählt        | 07:00–22:00 Uhr |
 | Regelarbeitszeit      | Wochenarbeitszeit, daraus ergibt sich das Tagessoll                     | 39 Std. (7:48 h/Tag) |
 | Mindestpause          | Ab dieser Sperrdauer gilt eine Unterbrechung als Pause                 | 15 Min.         |
+| Arbeit ohne Mac       | Mindestdauer beim Eintragen; nie kürzer als die Mindestpause           | 15 Min.         |
 | Menüleiste            | Symbolsatz für die Menüleiste, mit Vorschau aller Zustände             | Tagbogen        |
 
 Neun Symbolsätze stehen zur Wahl. Sie werden von der App selbst gezeichnet und sind
@@ -331,8 +344,9 @@ Menüleiste zeichnet die App selbst (`src/glyphs.rs`).
 
 `testdata/testdb.sh` erzeugt eine Testdatenbank, die immer bis gestern reicht: sechs
 volle Wochen plus die Tage der laufenden Woche, Wochensummen um 39 Stunden ± 10 %,
-bundesweite Feiertage frei. An rund 20 % der Tage gibt es Arbeit ohne Mac (Meeting,
-Telefonat, Sonstiges – bei gesperrtem Mac, vor dem Beginn oder nach dem Ende), dazu
+bundesweite Feiertage frei. An rund 25 % der Tage gibt es Arbeit ohne Mac (Meeting,
+Telefonat, Networking, Sonstiges – bei gesperrtem Mac, vor dem Beginn oder nach dem Ende,
+einmal auch Meeting und Telefonat direkt hintereinander als zwei Abschnitte), dazu
 einige Regelverstöße: zu kurze Ruhezeit, Arbeit vor 7 und nach 22 Uhr, zu wenig Pause.
 Datenbank und Markdown-Quelle landen in `target/testdata/` und werden bei jedem Aufruf
 neu erzeugt.
