@@ -23,12 +23,12 @@ use objc2_app_kit::{
     NSApplicationActivationPolicy, NSAttributedStringAttachmentConveniences, NSColor, NSDatePicker,
     NSDatePickerElementFlags, NSDatePickerStyle, NSFont, NSFontAttributeName, NSFontWeightRegular,
     NSFontWeightSemibold, NSForegroundColorAttributeName, NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuDelegate, NSMenuItem,
-    NSStatusBar, NSStatusItem, NSTextAttachment, NSVariableStatusItemLength,
+    NSStatusBar, NSStatusItem, NSTextAttachment, NSTextField, NSVariableStatusItemLength, NSView,
     NSWorkspace,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSDate, NSDictionary, NSDistributedNotificationCenter, NSMutableAttributedString,
-    NSNotification, NSNotificationCenter, NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSString,
+    NSNotification, NSNotificationCenter, NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
     NSTimer,
 };
 use std::cell::RefCell;
@@ -52,13 +52,13 @@ fn ns(s: &str) -> Retained<NSString> {
 }
 
 struct MenuItems {
-    status: Retained<NSMenuItem>,
-    worked: Retained<NSMenuItem>,
-    pauses: Retained<NSMenuItem>,
-    first: Retained<NSMenuItem>,
-    balance: Retained<NSMenuItem>,
+    status: InfoLine,
+    worked: InfoLine,
+    pauses: InfoLine,
+    first: InfoLine,
+    balance: InfoLine,
     /// Hinweise zu Regelverstößen (so viele, wie es Arten von Hinweisen gibt).
-    hints: Vec<Retained<NSMenuItem>>,
+    hints: Vec<InfoLine>,
     /// „Arbeit unterbrechen“, „Weiter arbeiten“ bzw. „Zurück am Mac“.
     pause: Retained<NSMenuItem>,
     /// „Ohne Mac weiterarbeiten“ (mit Untermenü Meeting, Telefonat, Sonstiges).
@@ -219,13 +219,7 @@ define_class!(
 
         #[unsafe(method(showRecords:))]
         fn show_records(&self, _sender: Option<&AnyObject>) {
-            open_records(records::Open::Last);
-        }
-
-        /// Klick auf einen Hinweis: heutigen Tag im Fenster „Aufzeichnungen“ zeigen.
-        #[unsafe(method(showToday:))]
-        fn show_today(&self, _sender: Option<&AnyObject>) {
-            open_records(records::Open::Day(now().date()));
+            open_records();
         }
 
         #[unsafe(method(showSettings:))]
@@ -388,7 +382,7 @@ fn remove_work_block(date: chrono::NaiveDate, from: i64, to: i64) {
 
 /// Öffnet das Fenster „Aufzeichnungen“ (oder holt es nach vorn): in der zuletzt benutzten
 /// Ansicht oder mit einem Tag. Vorher speichern, damit es den aktuellen Stand zeigt.
-fn open_records(open: records::Open) {
+fn open_records() {
     let status = with_state(|s| {
         let t = now();
         s.sync_from_db(t);
@@ -403,7 +397,7 @@ fn open_records(open: records::Open) {
             add_work: add_work_block,
             remove_work: remove_work_block,
         };
-        records::show(open, status, embed);
+        records::show(status, embed);
     }
 }
 
@@ -526,10 +520,7 @@ impl AppState {
         let midnight = t.date().and_hms_opt(0, 0, 0).unwrap();
 
         let (status_text, icon) = status_line(&self.tracker, t);
-        self.items.status.setAttributedTitle(Some(&status_title(&status_text, icon)));
-        if self.last_icon != Some(icon) {
-            set_item_symbol(&self.items.status, icon.symbol().0, icon.symbol().1);
-        }
+        self.items.status.set(&status_title(&status_text, icon));
         let worked = store::fmt_hm(info.work_secs);
         let target = format!("  von {}", store::fmt_hm(info.target_secs));
         let done = info.target_secs > 0 && info.work_secs >= info.target_secs;
@@ -537,25 +528,25 @@ impl AppState {
         if info.target_secs > 0 {
             parts.push((target.as_str(), Tone::Muted));
         }
-        self.items.worked.setAttributedTitle(Some(&rich(&parts)));
+        self.items.worked.set(&rich(&parts));
         let balance = rules::fmt_balance(info.week_balance);
         let tone = if info.week_balance < -59 { Tone::Bad } else { Tone::Good };
-        self.items.balance.setAttributedTitle(Some(&rich(&[("Saldo diese Woche:  ", Tone::Label), (&balance, tone)])));
+        self.items.balance.set(&rich(&[("Saldo diese Woche:  ", Tone::Label), (&balance, tone)]));
         let pauses = store::fmt_hm(info.pause_secs);
-        self.items.pauses.setAttributedTitle(Some(&rich(&[("Pausen heute:  ", Tone::Label), (&pauses, Tone::Value)])));
+        self.items.pauses.set(&rich(&[("Pausen heute:  ", Tone::Label), (&pauses, Tone::Value)]));
         let first = info.first_start.map(|f| format!("{} Uhr", fmt_clock(f)));
         let mut parts = vec![("Beginn heute:  ", Tone::Label), (first.as_deref().unwrap_or("–"), Tone::Value)];
         if info.start_manual {
             parts.push(("  (manuell)", Tone::Muted));
         }
-        self.items.first.setAttributedTitle(Some(&rich(&parts)));
-        for (i, item) in self.items.hints.iter().enumerate() {
+        self.items.first.set(&rich(&parts));
+        for (i, line) in self.items.hints.iter().enumerate() {
             match info.warnings.get(i) {
                 Some(w) => {
-                    item.setAttributedTitle(Some(&warning_title(&w.text())));
-                    item.setHidden(false);
+                    line.set(&warning_title(&w.text()));
+                    line.item.setHidden(false);
                 }
-                None => item.setHidden(true),
+                None => line.item.setHidden(true),
             }
         }
 
@@ -935,6 +926,44 @@ fn running_from_bundle() -> bool {
 
 // ---------- Aufbau ----------
 
+/// Anzeigezeile im Menü (Status, Kennzahlen und Hinweise): ein Eintrag mit eigener Ansicht statt
+/// Titel. So lässt er sich weder anklicken noch hervorheben, behält aber seine Farben –
+/// deaktivierte Einträge mit Titel graut macOS aus. Maße wie bei normalen Einträgen.
+struct InfoLine {
+    item: Retained<NSMenuItem>,
+    label: Retained<NSTextField>,
+}
+
+impl InfoLine {
+    /// Zeilenhöhe und Textposition normaler Menüeinträge (macOS 26 und neuer).
+    const HEIGHT: f64 = 24.0;
+    const LEFT: f64 = 14.0;
+    const RIGHT: f64 = 14.0;
+
+    fn new(mtm: MainThreadMarker) -> Self {
+        let label = NSTextField::labelWithString(&ns(""), mtm);
+        let view = NSView::initWithFrame(
+            NSView::alloc(mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(Self::LEFT + Self::RIGHT, Self::HEIGHT)),
+        );
+        view.addSubview(&label);
+        let item = NSMenuItem::new(mtm);
+        item.setView(Some(&view));
+        item.setEnabled(false);
+        Self { item, label }
+    }
+
+    fn set(&self, title: &NSAttributedString) {
+        self.label.setAttributedStringValue(title);
+        let size = self.label.fittingSize();
+        let y = ((Self::HEIGHT - size.height) / 2.0).round();
+        self.label.setFrame(NSRect::new(NSPoint::new(Self::LEFT, y), size));
+        if let Some(view) = self.item.view() {
+            view.setFrameSize(NSSize::new(Self::LEFT + size.width + Self::RIGHT, Self::HEIGHT));
+        }
+    }
+}
+
 fn menu_item(
     mtm: MainThreadMarker,
     title: &str,
@@ -1069,15 +1098,13 @@ pub fn run() {
     count_pause.setHidden(true);
 
     let items = MenuItems {
-        // Status und Kennzahlen sind anklickbar (öffnen den heutigen Tag), damit macOS
-        // sie nicht ausgraut – deaktivierte Einträge wären schlecht lesbar und farblos.
-        status: menu_item(mtm, "Zeiterfassung", Some(sel!(showToday:)), "", &controller),
-        worked: menu_item(mtm, "Heute gearbeitet:", Some(sel!(showToday:)), "", &controller),
-        pauses: menu_item(mtm, "Pausen heute:", Some(sel!(showToday:)), "", &controller),
-        first: menu_item(mtm, "Beginn heute:", Some(sel!(showToday:)), "", &controller),
-        balance: menu_item(mtm, "Saldo diese Woche:", Some(sel!(showToday:)), "", &controller),
-        // Anklickbar (öffnet den heutigen Tag), damit macOS die Warnfarbe nicht ausgraut.
-        hints: (0..5).map(|_| menu_item(mtm, "", Some(sel!(showToday:)), "", &controller)).collect(),
+        // Status, Kennzahlen und Hinweise sind reine Anzeige (siehe `InfoLine`).
+        status: InfoLine::new(mtm),
+        worked: InfoLine::new(mtm),
+        pauses: InfoLine::new(mtm),
+        first: InfoLine::new(mtm),
+        balance: InfoLine::new(mtm),
+        hints: (0..5).map(|_| InfoLine::new(mtm)).collect(),
         pause: menu_item(mtm, "", Some(sel!(togglePause:)), "p", &controller),
         start_reset,
         close,
@@ -1095,10 +1122,6 @@ pub fn run() {
     let quit = menu_item(mtm, "Tagwerk beenden", Some(sel!(quit:)), "q", &controller);
 
     for (item, symbol, desc) in [
-        (&items.worked, "clock", "Arbeitszeit"),
-        (&items.pauses, "cup.and.saucer", "Pausen"),
-        (&items.first, "sunrise", "Arbeitsbeginn"),
-        (&items.balance, "plusminus", "Saldo"),
         (&items.away, "figure.walk", "Ohne Mac weiterarbeiten"),
         (&items.count_pause, "arrow.uturn.backward.circle", "Pause als Arbeitszeit zählen"),
         (&start_item, "sunrise", "Arbeitsbeginn"),
@@ -1111,19 +1134,11 @@ pub fn run() {
     ] {
         set_item_symbol(item, symbol, desc);
     }
-    for item in [&items.status, &items.worked, &items.pauses, &items.first, &items.balance]
+    for line in [&items.status, &items.worked, &items.pauses, &items.first, &items.balance]
         .into_iter()
         .chain(&items.hints)
     {
-        item.setToolTip(Some(&ns("Im Fenster „Aufzeichnungen“ zeigen")));
-    }
-    menu.addItem(&items.status);
-    menu.addItem(&items.worked);
-    menu.addItem(&items.pauses);
-    menu.addItem(&items.first);
-    menu.addItem(&items.balance);
-    for item in &items.hints {
-        menu.addItem(item);
+        menu.addItem(&line.item);
     }
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&items.pause);

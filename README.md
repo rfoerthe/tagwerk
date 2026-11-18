@@ -57,8 +57,8 @@ festlegen oder korrigieren.
 Das Menü zeigt auf einen Blick den Status, die Arbeitszeit von heute samt Soll, die
 Pausen, den Beginn, den Saldo der Woche und Hinweise auf Regelverstöße. Der Status ist
 farbig – **grün** = läuft, **orange** = Pause, **indigo** = Feierabend –, der Saldo
-grün im Plus und rot im Minus. Ein Klick auf eine dieser Zeilen öffnet den heutigen Tag
-im Fenster „Aufzeichnungen“.
+grün im Plus und rot im Minus. Diese Zeilen sind reine Anzeige und lassen sich nicht
+anklicken.
 
 - **Pausen ohne Zutun** – jede Sperre ab der eingestellten Mindestdauer (Standard
   15 Minuten) ist eine Pause, egal ob Mittags- oder Kaffeepause. Kürzere Sperren zählen

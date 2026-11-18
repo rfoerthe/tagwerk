@@ -7,6 +7,10 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 ## [Unveröffentlicht]
 
 ### Geändert
+- Status, Kennzahlen (Heute gearbeitet, Pausen heute, Beginn heute, Saldo diese Woche)
+  und Hinweise auf Regelverstöße im Menü sind reine Anzeigefelder: Sie lassen sich nicht
+  mehr anklicken und werden beim Überfahren nicht hervorgehoben; Farben und Schrift
+  bleiben gleich. Bisher öffnete ein Klick den heutigen Tag im Fenster „Aufzeichnungen“.
 - Die Wochenansicht ist jetzt Teil des Fensters „Aufzeichnungen“ statt eines eigenen
   Fensters. Der Umschalter „Tage | Woche“ in der Symbolleiste wechselt zwischen der
   Tabelle mit Inspektor und der Woche als Kalender, ebenso das Menü „Darstellung“ mit

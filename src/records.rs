@@ -390,15 +390,6 @@ enum Mode {
     Week,
 }
 
-/// Wie das Fenster geöffnet wird.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub enum Open {
-    /// In der zuletzt benutzten Ansicht.
-    Last,
-    /// In der Ansicht „Tage“ mit diesem Tag.
-    Day(NaiveDate),
-}
-
 /// Verbindung zur Menüleisten-App.
 #[derive(Clone, Copy)]
 pub struct Embed {
@@ -2267,10 +2258,10 @@ fn build(shot: bool) -> Ui {
     ui
 }
 
-/// Öffnet das Fenster „Aufzeichnungen“ in der Menüleisten-App oder holt es nach vorn:
-/// in der zuletzt benutzten Ansicht oder mit einem Tag in „Tage“. `status` ist der Zustand
-/// der Erfassung, `embed` die Verbindung zur Menüleisten-App.
-pub fn show(open: Open, status: Status, embed: Embed) {
+/// Öffnet das Fenster „Aufzeichnungen“ in der Menüleisten-App (in der zuletzt benutzten
+/// Ansicht) oder holt es nach vorn. `status` ist der Zustand der Erfassung, `embed` die
+/// Verbindung zur Menüleisten-App.
+pub fn show(status: Status, embed: Embed) {
     EMBED.with(|c| c.set(Some(embed)));
     // Mit Fenster gehört Tagwerk ins Dock und in den App-Umschalter (⌘⇥), und die
     // Menüleiste zeigt das Hauptmenü des Fensters.
@@ -2281,25 +2272,20 @@ pub fn show(open: Open, status: Status, embed: Embed) {
     model(|m| m.status = Some(status));
     reload();
     let today = now().date();
-    match open {
-        Open::Day(d) => open_day(d),
-        Open::Last => {
-            let mode = if fresh { stored_mode() } else { mode() };
-            set_mode(mode, false);
-            if mode == Mode::Week {
-                // Neu geöffnet: aktuelle Woche; sonst bleibt die gezeigte Woche.
-                if let Some(snap) = (embed.week)() {
-                    if fresh {
-                        week_view::show_week_of(snap, today);
-                    } else {
-                        week_view::update(snap);
-                    }
-                }
+    let shown = if fresh { stored_mode() } else { mode() };
+    set_mode(shown, false);
+    if shown == Mode::Week {
+        // Neu geöffnet: aktuelle Woche; sonst bleibt die gezeigte Woche.
+        if let Some(snap) = (embed.week)() {
+            if fresh {
+                week_view::show_week_of(snap, today);
+            } else {
+                week_view::update(snap);
             }
         }
     }
     ui.window.makeKeyAndOrderFront(None);
-    if fresh || open != Open::Last {
+    if fresh {
         match mode() {
             Mode::Days => {
                 ui.window.makeFirstResponder(Some(&ui.table));
