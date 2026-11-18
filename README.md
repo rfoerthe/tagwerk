@@ -110,7 +110,8 @@ aus automatischer Erfassung und manuellen Korrekturen.
 - Tage mit Regelverstößen tragen ein Warnschild; ein Klick auf den Tageskopf zeigt die
   Hinweise.
 - Arbeit außerhalb des Arbeitszeitrahmens erscheint orange als „nicht gezählt“.
-- Arbeit ohne Mac ist schraffiert; der Tooltip nennt Uhrzeit und Notiz.
+- Arbeit ohne Mac ist schraffiert; der Tooltip nennt Uhrzeit und Notiz. Ein Klick auf
+  die Schraffur bietet an, sie zu löschen – dort entsteht dann wieder eine Pause.
 - Ein Klick auf eine Pause zwischen zwei Blöcken bietet an, sie als Arbeitszeit, Meeting
   oder Telefonat zu zählen.
 

@@ -265,6 +265,27 @@ impl Tracker {
         self.cleanup();
     }
 
+    /// Arbeit ohne Mac von `from` bis `to` löschen – die Zeit zählt wieder wie erfasst (eine
+    /// Sperre ab der Mindestpause wird wieder zur Pause). Liegt darin die gerade laufende
+    /// Arbeit ohne Mac, endet sie ohne Eintrag; dann liefert die Funktion `true`, und der
+    /// Aufrufer startet ggf. die Erfassung.
+    pub fn remove_work(&mut self, date: NaiveDate, from: i64, mut to: i64, now: NaiveDateTime) -> bool {
+        let away = self.on_away()
+            && self.paused_since.is_some_and(|since| since.date() == date && (from..=to).contains(&secs(since)));
+        if away {
+            // Zwischendurch gespeichert wurde die laufende Arbeit ohne Mac bis „jetzt“.
+            if now.date() == date {
+                to = to.max(secs(now));
+            }
+            self.pause_reason = PauseReason::Manual;
+        }
+        if let Some(d) = self.days.iter_mut().find(|d| d.date == date) {
+            d.cut_work(from, to);
+        }
+        self.cleanup();
+        away
+    }
+
     pub fn today(&self, now: NaiveDateTime) -> TodayInfo {
         let snap = self.snapshot(now);
         let s = &self.settings;
@@ -530,6 +551,35 @@ mod tests {
         t.add_work(dt(16, 0, 0).date(), pauses[0].from, pauses[0].to, "Telefonat");
         assert!(t.pauses_today(dt(16, 13, 0)).is_empty());
         assert_eq!(t.today(dt(16, 13, 0)).work_secs, hm(5, 0));
+        // Wieder löschen: Die Pause ist zurück.
+        assert!(!t.remove_work(dt(16, 0, 0).date(), pauses[0].from, pauses[0].to, dt(16, 13, 0)));
+        assert!(t.days[0].work.is_empty());
+        assert_eq!(t.pauses_today(dt(16, 13, 0)), pauses);
+        assert_eq!(t.today(dt(16, 13, 0)).work_secs, hm(4, 15));
+    }
+
+    #[test]
+    fn remove_running_away_work() {
+        let mut t = Tracker::new(vec![], Settings::default());
+        t.start(dt(16, 8, 0));
+        t.stop(dt(16, 12, 0), PauseReason::Locked);
+        t.start(dt(16, 12, 30));
+        assert!(t.go_away(dt(16, 13, 0), Activity::Meeting));
+        // Zwischendurch gespeichert und von außen neu eingelesen (wie nach „Aufzeichnungen“).
+        let days = t.snapshot(dt(16, 13, 20));
+        t.replace_days(days, Settings::default(), dt(16, 13, 20));
+        assert!(t.on_away());
+        // In der Wochenansicht (Stand 13:10) gelöscht: endet ohne Eintrag.
+        assert!(t.remove_work(dt(16, 0, 0).date(), hm(13, 0), hm(13, 10), dt(16, 13, 30)));
+        assert!(!t.on_away());
+        assert!(t.days[0].work.is_empty());
+        assert!(t.start(dt(16, 13, 30)));
+        assert_eq!(t.pauses_today(dt(16, 14, 0)), vec![Span::new(hm(12, 0), hm(12, 30)), Span::new(hm(13, 0), hm(13, 30))]);
+        // Ein anderer Block lässt laufende Arbeit ohne Mac unberührt.
+        t.add_work(dt(16, 0, 0).date(), hm(12, 0), hm(12, 30), "Telefonat");
+        t.go_away(dt(16, 14, 0), Activity::Call);
+        assert!(!t.remove_work(dt(16, 0, 0).date(), hm(12, 0), hm(12, 30), dt(16, 14, 10)));
+        assert!(t.on_away());
     }
 
     #[test]

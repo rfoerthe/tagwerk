@@ -239,7 +239,7 @@ define_class!(
                 s.week_snapshot(t)
             });
             if let Some(snap) = snap {
-                week_window::show(snap, open_day_in_records, count_gap_as_work);
+                week_window::show(snap, open_day_in_records, count_gap_as_work, remove_work_block);
             }
         }
 
@@ -380,6 +380,16 @@ fn open_day_in_records(date: chrono::NaiveDate) {
 /// Klick auf eine Pause in der Wochenansicht: als Arbeitszeit zählen.
 fn count_gap_as_work(date: chrono::NaiveDate, from: i64, to: i64, activity: Activity) {
     act(|s, _| s.tracker.add_work(date, from, to, activity.note()));
+}
+
+/// Klick auf Arbeit ohne Mac in der Wochenansicht: löschen (die Zeit wird wieder zur Pause).
+/// War es die gerade laufende Arbeit ohne Mac, wird ab jetzt wieder erfasst.
+fn remove_work_block(date: chrono::NaiveDate, from: i64, to: i64) {
+    act(|s, t| {
+        if s.tracker.remove_work(date, from, to, t) && !screen_locked() {
+            s.tracker.start(t);
+        }
+    });
 }
 
 /// Öffnet das Fenster „Aufzeichnungen“ (oder holt es nach vorn), auf Wunsch mit

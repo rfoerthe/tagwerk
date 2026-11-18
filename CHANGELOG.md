@@ -17,6 +17,9 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   - Inspektor im Fenster „Aufzeichnungen“: neuer Abschnitt „Arbeit ohne Mac“ mit Notiz.
   - Wochenansicht: Arbeit ohne Mac ist schraffiert; ein Klick auf eine Pause zählt sie als
     Arbeitszeit, Meeting oder Telefonat. Pausen zeigen ihre Dauer, wenn Platz ist.
+  - Wochenansicht: Ein Klick auf die Schraffur löscht Arbeit ohne Mac wieder, sodass dort
+    wieder eine Pause entsteht. Ist es die gerade laufende Arbeit ohne Mac, endet sie ohne
+    Eintrag und die Erfassung läuft weiter.
   - Export und Import: Art „Arbeit ohne Mac“ mit neuer Spalte „Notiz“ unter „Korrekturen“.
 
 ### Geändert

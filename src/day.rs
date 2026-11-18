@@ -254,15 +254,15 @@ impl Day {
     }
 
     /// Arbeit ohne Mac, die im Arbeitszeitrahmen tatsächlich zählt (ohne manuelle Pausen und
-    /// außerhalb des Feierabends), mit Notiz.
-    pub fn counted_work(&self, s: &Settings) -> Vec<(Span, String)> {
+    /// außerhalb des Feierabends), mit dem eingetragenen Block, aus dem sie stammt.
+    pub fn counted_work(&self, s: &Settings) -> Vec<(Span, &WorkBlock)> {
         let spans = self.spans(s);
         self.work
             .iter()
             .flat_map(|w| {
                 spans.iter().filter_map(move |sp| {
                     let c = Span::new(w.from.max(sp.from), w.to.min(sp.to));
-                    (c.to > c.from).then(|| (c, w.note.clone()))
+                    (c.to > c.from).then_some((c, w))
                 })
             })
             .collect()
@@ -609,7 +609,8 @@ mod tests {
         let r = d.record(&st()).unwrap();
         assert_eq!(r.pause_secs(), h(0, 21));
         assert_eq!(d.pauses(&st()), vec![Span::new(h(12, 20), h(12, 41))]);
-        assert_eq!(d.counted_work(&st()), vec![(Span::new(h(12, 0), h(12, 20)), String::new())]);
+        let block = WorkBlock { from: h(12, 0), to: h(12, 20), note: String::new() };
+        assert_eq!(d.counted_work(&st()), vec![(Span::new(h(12, 0), h(12, 20)), &block)]);
     }
 
     #[test]
