@@ -64,8 +64,9 @@ anklicken.
   bei **9:45 Std.** Arbeit eine Vorwarnung („Noch 15 Min. bis 10 Std. Arbeitszeit“) und
   bei **10 Std.** die Meldung „10 Std. Arbeitszeit erreicht“ – jeweils einmal am Tag,
   solange gearbeitet wird (auch ohne Mac). Beim ersten Start fragt macOS, ob Tagwerk
-  Mitteilungen senden darf; ändern lässt sich das unter Systemeinstellungen ›
-  Mitteilungen › Tagwerk. Nur in der installierten App.
+  Mitteilungen senden darf; den Stand zeigen die [Einstellungen](#einstellungen), ändern
+  lässt er sich unter Systemeinstellungen › Mitteilungen › Tagwerk. Nur in der
+  installierten App.
 
 - **Pausen ohne Zutun** – jede Sperre ab der eingestellten Mindestdauer (Standard
   15 Minuten) ist eine Pause, egal ob Mittags- oder Kaffeepause. Kürzere Sperren zählen
@@ -164,6 +165,7 @@ Titelleiste zeigt den Datenordner im Finder.
 | Einstellung           | Bedeutung                                                              | Standard        |
 |-----------------------|------------------------------------------------------------------------|-----------------|
 | Bei Anmeldung starten | Tagwerk als Anmeldeobjekt eintragen (nur in der installierten App)     | ein             |
+| Mitteilungen          | Zeigt, ob Tagwerk Mitteilungen senden darf; wenn nicht, öffnet „Systemeinstellungen öffnen“ die Mitteilungseinstellungen von Tagwerk | – |
 | Arbeitszeitrahmen     | Nur Mo–Fr in diesem Zeitraum wird Arbeitszeit bzw. Pause gezählt        | 07:00–22:00 Uhr |
 | Regelarbeitszeit      | Wochenarbeitszeit, daraus ergibt sich das Tagessoll                     | 39 Std. (7:48 h/Tag) |
 | Mindestpause          | Ab dieser Sperrdauer gilt eine Unterbrechung als Pause                 | 15 Min.         |
