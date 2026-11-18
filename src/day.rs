@@ -60,23 +60,82 @@ impl WorkBlock {
     }
 }
 
-/// Art der Arbeit ohne Mac (Menüleiste und Wochenansicht); ergibt die Notiz.
+/// Neue Arbeit ohne Mac nach [`Day::join_work_gaps`]: der verlängerte Abschnitt und was
+/// dazugerechnet wurde.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Joined {
+    pub span: Span,
+    /// Lücken zur benachbarten Arbeitszeit (erfasst oder Arbeit ohne Mac).
+    pub gaps: Vec<Span>,
+    /// Reste angeschnittener manueller Pausen.
+    pub rests: Vec<Span>,
+}
+
+impl Joined {
+    /// Hinweis nach dem Eintragen (`None`, wenn nichts dazugerechnet wurde).
+    pub fn note(&self, min_pause: i64) -> Option<String> {
+        let mins = |secs: i64| if secs < 60 { "unter 1 Min.".to_string() } else { format!("{} Min.", secs / 60) };
+        let list = |spans: &[Span]| {
+            spans
+                .iter()
+                .map(|g| format!("von {} bis {} ({})", fmt_clock(g.from), fmt_clock(g.to), mins(g.len())))
+                .collect::<Vec<_>>()
+                .join(" und ")
+        };
+        let mut out = Vec::new();
+        match self.rests.len() {
+            0 => {}
+            1 => out.push(format!("Von der manuellen Pause bliebe nur {} übrig.", list(&self.rests))),
+            _ => out.push(format!("Von den manuellen Pausen blieben nur {} übrig.", list(&self.rests))),
+        }
+        match self.gaps.len() {
+            0 => {}
+            1 => out.push(format!("Zur Arbeitszeit daneben bliebe eine Lücke {}.", list(&self.gaps))),
+            _ => out.push(format!("Zur Arbeitszeit daneben blieben Lücken {}.", list(&self.gaps))),
+        }
+        if out.is_empty() {
+            return None;
+        }
+        let that = if self.gaps.len() + self.rests.len() == 1 { "Das ist" } else { "Das ist jeweils" };
+        out.push(format!(
+            "{that} kürzer als die Mindestpause von {}; die Zeit wurde dem neuen Abschnitt \
+             dazugerechnet. Er reicht jetzt von {} bis {} Uhr.",
+            mins(min_pause),
+            fmt_clock(self.span.from),
+            fmt_clock(self.span.to)
+        ));
+        Some(out.join(" "))
+    }
+}
+
+/// Grund für Arbeit ohne Mac (Menüleiste, Wochenansicht, „Aufzeichnungen“); ergibt die Notiz.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Activity {
     Meeting,
     Call,
+    Networking,
     Other,
 }
 
 impl Activity {
-    pub const ALL: [Activity; 3] = [Activity::Meeting, Activity::Call, Activity::Other];
+    /// In der Reihenfolge der Auswahl.
+    pub const ALL: [Activity; 4] = [Activity::Meeting, Activity::Call, Activity::Networking, Activity::Other];
+
+    /// Bezeichnung in Menüs und Auswahlboxen.
+    pub fn label(self) -> &'static str {
+        match self {
+            Activity::Meeting => "Meeting",
+            Activity::Call => "Telefonat",
+            Activity::Networking => "Networking",
+            Activity::Other => "Sonstiges",
+        }
+    }
 
     /// Notiz am Arbeitsblock (leer bei „Sonstiges“).
     pub fn note(self) -> &'static str {
         match self {
-            Activity::Meeting => "Meeting",
-            Activity::Call => "Telefonat",
             Activity::Other => "",
+            a => a.label(),
         }
     }
 
@@ -84,6 +143,7 @@ impl Activity {
         match self {
             Activity::Meeting => 1,
             Activity::Call => 2,
+            Activity::Networking => 3,
             Activity::Other => 0,
         }
     }
@@ -97,6 +157,7 @@ impl Activity {
         match self {
             Activity::Meeting => "meeting",
             Activity::Call => "call",
+            Activity::Networking => "networking",
             Activity::Other => "other",
         }
     }
@@ -209,10 +270,10 @@ impl Day {
             .collect();
     }
 
-    /// Arbeit ohne Mac eintragen. Überlappende oder angrenzende Blöcke werden
-    /// zusammengefasst; manuelle Pausen in dieser Zeit entfallen (die letzte Angabe gilt).
+    /// Arbeit ohne Mac eintragen. Ältere Arbeit ohne Mac und manuelle Pausen in dieser Zeit
+    /// entfallen (die letzte Angabe gilt); angrenzende Blöcke bleiben eigene Abschnitte.
     pub fn add_work(&mut self, from: i64, to: i64, note: &str) {
-        let (mut from, mut to) = (from.clamp(0, DAY_END), to.clamp(0, DAY_END));
+        let (from, to) = (from.clamp(0, DAY_END), to.clamp(0, DAY_END));
         if to <= from {
             return;
         }
@@ -222,30 +283,54 @@ impl Day {
             .flat_map(|b| subtract(vec![Span::new(b.from, b.to)], cut))
             .map(|s| Break { from: s.from, to: s.to })
             .collect();
-        let mut notes: Vec<String> = Vec::new();
-        let mut keep = Vec::with_capacity(self.work.len() + 1);
-        for w in std::mem::take(&mut self.work) {
-            if w.from <= to && w.to >= from {
-                from = from.min(w.from);
-                to = to.max(w.to);
-                notes.push(w.note);
-            } else {
-                keep.push(w);
+        self.cut_work(from, to);
+        self.work.push(WorkBlock { from, to, note: note.trim().to_string() });
+        self.work.sort_by_key(|w| (w.from, w.to));
+    }
+
+    /// Neue Arbeit ohne Mac `from`–`to` so verlängern, dass keine Lücke und keine manuelle
+    /// Pause unter der Mindestpause `min_pause` übrig bleibt:
+    /// - Schneidet sie eine manuelle Pause an, gehört ein Rest unter der Mindestpause zur
+    ///   neuen Arbeit (sonst bliebe eine Pause, die sich so nicht eintragen lässt).
+    /// - Eine Lücke zu benachbarter Arbeit ohne Mac unter der Mindestpause (ohne manuelle
+    ///   Pause darin) gehört ebenfalls dazu.
+    pub fn join_work_gaps(&self, from: i64, to: i64, min_pause: i64) -> Joined {
+        let mut j = Joined { span: Span::new(from, to), gaps: Vec::new(), rests: Vec::new() };
+        let short = |g: Span| g.len() > 0 && g.len() < min_pause;
+        // Reste angeschnittener manueller Pausen
+        for b in &self.breaks {
+            let left = Span::new(b.from, from);
+            if b.from < from && b.to > from && short(left) {
+                j.span.from = j.span.from.min(b.from);
+                j.rests.push(left);
+            }
+            let right = Span::new(to, b.to);
+            if b.from < to && b.to > to && short(right) {
+                j.span.to = j.span.to.max(b.to);
+                j.rests.push(right);
             }
         }
-        let note = note.trim();
-        if !note.is_empty() {
-            notes.push(note.to_string());
-        }
-        let mut merged: Vec<String> = Vec::new();
-        for n in notes.iter().flat_map(|n| n.split(", ")).map(str::trim) {
-            if !n.is_empty() && !merged.iter().any(|m| m == n) {
-                merged.push(n.to_string());
+        let (from, to) = (j.span.from, j.span.to);
+        let free = |g: Span| short(g) && !self.breaks.iter().any(|b| b.from < g.to && b.to > g.from);
+        // Ende der Arbeitszeit davor bzw. Beginn danach – erfasst oder Arbeit ohne Mac
+        // (Überlappendes grenzt nach dem Eintragen direkt an).
+        let spans = self.unframed_spans(min_pause);
+        if let Some(prev) = spans.iter().filter(|w| w.from < from).map(|w| w.to.min(from)).max() {
+            let g = Span::new(prev, from);
+            if free(g) {
+                j.span.from = prev;
+                j.gaps.push(g);
             }
         }
-        keep.push(WorkBlock { from, to, note: merged.join(", ") });
-        keep.sort_by_key(|w| (w.from, w.to));
-        self.work = keep;
+        if let Some(next) = spans.iter().filter(|w| w.to > to).map(|w| w.from.max(to)).min() {
+            let g = Span::new(to, next);
+            if free(g) {
+                j.span.to = next;
+                j.gaps.push(g);
+            }
+        }
+        j.rests.sort_by_key(|r| r.from);
+        j
     }
 
     /// Pausen des Tages: Lücken zwischen den Arbeitsabschnitten (nach den Einstellungen `s`).
@@ -276,9 +361,12 @@ impl Day {
         let mut spans = fill_gaps(base, min_pause);
         // Manuelle Angaben fügen nur vor dem ersten Entsperren bzw. nach dem letzten Sperren
         // Zeit hinzu – nie in Lücken dazwischen (das wäre z. B. die gesperrte Mittagszeit).
+        // Bezug für Beginn und Feierabend ist das erste Entsperren bzw. letzte Sperren – auch
+        // wenn davor bzw. danach Arbeit ohne Mac liegt (sonst verkürzte sie den Tag).
+        let unlocked = fill_gaps(self.periods.clone(), min_pause);
         if let Some(s) = self.start {
             // Früherer Beginn: die Zeit bis zum ersten Entsperren zählt mit.
-            let first = spans.first().map(|x| x.from).unwrap_or(self.end.unwrap_or(s));
+            let first = unlocked.first().or(spans.first()).map(|x| x.from).unwrap_or(self.end.unwrap_or(s));
             if s < first {
                 spans.insert(0, Span::new(s, first));
             }
@@ -286,7 +374,11 @@ impl Day {
         }
         if let Some(e) = self.end {
             // Späterer Feierabend: die Zeit nach dem letzten Sperren zählt mit.
-            let last = spans.last().map(|x| x.to).unwrap_or(self.start.unwrap_or(e));
+            let last = unlocked
+                .last()
+                .or(spans.last())
+                .map(|x| x.to.max(self.start.unwrap_or(0)))
+                .unwrap_or(self.start.unwrap_or(e));
             if e > last {
                 spans.push(Span::new(last, e));
             }
@@ -636,24 +728,41 @@ mod tests {
     }
 
     #[test]
-    fn work_blocks_merge_and_latest_entry_wins() {
+    fn work_blocks_stay_separate_and_latest_entry_wins() {
         let mut d = day();
         d.add_work(h(12, 0), h(12, 20), "Meeting");
         d.add_work(h(12, 20), h(12, 30), "Telefonat");
-        d.add_work(h(12, 10), h(12, 25), "Meeting");
-        assert_eq!(d.work, vec![WorkBlock { from: h(12, 0), to: h(12, 30), note: "Meeting, Telefonat".into() }]);
+        // angrenzend: zwei Abschnitte
+        assert_eq!(
+            d.work,
+            vec![
+                WorkBlock { from: h(12, 0), to: h(12, 20), note: "Meeting".into() },
+                WorkBlock { from: h(12, 20), to: h(12, 30), note: "Telefonat".into() },
+            ]
+        );
+        // überlappend: die letzte Angabe gilt, die älteren werden gekürzt
+        d.add_work(h(12, 10), h(12, 25), "Networking");
+        assert_eq!(
+            d.work.iter().map(|w| (w.from, w.to, w.note.as_str())).collect::<Vec<_>>(),
+            vec![(h(12, 0), h(12, 10), "Meeting"), (h(12, 10), h(12, 25), "Networking"), (h(12, 25), h(12, 30), "Telefonat")]
+        );
+        let mut d = day();
+        d.add_work(h(12, 0), h(12, 30), "Meeting");
         // Pause darüber: die Arbeit wird geteilt
         d.add_break(h(12, 10), h(12, 15));
         assert_eq!(
             d.work.iter().map(|w| (w.from, w.to)).collect::<Vec<_>>(),
             vec![(h(12, 0), h(12, 10)), (h(12, 15), h(12, 30))]
         );
-        assert_eq!(d.work[1].note, "Meeting, Telefonat");
+        assert_eq!(d.work[1].note, "Meeting");
         assert_eq!(d.breaks, vec![Break { from: h(12, 10), to: h(12, 15) }]);
         // Arbeit darüber: die Pause entfällt
         d.add_work(h(12, 5), h(12, 20), "");
         assert!(d.breaks.is_empty());
-        assert_eq!(d.work.len(), 1);
+        assert_eq!(
+            d.work.iter().map(|w| (w.from, w.to)).collect::<Vec<_>>(),
+            vec![(h(12, 0), h(12, 5)), (h(12, 5), h(12, 20)), (h(12, 20), h(12, 30))]
+        );
         // manuelle Pause teilweise überdeckt
         let mut d = day();
         d.add_break(h(10, 0), h(11, 0));
@@ -667,12 +776,111 @@ mod tests {
     }
 
     #[test]
+    fn short_gaps_to_work_without_mac_join_the_new_block() {
+        let mut d = day();
+        d.add_work(h(18, 0), h(18, 30), "Meeting");
+        d.add_work(h(19, 0), h(19, 30), "Telefonat");
+        // 5 Min. Lücke davor, 10 Min. danach: beide kürzer als 15 Min.
+        let j = d.join_work_gaps(h(18, 35), h(18, 50), 15 * 60);
+        assert_eq!(j.span, Span::new(h(18, 30), h(19, 0)));
+        assert_eq!(j.gaps, vec![Span::new(h(18, 30), h(18, 35)), Span::new(h(18, 50), h(19, 0))]);
+        assert!(j.rests.is_empty());
+        assert_eq!(
+            j.note(15 * 60).unwrap(),
+            "Zur Arbeitszeit daneben blieben Lücken von 18:30 bis 18:35 (5 Min.) und von 18:50 \
+             bis 19:00 (10 Min.). Das ist jeweils kürzer als die Mindestpause von 15 Min.; die Zeit \
+             wurde dem neuen Abschnitt dazugerechnet. Er reicht jetzt von 18:30 bis 19:00 Uhr."
+        );
+        d.add_work(j.span.from, j.span.to, "Networking");
+        assert_eq!(d.work.len(), 3, "bleiben eigene Abschnitte");
+        // Lücke ab der Mindestpause bleibt; direkt angrenzend gibt es nichts zu ergänzen.
+        let j = d.join_work_gaps(h(19, 45), h(20, 0), 15 * 60);
+        assert_eq!(j.span, Span::new(h(19, 45), h(20, 0)));
+        assert_eq!(j.note(15 * 60), None);
+        assert!(d.join_work_gaps(h(19, 30), h(19, 40), 15 * 60).gaps.is_empty());
+        // Überlappt der neue Abschnitt einen Block, grenzt er nach dem Kürzen direkt an.
+        let j = d.join_work_gaps(h(19, 20), h(19, 40), 15 * 60);
+        assert_eq!((j.span, j.gaps.is_empty()), (Span::new(h(19, 20), h(19, 40)), true));
+        // Eine ganze manuelle Pause in der Lücke bleibt bestehen.
+        d.add_break(h(20, 30), h(20, 45));
+        d.add_work(h(20, 45), h(21, 0), "");
+        let j = d.join_work_gaps(h(20, 0), h(20, 30), 15 * 60);
+        assert_eq!((j.span, j.gaps.is_empty(), j.rests.is_empty()), (Span::new(h(20, 0), h(20, 30)), true, true));
+    }
+
+    #[test]
+    fn short_gaps_to_recorded_work_join_the_new_block() {
+        // Pause 12:42–13:27, darin ein Telefonat 12:42–13:18: Die 9 Min. bis zum Entsperren
+        // gehören zum neuen Abschnitt.
+        let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 16).unwrap());
+        d.add_period(h(11, 10), h(12, 42));
+        d.add_period(h(13, 27), h(15, 55));
+        let j = d.join_work_gaps(h(12, 42), h(13, 18), 15 * 60);
+        assert_eq!(j.span, Span::new(h(12, 42), h(13, 27)));
+        assert_eq!(j.gaps, vec![Span::new(h(13, 18), h(13, 27))]);
+        assert_eq!(
+            j.note(15 * 60).unwrap(),
+            "Zur Arbeitszeit daneben bliebe eine Lücke von 13:18 bis 13:27 (9 Min.). Das ist kürzer \
+             als die Mindestpause von 15 Min.; die Zeit wurde dem neuen Abschnitt dazugerechnet. Er \
+             reicht jetzt von 12:42 bis 13:27 Uhr."
+        );
+        // Auch vor dem Abschnitt; ab der Mindestpause bleibt die Lücke eine Pause.
+        let j = d.join_work_gaps(h(12, 50), h(13, 5), 15 * 60);
+        assert_eq!((j.span, j.gaps.len()), (Span::new(h(12, 42), h(13, 5)), 1));
+    }
+
+    #[test]
+    fn rests_of_a_manual_break_join_the_new_block() {
+        // Beginn 8:00 vorverlegt, erstes Entsperren 11:31, Pause 9:00–11:00, darin ein
+        // Telefonat 9:10–10:50: Es dürfen keine Pausen von 10 Min. übrig bleiben.
+        let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 18).unwrap());
+        d.add_period(h(11, 31), h(11, 38));
+        d.start = Some(h(8, 0));
+        d.add_break(h(9, 0), h(11, 0));
+        assert_eq!(d.spans(&st()), vec![Span::new(h(8, 0), h(9, 0)), Span::new(h(11, 0), h(11, 38))]);
+        let j = d.join_work_gaps(h(9, 10), h(10, 50), 15 * 60);
+        assert_eq!(j.span, Span::new(h(9, 0), h(11, 0)));
+        assert_eq!(j.rests, vec![Span::new(h(9, 0), h(9, 10)), Span::new(h(10, 50), h(11, 0))]);
+        assert_eq!(
+            j.note(15 * 60).unwrap(),
+            "Von den manuellen Pausen blieben nur von 09:00 bis 09:10 (10 Min.) und von 10:50 bis \
+             11:00 (10 Min.) übrig. Das ist jeweils kürzer als die Mindestpause von 15 Min.; die Zeit \
+             wurde dem neuen Abschnitt dazugerechnet. Er reicht jetzt von 09:00 bis 11:00 Uhr."
+        );
+        d.add_work(j.span.from, j.span.to, "Telefonat");
+        assert!(d.breaks.is_empty());
+        // Die Zeit bis zum ersten Entsperren zählt weiter mit – keine Pause 11:00–11:31.
+        assert_eq!(d.spans(&st()), vec![Span::new(h(8, 0), h(11, 38))]);
+        // Ein Rest ab der Mindestpause bleibt als Pause stehen.
+        let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 18).unwrap());
+        d.add_break(h(9, 0), h(11, 0));
+        let j = d.join_work_gaps(h(9, 20), h(10, 50), 15 * 60);
+        assert_eq!((j.span, j.rests.clone()), (Span::new(h(9, 20), h(11, 0)), vec![Span::new(h(10, 50), h(11, 0))]));
+        d.add_work(j.span.from, j.span.to, "");
+        assert_eq!(d.breaks, vec![Break { from: h(9, 0), to: h(9, 20) }]);
+    }
+
+    #[test]
+    fn manual_end_counts_from_last_lock_even_with_work_after_it() {
+        // Letztes Sperren 17:30, danach ein Telefonat 18:00–18:20, Feierabend 19:00: Die ganze
+        // Zeit nach dem letzten Sperren zählt (keine Pause 17:30–18:00).
+        let mut d = day();
+        d.add_work(h(18, 0), h(18, 20), "Telefonat");
+        d.end = Some(h(19, 0));
+        assert_eq!(d.spans(&st()).last(), Some(&Span::new(h(12, 41), h(19, 0))));
+    }
+
+    #[test]
     fn activity_ids_round_trip() {
         for a in Activity::ALL {
             assert_eq!(Activity::from_id(a.id()), a);
             assert_eq!(Activity::from_key(a.key()), a);
         }
         assert_eq!(Activity::from_key("unbekannt"), Activity::Other);
+        let labels: Vec<&str> = Activity::ALL.iter().map(|a| a.label()).collect();
+        assert_eq!(labels, ["Meeting", "Telefonat", "Networking", "Sonstiges"]);
+        assert_eq!(Activity::Networking.note(), "Networking");
+        assert_eq!(Activity::Other.note(), "");
     }
 
     #[test]

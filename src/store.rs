@@ -70,6 +70,7 @@ const SCHEMA_WORK: &str = "
     ) WITHOUT ROWID;
 ";
 const KEY_MIN_PAUSE: &str = "min_pause_s";
+const KEY_MIN_WORK: &str = "min_work_s";
 const KEY_WEEKLY: &str = "weekly_target_s";
 const KEY_FRAME_FROM: &str = "frame_from_s";
 const KEY_FRAME_TO: &str = "frame_to_s";
@@ -195,6 +196,7 @@ impl Db {
             let (key, value) = row?;
             match key.as_str() {
                 KEY_MIN_PAUSE => s.min_pause = value,
+                KEY_MIN_WORK => s.min_work = value,
                 KEY_WEEKLY => s.weekly_target = value,
                 KEY_FRAME_FROM => s.frame_from = value,
                 KEY_FRAME_TO => s.frame_to = value,
@@ -210,6 +212,7 @@ impl Db {
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
         for (key, value) in [
             (KEY_MIN_PAUSE, s.min_pause),
+            (KEY_MIN_WORK, s.min_work),
             (KEY_WEEKLY, s.weekly_target),
             (KEY_FRAME_FROM, s.frame_from),
             (KEY_FRAME_TO, s.frame_to),
@@ -955,6 +958,7 @@ mod tests {
 
         let custom = Settings {
             min_pause: 20 * 60,
+            min_work: 30 * 60,
             weekly_target: h(38, 30),
             frame_from: h(6, 0),
             frame_to: h(20, 0),

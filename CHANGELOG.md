@@ -10,26 +10,49 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 - **Arbeit ohne Mac:** Telefonate, Meetings oder Termine bei gesperrtem Mac zählen jetzt
   als Arbeitszeit. Sie liegen als eigene Korrektur über den erfassten Perioden und lassen
   sich jederzeit wieder entfernen.
-  - Menüleiste: „Ohne Mac weiterarbeiten“ (Meeting, Telefonat, Sonstiges) zählt die Zeit
+  - Menüleiste: „Ohne Mac weiterarbeiten“ (Meeting, Telefonat, Networking, Sonstiges) zählt die Zeit
     bis zum nächsten Entsperren bzw. „Zurück am Mac“ – auch wenn der Mac dazwischen
     gesperrt ist oder schläft; spätestens um Mitternacht oder mit dem Feierabend endet es.
   - Menüleiste: „Pause als Arbeitszeit zählen“ listet die Pausen von heute.
-  - Inspektor im Fenster „Aufzeichnungen“: neuer Abschnitt „Arbeit ohne Mac“ mit Notiz.
-  - Wochenansicht: Arbeit ohne Mac ist schraffiert; ein Klick auf eine Pause zählt sie als
-    Arbeitszeit, Meeting oder Telefonat. Pausen zeigen ihre Dauer, wenn Platz ist.
-  - Wochenansicht: Ein Klick auf die Schraffur löscht Arbeit ohne Mac wieder, sodass dort
-    wieder eine Pause entsteht. Ist es die gerade laufende Arbeit ohne Mac, endet sie ohne
-    Eintrag und die Erfassung läuft weiter.
+  - Inspektor im Fenster „Aufzeichnungen“: neuer Abschnitt „Arbeit ohne Mac“ mit Grund
+    (Auswahlbox Meeting, Telefonat, Networking, Sonstiges).
+  - Wochenansicht: Arbeit ohne Mac ist schraffiert und mit der Art beschriftet, wenn Platz
+    ist. Ein Klick auf einen freien Bereich öffnet einen Dialog mit Beginn, Ende und
+    Grund – in einer Pause ist die ganze Pause vorgeschlagen, vor dem Arbeitsbeginn und
+    nach dem Feierabend eine halbe Stunde. Über einem freien Bereich zeigen Zeigehand und
+    Rahmen, was ein Klick vorschlägt. Pausen zeigen ihre Dauer, wenn Platz ist.
+  - Wochenansicht: Ein Klick auf die Schraffur löscht Arbeit ohne Mac wieder; dort gilt
+    dann wieder das Erfasste (gesperrt: Pause, entsperrt: Arbeitszeit). Ist es die gerade
+    laufende Arbeit ohne Mac, endet sie ohne Eintrag und die Erfassung läuft weiter.
   - Export und Import: Art „Arbeit ohne Mac“ mit neuer Spalte „Notiz“ unter „Korrekturen“.
+  - Einstellungen: Mindestdauer für Arbeit ohne Mac (Standard 15 Minuten, nie kürzer als
+    die Mindestpause). Kürzere Abschnitte lehnen der Dialog der Wochenansicht und der
+    Inspektor ab; ein Vorschlag vor dem Arbeitsbeginn oder nach dem Feierabend ist
+    mindestens so lang.
 
 ### Geändert
 - Eine manuelle Pause und Arbeit ohne Mac überschneiden sich nie: Der zuletzt
-  eingetragene Eintrag gilt, der andere wird gekürzt.
+  eingetragene Eintrag gilt, der andere wird gekürzt – auch wenn der neuere später wieder
+  entfernt wird. Ebenso überschreibt neue Arbeit ohne Mac ältere in derselben Zeit;
+  aufeinanderfolgende Einträge bleiben eigene Abschnitte.
+- Ist die Lücke zwischen neuer Arbeit ohne Mac und der benachbarten Arbeitszeit – erfasst
+  oder ebenfalls ohne Mac – kürzer als die Mindestpause, wird sie dem neuen Abschnitt
+  dazugerechnet; ein Hinweis zeigt das an.
+- Schneidet neue Arbeit ohne Mac eine manuelle Pause an und bliebe davon weniger als die
+  Mindestpause übrig, gehört der Rest zum neuen Abschnitt (mit Hinweis) – es entstehen
+  keine Pausen mehr, die sich so nicht eintragen ließen.
+- Ein manueller Arbeitsbeginn zählt bis zum ersten Entsperren, ein manueller Feierabend
+  ab dem letzten Sperren – auch wenn dazwischen Arbeit ohne Mac liegt. Bisher verkürzte
+  sie den Tag, und es entstand eine Pause zwischen ihr und dem ersten Entsperren.
+- Uhrzeitfelder übernehmen volle Minuten (ein Vorschlag behielt bisher unsichtbare
+  Sekunden). Die Dauer einzelner Abschnitte und Pausen richtet sich nach den angezeigten
+  Uhrzeiten: 17:00 – 17:30 sind 30 Min.
 - Datenbankschema 3 (neue Tabelle `work_blocks`); vorhandene Datenbanken werden beim
   Start automatisch erweitert. Ältere Tagwerk-Versionen können eine Datenbank im
   Schema 3 nicht mehr öffnen.
 - Testdaten (`testdata/testdb.sh`): Der Zeitraum endet immer gestern (sechs Wochen plus
-  die laufende Woche), an rund 20 % der Tage gibt es Arbeit ohne Mac, und die
+  die laufende Woche), an rund 25 % der Tage gibt es Arbeit ohne Mac – auch Networking
+  und zwei Abschnitte direkt hintereinander, nachgetragene auf volle Minuten –, und die
   Testdatenbank wird nach `target/testdata/` geschrieben statt ins Repository.
 
 ## [1.1.0] - 2026-11-17

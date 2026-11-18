@@ -10,13 +10,18 @@ laufenden Woche bis gestern. Heute selbst bleibt frei.
   (39 Std. ± 10 %, bei Feiertagen und in der laufenden Woche anteilig).
 - Mittagspausen und weitere Pausen ab 15 Min. sind Sperrzeiten; dazu kommen kurze
   Sperren unter 15 Min., die als Arbeitszeit zählen.
-- Arbeit ohne Mac (Datenbankschema 3, Tabelle work_blocks) an rund 20 % der Werktage,
+- Arbeit ohne Mac (Datenbankschema 3, Tabelle work_blocks) an rund 25 % der Werktage,
   jeweils eine Art pro Tag:
     Meeting        Mac 45–90 Min. gesperrt, als Meeting nachgetragen
     Telefonat      eine Pause (20–35 Min.) als Telefonat gezählt
     Sonstiges      Mac 30–75 Min. gesperrt, ohne Notiz
+    Networking     Mac 30–60 Min. gesperrt, als Networking nachgetragen
+    hintereinander Meeting und direkt anschließend Telefonat in einer Sperre: zwei
+                   aneinandergrenzende Abschnitte (Tagwerk fasst sie nicht zusammen)
     vor Beginn     Telefonat vor dem ersten Entsperren
     nach Ende      Telefonat oder Meeting nach dem letzten Sperren
+  Nachgetragene Abschnitte (Dialog bzw. Inspektor) beginnen und enden auf volle Minuten;
+  nur die als Telefonat gezählte Pause übernimmt die Sekunden der erfassten Sperre.
 - Eingebaute Regelverstöße (Woche 1 = erste Woche des Zeitraums; liegt der Wunschtag auf
   einem Feiertag, rückt der Verstoß auf einen anderen Tag derselben Woche):
     Woche 2  Di bis 21:2x, Mi ab 07:0x       -> Ruhezeit unter 11 Std.
@@ -44,7 +49,7 @@ MIN_PAUSE = 15 * 60
 MIN_REST = 11 * 3600
 MAX_WORK = 10 * 3600
 WEEK_TARGET = 39 * 3600
-WORK_SHARE = 0.2  # Anteil der Werktage mit Arbeit ohne Mac
+WORK_SHARE = 0.25  # Anteil der Werktage mit Arbeit ohne Mac
 H = 3600
 M = 60
 DAY = 24 * H
@@ -69,11 +74,20 @@ EXPECTED = {
     "pause_20": {"Pause 30 Min."},
     "pause_30_long": {"Pause 45 Min."},
 }
-VARIANTS = ["meeting", "call_pause", "other", "call_morning", "call_evening"]
+VARIANTS = ["meeting", "call_pause", "other", "networking", "back_to_back", "call_morning", "call_evening"]
+# Arten, die in einer Sperre nachgetragen werden: (Dauer in Min. von–bis, Notiz)
+LOCKED = {
+    "meeting": ((45, 90), "Meeting"),
+    "other": ((30, 75), ""),
+    "networking": ((30, 60), "Networking"),
+    "back_to_back": ((50, 90), "Meeting"),  # wird in Meeting + Telefonat geteilt
+}
 VARIANT_NAMES = {
     "meeting": "Meeting (gesperrt)",
     "call_pause": "Pause als Telefonat",
     "other": "Sonstiges (gesperrt)",
+    "networking": "Networking (gesperrt)",
+    "back_to_back": "hintereinander",
     "call_morning": "vor dem Beginn",
     "call_evening": "nach dem Ende",
 }
@@ -275,18 +289,23 @@ def normal_day(rng, work, variant, min_start):
     if work > 6 * H and rng.random() < 0.3:
         # Kaffeepause am Nachmittag (zählt als Pause)
         locks.append((int(pwork * 0.8), rng.randint(15, 22) * M + rng.randint(0, 59), None))
-    if variant in ("meeting", "call_pause", "other"):
-        dur, note = {
-            "meeting": (rng.randint(45, 90) * M, "Meeting"),
-            "call_pause": (rng.randint(20, 35) * M + rng.randint(0, 59), "Telefonat"),
-            "other": (rng.randint(30, 75) * M, ""),
-        }[variant]
+    if variant == "call_pause" or variant in LOCKED:
+        if variant == "call_pause":
+            dur, note = rng.randint(20, 35) * M + rng.randint(0, 59), "Telefonat"
+        else:
+            (lo, hi), note = LOCKED[variant]
+            dur = rng.randint(lo, hi) * M
         pos = free_pos(rng, 75 * M, pwork - dur - 60 * M, dur, note, locks)
         if pos is None:
             return None
         locks.append((pos, dur, note))
     locks += short_locks(rng, pwork, locks)
     day = Day(*build_day(start, pwork, locks), kind=variant)
+    if variant == "back_to_back":
+        # Meeting und direkt anschließend ein Telefonat (mindestens 15 bzw. 20 Min.)
+        (f, t, _), = day.blocks
+        cut = f + rng.randint(30 * M, t - f - 20 * M)
+        day.blocks = [(f, cut, "Meeting"), (cut, t, "Telefonat")]
     if variant == "call_morning":
         gap = rng.randint(20, 45) * M + rng.randint(0, 59)
         first = day.first()
@@ -304,6 +323,10 @@ def normal_day(rng, work, variant, min_start):
         day.shift(-min(day.last() - LATEST_END, day.first() - lower))
     if day.last() > LATEST_END:
         return None
+    if variant != "call_pause":
+        # Nachgetragen: Uhrzeitfelder übernehmen nur volle Minuten. Die Lücke unter einer
+        # Minute zur erfassten Periode zählt wie eine kurze Sperre als Arbeitszeit.
+        day.blocks = [(f // M * M, t // M * M, n) for f, t, n in day.blocks]
     return day
 
 
