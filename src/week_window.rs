@@ -10,8 +10,10 @@
 //! „Heute“ (⌘T) springt zur aktuellen Woche. Ein Klick auf die Uhrzeit von Beginn oder
 //! Ende eines Abschnitts kopiert sie, ein Klick auf einen Tageskopf mit Warnschild zeigt
 //! die Hinweise, ein Doppelklick auf einen Tag öffnet ihn im Fenster „Aufzeichnungen“.
+//! Arbeit ohne Mac (Telefonat, Meeting …) ist schraffiert; ein Klick auf eine Pause
+//! zwischen zwei Abschnitten bietet an, sie als Arbeitszeit zu zählen.
 
-use crate::day::{fmt_clock, secs_of, Day, Span};
+use crate::day::{fmt_clock, secs_of, Activity, Day, Span};
 use crate::rules::{self, Settings, Warning};
 use crate::store;
 use block2::RcBlock;
@@ -66,8 +68,8 @@ struct Block {
     kind: Kind,
     /// Läuft gerade (endet „jetzt“).
     running: bool,
-    /// Welche Grenzen von manuellen Korrekturen stammen.
-    notes: Vec<&'static str>,
+    /// Welche Grenzen von manuellen Korrekturen stammen, Arbeit ohne Mac im Abschnitt.
+    notes: Vec<String>,
 }
 
 /// Eine Tagesspalte.
@@ -80,6 +82,10 @@ struct Column {
     pause_secs: i64,
     /// Hinweise zu Regelverstößen.
     warnings: Vec<String>,
+    /// Arbeit ohne Mac, die zählt (schraffiert), mit Notiz.
+    manual: Vec<(Span, String)>,
+    /// Pausen zwischen den Abschnitten (anklickbar).
+    gaps: Vec<Span>,
 }
 
 /// Montag der Woche von `d`.
@@ -127,7 +133,15 @@ fn columns(snap: &Snapshot, monday: NaiveDate) -> Vec<Column> {
         .map(|i| {
             let date = monday + Duration::days(i);
             let Some(day) = snap.days.iter().find(|d| d.date == date) else {
-                return Column { date, blocks: Vec::new(), work_secs: 0, pause_secs: 0, warnings: Vec::new() };
+                return Column {
+                    date,
+                    blocks: Vec::new(),
+                    work_secs: 0,
+                    pause_secs: 0,
+                    warnings: Vec::new(),
+                    manual: Vec::new(),
+                    gaps: Vec::new(),
+                };
             };
             let spans = day.spans(s);
             let now_secs = secs_of(snap.now.time());
@@ -153,25 +167,32 @@ fn columns(snap: &Snapshot, monday: NaiveDate) -> Vec<Column> {
             }));
             let (work_secs, pause_secs) = day.record(s).map(|r| (r.work_secs, r.pause_secs())).unwrap_or((0, 0));
             let warnings = rules::day_warnings(&snap.days, date, s).iter().map(Warning::text).collect();
-            Column { date, blocks, work_secs, pause_secs, warnings }
+            let manual = day.counted_work(s);
+            let gaps = day.pauses(s);
+            Column { date, blocks, work_secs, pause_secs, warnings, manual, gaps }
         })
         .collect()
 }
 
-/// Hinweise, welche Grenzen eines Abschnitts manuell festgelegt wurden.
-fn notes(day: &Day, s: &Settings, sp: Span, first: bool, last: bool) -> Vec<&'static str> {
+/// Hinweise, welche Grenzen eines Abschnitts manuell festgelegt wurden und wann darin
+/// ohne Mac gearbeitet wurde.
+fn notes(day: &Day, s: &Settings, sp: Span, first: bool, last: bool) -> Vec<String> {
     let mut out = Vec::new();
     if first && day.start.is_some_and(|x| x.clamp(s.frame_from, s.frame_to) == sp.from) {
-        out.push("Arbeitsbeginn manuell festgelegt");
+        out.push("Arbeitsbeginn manuell festgelegt".to_string());
     }
     if day.breaks.iter().any(|b| b.to == sp.from) {
-        out.push("beginnt nach einer manuellen Pause");
+        out.push("beginnt nach einer manuellen Pause".to_string());
     }
     if day.breaks.iter().any(|b| b.from == sp.to) {
-        out.push("endet mit einer manuellen Pause");
+        out.push("endet mit einer manuellen Pause".to_string());
+    }
+    for (w, note) in day.counted_work(s).into_iter().filter(|(w, _)| w.from >= sp.from && w.to <= sp.to) {
+        let note = if note.is_empty() { String::new() } else { format!(" ({note})") };
+        out.push(format!("ohne Mac gearbeitet {} – {}{note}", fmt_clock(w.from), fmt_clock(w.to)));
     }
     if last && day.end.is_some_and(|x| x.clamp(s.frame_from, s.frame_to) == sp.to) {
-        out.push("Feierabend manuell festgelegt");
+        out.push("Feierabend manuell festgelegt".to_string());
     }
     out
 }
@@ -265,6 +286,20 @@ impl Geo {
     fn block_rect(&self, col: usize, b: &Block) -> NSRect {
         let top = self.y(b.from.max(self.h0 * 3600));
         let bottom = self.y(b.to.min(self.h1 * 3600)).max(top + 3.0);
+        NSRect::new(NSPoint::new(self.x(col) + 3.0, top + 0.5), NSSize::new(self.col_w - 6.0, bottom - top - 1.0))
+    }
+
+    /// Bereich einer Pause zwischen zwei Abschnitten.
+    fn gap_rect(&self, col: usize, gap: Span) -> NSRect {
+        let top = self.y(gap.from.max(self.h0 * 3600));
+        let bottom = self.y(gap.to.min(self.h1 * 3600)).max(top);
+        NSRect::new(NSPoint::new(self.x(col) + 3.0, top), NSSize::new(self.col_w - 6.0, bottom - top))
+    }
+
+    /// Bereich von Arbeit ohne Mac (innerhalb ihres Blocks).
+    fn span_rect(&self, col: usize, sp: Span) -> NSRect {
+        let top = self.y(sp.from.max(self.h0 * 3600));
+        let bottom = self.y(sp.to.min(self.h1 * 3600)).max(top + 1.0);
         NSRect::new(NSPoint::new(self.x(col) + 3.0, top + 0.5), NSSize::new(self.col_w - 6.0, bottom - top - 1.0))
     }
 
@@ -474,7 +509,17 @@ thread_local! {
     static FLASH: RefCell<Option<Flash>> = const { RefCell::new(None) };
     static FLASH_GEN: Cell<u64> = const { Cell::new(0) };
     static POPOVER: RefCell<Option<Retained<NSPopover>>> = const { RefCell::new(None) };
+    /// Pause als Arbeitszeit zählen (Tag, von, bis, Art) – stellt die Menüleisten-App bereit.
+    static COUNT_GAP: Cell<Option<CountGap>> = const { Cell::new(None) };
+    /// Pause, deren Kontextmenü gerade offen ist.
+    static PENDING_GAP: Cell<Option<(NaiveDate, Span)>> = const { Cell::new(None) };
 }
+
+/// Pause als Arbeitszeit zählen: Tag, von, bis, Art.
+pub type CountGap = fn(NaiveDate, i64, i64, Activity);
+
+/// Pausen unter dieser Höhe (Punkte) sind nicht anklickbar.
+const MIN_GAP_H: f64 = 4.0;
 
 fn ns(s: &str) -> Retained<NSString> {
     NSString::from_str(s)
@@ -506,6 +551,15 @@ define_class!(
         fn today(&self, _sender: Option<&AnyObject>) {
             go_today();
         }
+
+        /// Eintrag im Kontextmenü einer Pause: als Arbeitszeit zählen (Tag = Art).
+        #[unsafe(method(countGap:))]
+        fn count_gap(&self, sender: Option<&NSMenuItem>) {
+            let activity = Activity::from_id(sender.map(|s| s.tag()).unwrap_or(0));
+            if let (Some((date, gap)), Some(f)) = (PENDING_GAP.with(|p| p.take()), COUNT_GAP.with(|c| c.get())) {
+                f(date, gap.from, gap.to, activity);
+            }
+        }
     }
 );
 
@@ -522,6 +576,8 @@ enum Hit {
     Time { flash: Flash, text: String },
     /// Tageskopf mit Hinweisen.
     Warnings { date: NaiveDate, warnings: Vec<String>, rect: NSRect },
+    /// Pause zwischen zwei Abschnitten.
+    Gap { date: NaiveDate, gap: Span },
 }
 
 define_class!(
@@ -610,6 +666,7 @@ define_class!(
                 (Some(Hit::Time { flash, text, .. }), 1) => copy_time(self, flash, &text),
                 (Some(Hit::Time { .. }), _) => {}
                 (Some(Hit::Warnings { date, warnings, rect }), 1) => show_warnings(self, date, &warnings, rect),
+                (Some(Hit::Gap { date, gap }), 1) => show_gap_menu(self, date, gap, p),
                 (_, 2) => {
                     let date = DATA.with(|d| {
                         let d = d.try_borrow().ok()?;
@@ -656,10 +713,67 @@ fn hit_test(view: &WeekView, p: NSPoint) -> Option<Hit> {
         }
         let col = geo.column_at(p.x)?;
         let c = d.cols.get(col)?;
+        if gaps_clickable() {
+            if let Some(gap) = c.gaps.iter().find(|g| {
+                let r = geo.gap_rect(col, **g);
+                r.size.height >= MIN_GAP_H && contains(r, p)
+            }) {
+                return Some(Hit::Gap { date: c.date, gap: *gap });
+            }
+        }
         let rect = geo.header_rect(col);
         (!c.warnings.is_empty() && contains(rect, p))
             .then(|| Hit::Warnings { date: c.date, warnings: c.warnings.clone(), rect })
     })
+}
+
+/// Lassen sich Pausen als Arbeitszeit zählen (nicht im Bildschirmfoto-Modus)?
+fn gaps_clickable() -> bool {
+    COUNT_GAP.with(|c| c.get()).is_some()
+}
+
+/// Pausen einer Spalte mit ihrem Bereich (nur ausreichend hohe).
+fn gap_rects(geo: &Geo, d: &Data) -> Vec<(usize, Span, NSRect)> {
+    d.cols
+        .iter()
+        .enumerate()
+        .flat_map(|(i, c)| c.gaps.iter().map(move |g| (i, *g, geo.gap_rect(i, *g))))
+        .filter(|(_, _, r)| r.size.height >= MIN_GAP_H)
+        .collect()
+}
+
+/// `12:03 – 12:58 Uhr (55 Min.)`
+fn fmt_gap(gap: Span) -> String {
+    let len = gap.len();
+    let dur = if len < 3600 { format!("{} Min.", len / 60) } else { store::fmt_hm(len) };
+    format!("{} – {} Uhr ({dur})", fmt_clock(gap.from), fmt_clock(gap.to))
+}
+
+/// Kontextmenü einer Pause: als Arbeitszeit, Meeting oder Telefonat zählen.
+fn show_gap_menu(view: &WeekView, date: NaiveDate, gap: Span, p: NSPoint) {
+    let Some(controller) = UI.with(|u| u.borrow().as_ref().map(|u| u._controller.clone())) else { return };
+    let mtm = mtm();
+    let menu = NSMenu::new(mtm);
+    menu.setAutoenablesItems(false);
+    let head = NSMenuItem::new(mtm);
+    head.setTitle(&ns(&format!("Pause {}", fmt_gap(gap))));
+    head.setEnabled(false);
+    menu.addItem(&head);
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+    for (activity, title) in [
+        (Activity::Other, "Als Arbeitszeit zählen"),
+        (Activity::Meeting, "Als Meeting zählen"),
+        (Activity::Call, "Als Telefonat zählen"),
+    ] {
+        let item = unsafe {
+            NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &ns(title), Some(sel!(countGap:)), &ns(""))
+        };
+        unsafe { item.setTarget(Some(&controller)) };
+        item.setTag(activity.id());
+        menu.addItem(&item);
+    }
+    PENDING_GAP.with(|g| g.set(Some((date, gap))));
+    menu.popUpMenuPositioningItem_atLocation_inView(None, p, Some(view));
 }
 
 /// Anklickbare Bereiche (für die Zeigehand).
@@ -676,6 +790,9 @@ fn clickable_rects(view: &WeekView) -> Vec<NSRect> {
         out.extend(
             d.cols.iter().enumerate().filter(|(_, c)| !c.warnings.is_empty()).map(|(i, _)| geo.header_rect(i)),
         );
+        if gaps_clickable() {
+            out.extend(gap_rects(&geo, &d).into_iter().map(|(_, _, r)| r));
+        }
         out
     })
 }
@@ -803,6 +920,24 @@ fn round_fill(rect: NSRect, radius: f64, color: &NSColor) {
     NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, radius, radius).fill();
 }
 
+/// Diagonale Schraffur in einem abgerundeten Rechteck.
+fn hatch(rect: NSRect, color: &NSColor) {
+    if rect.size.height <= 0.0 || rect.size.width <= 0.0 {
+        return;
+    }
+    NSGraphicsContext::saveGraphicsState_class();
+    NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(rect, 4.0, 4.0).addClip();
+    color.setStroke();
+    let (x0, y0) = (rect.origin.x, rect.origin.y);
+    let (w, h) = (rect.size.width, rect.size.height);
+    let mut off = -h;
+    while off < w {
+        NSBezierPath::strokeLineFromPoint_toPoint(NSPoint::new(x0 + off, y0 + h), NSPoint::new(x0 + off + h, y0));
+        off += 6.0;
+    }
+    NSGraphicsContext::restoreGraphicsState_class();
+}
+
 fn hline(x0: f64, x1: f64, y: f64, color: &NSColor) {
     fill(NSRect::new(NSPoint::new(x0, y.floor()), NSSize::new(x1 - x0, 1.0)), color);
 }
@@ -927,6 +1062,12 @@ fn draw(bounds: NSRect, d: &Data, flash: Option<&Flash>) {
             Kind::Outside => (orange.colorWithAlphaComponent(0.16), &orange),
         };
         round_fill(bx.rect, 4.0, &tint);
+        // Arbeit ohne Mac schraffiert.
+        if b.kind == Kind::Work {
+            for (sp, _) in d.cols[bx.col].manual.iter().filter(|(sp, _)| sp.from < b.to && sp.to > b.from) {
+                hatch(geo.span_rect(bx.col, *sp), &accent.colorWithAlphaComponent(0.35));
+            }
+        }
         // Farbiger Rand links, wie bei Terminen in Kalender.
         round_fill(NSRect::new(bx.rect.origin, NSSize::new(3.0, bx.rect.size.height)), 1.5, bar);
         for p in &bx.pieces {
@@ -942,6 +1083,16 @@ fn draw(bounds: NSRect, d: &Data, flash: Option<&Flash>) {
             } else {
                 text_at(&p.text, p.rect.origin, fonts.get(p.style));
             }
+        }
+    }
+
+    // Pausen zwischen den Abschnitten: Dauer, wenn Platz ist.
+    let gap_attrs = attrs(&digits(10.0, regular), &NSColor::tertiaryLabelColor(), NSTextAlignment::Center);
+    for (_, gap, r) in gap_rects(&geo, d) {
+        if r.size.height >= 16.0 {
+            let text = format!("Pause {}", store::fmt_hm(gap.len()));
+            let y = r.origin.y + (r.size.height - 13.0) / 2.0;
+            text_in(&text, NSRect::new(NSPoint::new(r.origin.x, y), NSSize::new(r.size.width, 13.0)), &gap_attrs);
         }
     }
 
@@ -1024,6 +1175,16 @@ fn update_tooltips(view: &WeekView) {
                 }
                 text.push_str("\nKlick auf eine Uhrzeit kopiert sie.");
                 out.push((geo.block_rect(i, b), text));
+            }
+        }
+        if gaps_clickable() {
+            for (i, gap, r) in gap_rects(&geo, &d) {
+                let text = format!(
+                    "{}\nPause {}\nKlick: als Arbeitszeit zählen (z. B. Telefonat oder Meeting)",
+                    fmt_day(d.cols[i].date),
+                    fmt_gap(gap)
+                );
+                out.push((r, text));
             }
         }
         out
@@ -1199,8 +1360,10 @@ fn build() -> Ui {
 }
 
 /// Öffnet die Wochenansicht (oder holt sie nach vorn). Ein neu geöffnetes Fenster zeigt
-/// die aktuelle Woche. `open_day` öffnet einen Tag im Fenster „Aufzeichnungen“.
-pub fn show(snap: Snapshot, open_day: fn(NaiveDate)) {
+/// die aktuelle Woche. `open_day` öffnet einen Tag im Fenster „Aufzeichnungen“,
+/// `count_gap` zählt eine Pause als Arbeitszeit.
+pub fn show(snap: Snapshot, open_day: fn(NaiveDate), count_gap: CountGap) {
+    COUNT_GAP.with(|c| c.set(Some(count_gap)));
     show_inner(snap, open_day, true);
 }
 
@@ -1248,7 +1411,7 @@ pub fn screenshot(path: &std::path::Path) -> Result<(), String> {
     let days = db.load().map_err(|e| e.to_string())?;
     let settings = db.load_settings().map_err(|e| e.to_string())?;
     let now = chrono::Local::now().naive_local();
-    let running = store::read_status() == Some(store::Status::Running);
+    let running = matches!(store::read_status(), Some(store::Status::Running | store::Status::Away(..)));
     show_inner(Snapshot { days, settings, now, running }, |_| {}, false);
     if let Some(d) = std::env::var("TAGWERK_SELECT").ok().and_then(|s| store::parse_date(&s)) {
         DATA.with(|data| {
@@ -1344,8 +1507,26 @@ mod tests {
         // 7:30 – 17:00 abzüglich Arbeitszeit: manuelle Pause und Mittagslücke.
         assert_eq!(cols[1].pause_secs, h(0, 30) + h(0, 43));
         assert_eq!(cols[1].blocks[0].notes, vec!["Arbeitsbeginn manuell festgelegt", "endet mit einer manuellen Pause"]);
+        assert_eq!(cols[1].gaps, vec![Span::new(h(10, 0), h(10, 30)), Span::new(h(11, 58), h(12, 41))]);
+        assert!(cols[1].manual.is_empty());
         assert_eq!(cols[1].blocks[2].notes, vec!["Feierabend manuell festgelegt"]);
         assert!(cols[1].warnings.is_empty());
+    }
+
+    #[test]
+    fn work_without_mac_joins_blocks() {
+        let mut d = Day::new(date(2026, 11, 17));
+        d.add_period(h(8, 0), h(12, 0));
+        d.add_period(h(14, 0), h(17, 0));
+        d.add_work(h(12, 5), h(13, 30), "Meeting");
+        let cols = columns(&snap(vec![d], date(2026, 11, 17).and_hms_opt(20, 0, 0).unwrap(), false), date(2026, 11, 16));
+        let spans: Vec<(i64, i64)> = cols[1].blocks.iter().map(|b| (b.from, b.to)).collect();
+        // 12:00–12:05 ist kürzer als die Mindestpause und zählt mit.
+        assert_eq!(spans, vec![(h(8, 0), h(13, 30)), (h(14, 0), h(17, 0))]);
+        assert_eq!(cols[1].manual, vec![(Span::new(h(12, 5), h(13, 30)), "Meeting".to_string())]);
+        assert_eq!(cols[1].gaps, vec![Span::new(h(13, 30), h(14, 0))]);
+        assert_eq!(cols[1].blocks[0].notes, vec!["ohne Mac gearbeitet 12:05 – 13:30 (Meeting)"]);
+        assert_eq!(fmt_gap(cols[1].gaps[0]), "13:30 – 14:00 Uhr (30 Min.)");
     }
 
     #[test]

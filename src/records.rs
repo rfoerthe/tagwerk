@@ -1,6 +1,6 @@
 //! Fenster „Aufzeichnungen“ – natives AppKit-Fenster nach den macOS Human Interface
 //! Guidelines: Symbolleiste, Übersicht, Tabelle mit Wochensummen, Inspektor zum
-//! Korrigieren eines Tages (Arbeitsbeginn, Pausen, Feierabend) und Export als Markdown
+//! Korrigieren eines Tages (Arbeitsbeginn, Pausen, Arbeit ohne Mac, Feierabend) und Export als Markdown
 //! über den Sichern-Dialog.
 //!
 //! Die Menüleisten-App öffnet das Fenster in ihrem eigenen Prozess ([`show`]). Solange es
@@ -11,7 +11,7 @@
 //! `Tagwerk --records` öffnet das Fenster ohne Menüleisten-App ([`run`]).
 
 use crate::about;
-use crate::day::{fmt_clock, secs_of, Break, Day, DayRecord, Span, DAY_END};
+use crate::day::{fmt_clock, secs_of, Day, DayRecord, Span, DAY_END};
 use crate::rules::{self, Settings, Warning};
 use crate::settings_window;
 use crate::store::{self, Status};
@@ -210,6 +210,9 @@ struct Inspector {
     end_picker: Retained<NSDatePicker>,
     break_from: Retained<NSDatePicker>,
     break_to: Retained<NSDatePicker>,
+    work_from: Retained<NSDatePicker>,
+    work_to: Retained<NSDatePicker>,
+    work_note: Retained<NSTextField>,
     error: Retained<NSTextField>,
 }
 
@@ -568,6 +571,29 @@ define_class!(
             }
         }
 
+        #[unsafe(method(addWork:))]
+        fn add_work(&self, _sender: Option<&AnyObject>) {
+            let input = model(|m| {
+                m.inspector.as_ref().map(|i| {
+                    (picker_secs(&i.work_from), picker_secs(&i.work_to), i.work_note.stringValue().to_string())
+                })
+            });
+            match input {
+                Some((Some(from), Some(to), note)) if to > from => apply(Edit::AddWork(from, to, note), true),
+                Some((Some(_), Some(_), _)) => {
+                    show_inspector_error("Das Ende der Arbeit ohne Mac muss nach ihrem Beginn liegen.")
+                }
+                _ => {}
+            }
+        }
+
+        #[unsafe(method(removeWork:))]
+        fn remove_work(&self, sender: Option<&NSButton>) {
+            if let Some(b) = sender {
+                apply(Edit::RemoveWork(b.tag() as usize), true);
+            }
+        }
+
         #[unsafe(method(exportPreset:))]
         fn export_preset(&self, sender: Option<&NSPopUpButton>) {
             let tag = sender.map(|p| p.selectedTag()).unwrap_or(PRESET_4W);
@@ -678,7 +704,10 @@ fn cell_view(m: &Model, column: Option<&str>, row: NSInteger) -> Option<Retained
                 "date" => (store::fmt_date(rec.date), NSTextAlignment::Left, false),
                 "start" => (fmt_clock(rec.first_start), NSTextAlignment::Right, false),
                 "end" => {
-                    if is_today && day.end.is_none() && m.status == Some(Status::Running) {
+                    if is_today
+                        && day.end.is_none()
+                        && matches!(m.status, Some(Status::Running | Status::Away(..)))
+                    {
                         ("läuft".to_string(), NSTextAlignment::Right, true)
                     } else {
                         (fmt_clock(rec.last_end), NSTextAlignment::Right, false)
@@ -782,6 +811,7 @@ fn refresh_summary() {
         Some(Status::Running) => "Zeiterfassung läuft".to_string(),
         Some(Status::Paused) => "Zeiterfassung pausiert".to_string(),
         Some(Status::Break(since)) => format!("Pause seit {} Uhr", since.format("%H:%M")),
+        Some(Status::Away(since, _)) => format!("Ohne Mac seit {} Uhr", since.format("%H:%M")),
         Some(Status::Outside) => "Außerhalb des Arbeitszeitrahmens".to_string(),
         Some(Status::Closed) => "Feierabend".to_string(),
         None => "Menüleisten-App nicht aktiv".to_string(),
@@ -816,6 +846,8 @@ enum Edit {
     SetEnd(Option<i64>),
     AddBreak(i64, i64),
     RemoveBreak(usize),
+    AddWork(i64, i64, String),
+    RemoveWork(usize),
 }
 
 fn apply(edit: Edit, rebuild: bool) {
@@ -825,13 +857,16 @@ fn apply(edit: Edit, rebuild: bool) {
         Some(db.edit_day(date, now(), |d| match edit {
             Edit::SetStart(s) => d.start = s,
             Edit::SetEnd(e) => d.end = e,
-            Edit::AddBreak(from, to) => {
-                d.breaks.push(Break { from, to });
-                d.sort_breaks();
-            }
+            Edit::AddBreak(from, to) => d.add_break(from, to),
             Edit::RemoveBreak(i) => {
                 if i < d.breaks.len() {
                     d.breaks.remove(i);
+                }
+            }
+            Edit::AddWork(from, to, note) => d.add_work(from, to, &note),
+            Edit::RemoveWork(i) => {
+                if i < d.work.len() {
+                    d.work.remove(i);
                 }
             }
         }))
@@ -930,7 +965,9 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         let empty = label("Kein Tag ausgewählt");
         empty.setFont(Some(&NSFont::systemFontOfSize(15.0)));
         empty.setTextColor(Some(&NSColor::tertiaryLabelColor()));
-        let hint = caption("Wähle in der Liste einen Tag aus, um Arbeitsbeginn, Pausen oder Feierabend zu korrigieren.");
+        let hint = caption(
+            "Wähle in der Liste einen Tag aus, um Arbeitsbeginn, Pausen, Arbeit ohne Mac oder Feierabend zu korrigieren.",
+        );
         stack.addArrangedSubview(&empty);
         stack.addArrangedSubview(&hint);
         pin_width(&hint, stack, 40.0);
@@ -1062,6 +1099,84 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     row.addArrangedSubview(&add);
     stack.addArrangedSubview(&row);
 
+    // Arbeit ohne Mac
+    let row_view: Retained<NSView> = Retained::into_super(row);
+    section("Arbeit ohne Mac", Some(&row_view));
+    let work_note_text = caption(
+        "Telefonat, Meeting oder Termin bei gesperrtem Mac: Diese Zeiten zählen als Arbeitszeit. \
+         Eine Pause in dieser Zeit entfällt.",
+    );
+    stack.addArrangedSubview(&work_note_text);
+    pin_width(&work_note_text, stack, 40.0);
+    let work = day.as_ref().map(|d| d.work.clone()).unwrap_or_default();
+    let mut last: Retained<NSView> = Retained::into_super(Retained::into_super(work_note_text.clone()));
+    if work.is_empty() {
+        let none = label("Nichts eingetragen");
+        none.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        stack.addArrangedSubview(&none);
+        last = Retained::into_super(Retained::into_super(none));
+    }
+    for (i, w) in work.iter().enumerate() {
+        let row = hstack(8.0);
+        row.setAlignment(NSLayoutAttribute::CenterY);
+        let times = label(&format!("{} – {}", fmt_clock(w.from), fmt_clock(w.to)));
+        times.setFont(Some(&font_digits(NSFont::systemFontSize(), font_regular())));
+        let dur = label(&fmt_dur(w.to - w.from));
+        dur.setFont(Some(&font_digits(NSFont::systemFontSize(), font_regular())));
+        dur.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        let note = label(&w.note);
+        note.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        note.setToolTip(Some(&ns(&w.note)));
+        note.setContentCompressionResistancePriority_forOrientation(250.0, NSLayoutConstraintOrientation::Horizontal);
+        let remove = match symbol("minus.circle.fill", "Arbeit ohne Mac entfernen") {
+            Some(img) => unsafe {
+                NSButton::buttonWithImage_target_action(&img, Some(target), Some(sel!(removeWork:)), mtm())
+            },
+            None => button("Entfernen", sel!(removeWork:), target),
+        };
+        remove.setBordered(false);
+        remove.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+        remove.setToolTip(Some(&ns("Arbeit ohne Mac entfernen")));
+        remove.setTag(i as isize);
+        let spacer = NSView::new(mtm());
+        spacer.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
+        row.addArrangedSubview(&times);
+        row.addArrangedSubview(&dur);
+        row.addArrangedSubview(&note);
+        row.addArrangedSubview(&spacer);
+        row.addArrangedSubview(&remove);
+        stack.addArrangedSubview(&row);
+        pin_width(&row, stack, 40.0);
+        last = Retained::into_super(row);
+    }
+    stack.setCustomSpacing_afterView(12.0, &last);
+    // Vorschlag: die erste Pause des Tages, sonst die Mittagszeit.
+    let (wf, wt) = day
+        .as_ref()
+        .and_then(|d| d.pauses(&settings).first().map(|p| (p.from, p.to)))
+        .unwrap_or((12 * 3600, 12 * 3600 + 30 * 60));
+    let work_from = time_picker(date, wf, sel!(exportRange:), target);
+    let work_to = time_picker(date, wt, sel!(exportRange:), target);
+    unsafe {
+        work_from.setAction(None);
+        work_to.setAction(None);
+    }
+    let row = hstack(6.0);
+    row.addArrangedSubview(&work_from);
+    row.addArrangedSubview(&label("bis"));
+    row.addArrangedSubview(&work_to);
+    stack.addArrangedSubview(&row);
+    stack.setCustomSpacing_afterView(6.0, &row);
+    let work_note = NSTextField::textFieldWithString(&ns(""), mtm());
+    work_note.setPlaceholderString(Some(&ns("Notiz, z. B. Telefonat")));
+    let add = button("Hinzufügen", sel!(addWork:), target);
+    let row = hstack(6.0);
+    row.addArrangedSubview(&work_note);
+    row.addArrangedSubview(&add);
+    stack.addArrangedSubview(&row);
+    pin_width(&row, stack, 40.0);
+    work_note.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
+
     // Feierabend
     let row_view: Retained<NSView> = Retained::into_super(row);
     section("Feierabend", Some(&row_view));
@@ -1131,6 +1246,9 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
             end_picker,
             break_from,
             break_to,
+            work_from,
+            work_to,
+            work_note,
             error,
         });
     });
@@ -1175,7 +1293,7 @@ fn ask_day() {
 
     let alert = NSAlert::new(mtm);
     alert.setMessageText(&ns("Tag bearbeiten"));
-    alert.setInformativeText(&ns("Wähle einen Tag, um Arbeitsbeginn, Pausen oder Feierabend nachzutragen."));
+    alert.setInformativeText(&ns("Wähle einen Tag, um Arbeitsbeginn, Pausen, Arbeit ohne Mac oder Feierabend nachzutragen."));
     alert.addButtonWithTitle(&ns("Öffnen"));
     alert.addButtonWithTitle(&ns("Abbrechen"));
     alert.setAccessoryView(Some(&picker));

@@ -69,6 +69,14 @@ im Fenster „Aufzeichnungen“.
   von selbst weiter. Auch hier gilt die Mindestdauer: Eine kürzere Pause zählt als
   Arbeitszeit. Beim Beenden der App (z. B. für ein Update) bleibt die Pause bestehen,
   beim Abmelden oder Neustarten des Macs endet sie.
+- **Ohne Mac weiterarbeiten** – vor einem Meeting, Telefonat oder Termin wählen
+  (Meeting, Telefonat oder Sonstiges). Die Zeit zählt dann als Arbeitszeit, auch wenn
+  der Mac gesperrt wird oder in den Ruhezustand geht – bis zum nächsten Entsperren oder
+  „Zurück am Mac“, spätestens um Mitternacht oder mit dem Feierabend. Sie erscheint als
+  „Arbeit ohne Mac“ mit der gewählten Notiz. Beim Beenden der App bleibt der Zustand
+  bestehen, beim Abmelden oder Neustarten endet er.
+- **Pause als Arbeitszeit zählen** – nachträglich: das Untermenü listet die Pausen von
+  heute; ein Klick trägt die Pause als Arbeit ohne Mac ein.
 - **Arbeitsbeginn und Feierabend festlegen** – „jetzt“, „vor N Minuten“ oder zu einer
   frei gewählten Uhrzeit. Korrekturen liegen als eigene Schicht über den erfassten
   Perioden und lassen sich jederzeit zurücknehmen.
@@ -78,8 +86,11 @@ im Fenster „Aufzeichnungen“.
 
 Ein natives macOS-Fenster (⌘A bei geöffnetem Menü) mit Kennzahlen für heute, die Woche,
 den Monat und den Durchschnitt pro Arbeitstag, einer Tabelle aller Tage mit Saldo und
-Wochensummen sowie einem **Inspektor**. Dort lassen sich Arbeitsbeginn, Pausen und
-Feierabend eines Tages korrigieren – auch für Tage ohne Aufzeichnung. Tage mit
+Wochensummen sowie einem **Inspektor**. Dort lassen sich Arbeitsbeginn, Pausen, Arbeit
+ohne Mac und Feierabend eines Tages korrigieren – auch für Tage ohne Aufzeichnung.
+**Arbeit ohne Mac** (Telefonat, Meeting … bei gesperrtem Mac) zählt als Arbeitszeit,
+mit optionaler Notiz; eine manuelle Pause in dieser Zeit entfällt und umgekehrt. Bleibt
+dabei eine Lücke kürzer als die Mindestpause, zählt sie wie eine kurze Sperre mit. Tage mit
 Regelverstößen tragen ein Warnsymbol, manuell korrigierte Tage einen Stift.
 
 ### Wochenansicht
@@ -99,6 +110,9 @@ aus automatischer Erfassung und manuellen Korrekturen.
 - Tage mit Regelverstößen tragen ein Warnschild; ein Klick auf den Tageskopf zeigt die
   Hinweise.
 - Arbeit außerhalb des Arbeitszeitrahmens erscheint orange als „nicht gezählt“.
+- Arbeit ohne Mac ist schraffiert; der Tooltip nennt Uhrzeit und Notiz.
+- Ein Klick auf eine Pause zwischen zwei Blöcken bietet an, sie als Arbeitszeit, Meeting
+  oder Telefonat zu zählen.
 
 <details>
 <summary>Weitere Ansichten</summary>
@@ -150,7 +164,7 @@ Datei enthält:
 1. eine **Übersichtstabelle** mit Beginn, Ende, Arbeits- und Pausenzeit sowie Saldo je
    Tag und einer Summenzeile,
 2. **`## Hinweise`** – Verstöße gegen die [Regeln](#regeln),
-3. **`## Korrekturen`** – die manuellen Entscheidungen,
+3. **`## Korrekturen`** – die manuellen Entscheidungen samt Arbeit ohne Mac mit Notiz,
 4. **`## Erfasste Perioden`** – die automatisch erfassten Zeiten.
 
 Ein Export lässt sich mit `Tagwerk --import <datei.md>` wieder einlesen; die enthaltenen
@@ -170,7 +184,7 @@ verändert.
 | Pausen (§ 4 ArbZG)   | mehr als 6 Std. Arbeit: 30 Min., mehr als 9 Std.: 45 Min.; es zählen Pausen ab 15 Min. |
 | Ruhezeit (§ 5 ArbZG) | mindestens 11 Std. zwischen dem Ende eines Arbeitstags und dem nächsten Beginn |
 | Höchstarbeitszeit    | mehr als 10 Std. Arbeit an einem Tag                                    |
-| Erfassung            | Beginn und Ende durch Entsperren/Sperren oder Arbeit unterbrechen/Weiter arbeiten; keine Einträge in der Zukunft |
+| Erfassung            | Beginn und Ende durch Entsperren/Sperren, Arbeit unterbrechen/Weiter arbeiten oder Ohne Mac weiterarbeiten; keine Einträge in der Zukunft |
 
 > [!NOTE]
 > Der Saldo vergleicht die Arbeitszeit mit dem Soll – aber nur für Tage, an denen
@@ -279,7 +293,7 @@ Alle Daten liegen lokal in einer SQLite-Datenbank:
 ```
 
 Sie enthält die automatisch erfassten Perioden (Mac entsperrt), getrennt davon die
-manuellen Korrekturen (Arbeitsbeginn, Pausen, Feierabend) sowie die Einstellungen. Die
+manuellen Korrekturen (Arbeitsbeginn, Pausen, Arbeit ohne Mac, Feierabend) sowie die Einstellungen. Die
 Perioden werden ungekürzt gespeichert; Mindestpause und Arbeitszeitrahmen wirken erst
 bei der Berechnung. Bearbeitet werden die Daten im Fenster „Aufzeichnungen“; Änderungen
 dort übernimmt die laufende App automatisch.

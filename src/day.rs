@@ -1,11 +1,13 @@
 //! Tagesmodell: automatisch erfasste Perioden plus manuelle Korrekturen.
 //!
 //! Die automatisch erfassten Perioden (Mac entsperrt) bleiben unverändert erhalten.
-//! Manuelle Entscheidungen – Arbeitsbeginn, Pausen, Feierabend – liegen als eigene
-//! Schicht darüber; die Arbeitszeit wird aus beidem und den Einstellungen berechnet:
+//! Manuelle Entscheidungen – Arbeitsbeginn, Pausen, Arbeit ohne Mac, Feierabend – liegen als
+//! eigene Schicht darüber; die Arbeitszeit wird aus beidem und den Einstellungen berechnet:
 //!
-//! 1. Lücken zwischen Perioden, die kürzer als die Mindestpause sind, zählen als Arbeit.
-//! 2. Manueller Arbeitsbeginn und Feierabend verlängern bzw. kürzen den Tag.
+//! 1. Arbeit ohne Mac (Telefonat, Meeting …) zählt wie entsperrte Zeit; Lücken, die kürzer
+//!    als die Mindestpause sind, zählen als Arbeit.
+//! 2. Manueller Arbeitsbeginn und Feierabend verlängern bzw. kürzen den Tag; Arbeit ohne Mac
+//!    zählt auch davor bzw. danach.
 //! 3. Manuell eingetragene Pausen werden abgezogen.
 //! 4. Gezählt wird nur, was im Arbeitszeitrahmen liegt.
 //!
@@ -43,6 +45,67 @@ pub struct Break {
     pub to: i64,
 }
 
+/// Nachgetragene Arbeit ohne Mac (z. B. Telefonat oder Meeting bei gesperrtem Mac).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct WorkBlock {
+    pub from: i64,
+    pub to: i64,
+    /// Freie Notiz, z. B. „Meeting“ (leer = keine).
+    pub note: String,
+}
+
+impl WorkBlock {
+    pub fn span(&self) -> Span {
+        Span::new(self.from, self.to)
+    }
+}
+
+/// Art der Arbeit ohne Mac (Menüleiste und Wochenansicht); ergibt die Notiz.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Activity {
+    Meeting,
+    Call,
+    Other,
+}
+
+impl Activity {
+    pub const ALL: [Activity; 3] = [Activity::Meeting, Activity::Call, Activity::Other];
+
+    /// Notiz am Arbeitsblock (leer bei „Sonstiges“).
+    pub fn note(self) -> &'static str {
+        match self {
+            Activity::Meeting => "Meeting",
+            Activity::Call => "Telefonat",
+            Activity::Other => "",
+        }
+    }
+
+    pub fn id(self) -> isize {
+        match self {
+            Activity::Meeting => 1,
+            Activity::Call => 2,
+            Activity::Other => 0,
+        }
+    }
+
+    pub fn from_id(id: isize) -> Self {
+        Self::ALL.into_iter().find(|a| a.id() == id).unwrap_or(Activity::Other)
+    }
+
+    /// Kurzname für die Statusdatei.
+    pub fn key(self) -> &'static str {
+        match self {
+            Activity::Meeting => "meeting",
+            Activity::Call => "call",
+            Activity::Other => "other",
+        }
+    }
+
+    pub fn from_key(key: &str) -> Self {
+        Self::ALL.into_iter().find(|a| a.key() == key).unwrap_or(Activity::Other)
+    }
+}
+
 /// Ein Arbeitstag mit Rohdaten und Korrekturen.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Day {
@@ -55,6 +118,9 @@ pub struct Day {
     pub end: Option<i64>,
     /// Manuell eingetragene Pausen.
     pub breaks: Vec<Break>,
+    /// Arbeit ohne Mac (nachgetragen oder über „Ohne Mac weiterarbeiten“), sortiert und
+    /// überschneidungsfrei.
+    pub work: Vec<WorkBlock>,
 }
 
 /// Zustand eines Tages aus Sicht der manuellen Entscheidungen.
@@ -87,11 +153,11 @@ impl DayRecord {
 
 impl Day {
     pub fn new(date: NaiveDate) -> Self {
-        Self { date, periods: Vec::new(), start: None, end: None, breaks: Vec::new() }
+        Self { date, periods: Vec::new(), start: None, end: None, breaks: Vec::new(), work: Vec::new() }
     }
 
     pub fn has_corrections(&self) -> bool {
-        self.start.is_some() || self.end.is_some() || !self.breaks.is_empty()
+        self.start.is_some() || self.end.is_some() || !self.breaks.is_empty() || !self.work.is_empty()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -118,9 +184,96 @@ impl Day {
         self.breaks.sort_by_key(|b| (b.from, b.to));
     }
 
+    /// Manuelle Pause eintragen. Arbeit ohne Mac in dieser Zeit entfällt (die letzte
+    /// Angabe gilt).
+    pub fn add_break(&mut self, from: i64, to: i64) {
+        let (from, to) = (from.clamp(0, DAY_END), to.clamp(0, DAY_END));
+        if to <= from {
+            return;
+        }
+        self.cut_work(from, to);
+        self.breaks.push(Break { from, to });
+        self.sort_breaks();
+    }
+
+    /// Arbeit ohne Mac zwischen `from` und `to` entfernen (Blöcke werden gekürzt oder geteilt).
+    pub fn cut_work(&mut self, from: i64, to: i64) {
+        let cut = Span::new(from, to);
+        self.work = std::mem::take(&mut self.work)
+            .into_iter()
+            .flat_map(|w| {
+                subtract(vec![w.span()], cut)
+                    .into_iter()
+                    .map(move |s| WorkBlock { from: s.from, to: s.to, note: w.note.clone() })
+            })
+            .collect();
+    }
+
+    /// Arbeit ohne Mac eintragen. Überlappende oder angrenzende Blöcke werden
+    /// zusammengefasst; manuelle Pausen in dieser Zeit entfallen (die letzte Angabe gilt).
+    pub fn add_work(&mut self, from: i64, to: i64, note: &str) {
+        let (mut from, mut to) = (from.clamp(0, DAY_END), to.clamp(0, DAY_END));
+        if to <= from {
+            return;
+        }
+        let cut = Span::new(from, to);
+        self.breaks = std::mem::take(&mut self.breaks)
+            .into_iter()
+            .flat_map(|b| subtract(vec![Span::new(b.from, b.to)], cut))
+            .map(|s| Break { from: s.from, to: s.to })
+            .collect();
+        let mut notes: Vec<String> = Vec::new();
+        let mut keep = Vec::with_capacity(self.work.len() + 1);
+        for w in std::mem::take(&mut self.work) {
+            if w.from <= to && w.to >= from {
+                from = from.min(w.from);
+                to = to.max(w.to);
+                notes.push(w.note);
+            } else {
+                keep.push(w);
+            }
+        }
+        let note = note.trim();
+        if !note.is_empty() {
+            notes.push(note.to_string());
+        }
+        let mut merged: Vec<String> = Vec::new();
+        for n in notes.iter().flat_map(|n| n.split(", ")).map(str::trim) {
+            if !n.is_empty() && !merged.iter().any(|m| m == n) {
+                merged.push(n.to_string());
+            }
+        }
+        keep.push(WorkBlock { from, to, note: merged.join(", ") });
+        keep.sort_by_key(|w| (w.from, w.to));
+        self.work = keep;
+    }
+
+    /// Pausen des Tages: Lücken zwischen den Arbeitsabschnitten (nach den Einstellungen `s`).
+    pub fn pauses(&self, s: &Settings) -> Vec<Span> {
+        self.spans(s).windows(2).map(|w| Span::new(w[0].to, w[1].from)).collect()
+    }
+
+    /// Arbeit ohne Mac, die im Arbeitszeitrahmen tatsächlich zählt (ohne manuelle Pausen und
+    /// außerhalb des Feierabends), mit Notiz.
+    pub fn counted_work(&self, s: &Settings) -> Vec<(Span, String)> {
+        let spans = self.spans(s);
+        self.work
+            .iter()
+            .flat_map(|w| {
+                spans.iter().filter_map(move |sp| {
+                    let c = Span::new(w.from.max(sp.from), w.to.min(sp.to));
+                    (c.to > c.from).then(|| (c, w.note.clone()))
+                })
+            })
+            .collect()
+    }
+
     /// Arbeitsabschnitte ohne den Arbeitszeitrahmen (Schritte 1–3).
     fn unframed_spans(&self, min_pause: i64) -> Vec<Span> {
-        let mut spans = fill_gaps(self.periods.clone(), min_pause);
+        let manual: Vec<Span> = self.work.iter().map(WorkBlock::span).collect();
+        let mut base = self.periods.clone();
+        base.extend(manual.iter().copied());
+        let mut spans = fill_gaps(base, min_pause);
         // Manuelle Angaben fügen nur vor dem ersten Entsperren bzw. nach dem letzten Sperren
         // Zeit hinzu – nie in Lücken dazwischen (das wäre z. B. die gesperrte Mittagszeit).
         if let Some(s) = self.start {
@@ -139,6 +292,9 @@ impl Day {
             }
             spans = clip(spans, 0, e);
         }
+        // Ausdrücklich eingetragene Arbeit ohne Mac zählt auch vor dem Beginn bzw. nach dem
+        // Feierabend.
+        spans.extend(manual);
         let mut spans = union(spans);
         for b in &self.breaks {
             spans = subtract(spans, Span::new(b.from, b.to));
@@ -180,6 +336,7 @@ impl Day {
                 let first = self
                     .start
                     .or(self.periods.first().map(|p| p.from))
+                    .or(self.work.first().map(|w| w.from))
                     .or(self.end)
                     .or(self.breaks.first().map(|b| b.from))
                     .unwrap_or(0)
@@ -434,6 +591,87 @@ mod tests {
         let r = d.record(&st()).unwrap();
         assert_eq!(r.work_secs, h(7, 30));
         assert_eq!(r.pause_secs(), h(0, 30));
+    }
+
+    #[test]
+    fn work_without_mac_fills_lock_gap() {
+        // Mittags gesperrt 11:58–12:41, dabei 12:00–12:35 telefoniert: Die Reste (2 bzw.
+        // 6 Min.) sind kürzer als die Mindestpause und zählen ebenfalls als Arbeit.
+        let mut d = day();
+        d.add_work(h(12, 0), h(12, 35), "Telefonat");
+        let r = d.record(&st()).unwrap();
+        assert_eq!((r.work_secs, r.pause_secs()), (h(9, 18), 0));
+        assert!(d.has_corrections());
+        assert!(d.pauses(&st()).is_empty());
+        // Nur ein Teil der Mittagszeit: der Rest bleibt Pause.
+        let mut d = day();
+        d.add_work(h(12, 0), h(12, 20), "");
+        let r = d.record(&st()).unwrap();
+        assert_eq!(r.pause_secs(), h(0, 21));
+        assert_eq!(d.pauses(&st()), vec![Span::new(h(12, 20), h(12, 41))]);
+        assert_eq!(d.counted_work(&st()), vec![(Span::new(h(12, 0), h(12, 20)), String::new())]);
+    }
+
+    #[test]
+    fn work_without_mac_outside_start_and_end() {
+        let mut d = day();
+        d.start = Some(h(8, 30));
+        d.end = Some(h(17, 0));
+        d.add_work(h(7, 45), h(8, 0), "Telefonat");
+        d.add_work(h(19, 0), h(19, 30), "Meeting");
+        let r = d.record(&st()).unwrap();
+        assert_eq!((r.first_start, r.last_end), (h(7, 45), h(19, 30)));
+        assert_eq!(r.work_secs, h(0, 15) + h(3, 28) + h(4, 19) + h(0, 30));
+        // ganz ohne Entsperren
+        let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 14).unwrap());
+        d.add_work(h(10, 0), h(11, 0), "");
+        assert!(!d.is_empty());
+        let r = d.record(&st()).unwrap();
+        assert_eq!((r.first_start, r.work_secs), (h(10, 0), h(1, 0)));
+        // außerhalb des Rahmens: nicht gezählt
+        d.add_work(h(22, 0), h(23, 0), "");
+        assert_eq!(d.record(&st()).unwrap().work_secs, h(1, 0));
+        assert_eq!(d.outside_frame_spans(&st()), vec![Span::new(h(22, 0), h(23, 0))]);
+    }
+
+    #[test]
+    fn work_blocks_merge_and_latest_entry_wins() {
+        let mut d = day();
+        d.add_work(h(12, 0), h(12, 20), "Meeting");
+        d.add_work(h(12, 20), h(12, 30), "Telefonat");
+        d.add_work(h(12, 10), h(12, 25), "Meeting");
+        assert_eq!(d.work, vec![WorkBlock { from: h(12, 0), to: h(12, 30), note: "Meeting, Telefonat".into() }]);
+        // Pause darüber: die Arbeit wird geteilt
+        d.add_break(h(12, 10), h(12, 15));
+        assert_eq!(
+            d.work.iter().map(|w| (w.from, w.to)).collect::<Vec<_>>(),
+            vec![(h(12, 0), h(12, 10)), (h(12, 15), h(12, 30))]
+        );
+        assert_eq!(d.work[1].note, "Meeting, Telefonat");
+        assert_eq!(d.breaks, vec![Break { from: h(12, 10), to: h(12, 15) }]);
+        // Arbeit darüber: die Pause entfällt
+        d.add_work(h(12, 5), h(12, 20), "");
+        assert!(d.breaks.is_empty());
+        assert_eq!(d.work.len(), 1);
+        // manuelle Pause teilweise überdeckt
+        let mut d = day();
+        d.add_break(h(10, 0), h(11, 0));
+        d.add_work(h(10, 30), h(11, 30), "");
+        assert_eq!(d.breaks, vec![Break { from: h(10, 0), to: h(10, 30) }]);
+        // leere oder verkehrte Zeiten werden ignoriert
+        let before = d.clone();
+        d.add_work(h(9, 0), h(9, 0), "x");
+        d.add_break(h(9, 0), h(8, 0));
+        assert_eq!(d, before);
+    }
+
+    #[test]
+    fn activity_ids_round_trip() {
+        for a in Activity::ALL {
+            assert_eq!(Activity::from_id(a.id()), a);
+            assert_eq!(Activity::from_key(a.key()), a);
+        }
+        assert_eq!(Activity::from_key("unbekannt"), Activity::Other);
     }
 
     #[test]

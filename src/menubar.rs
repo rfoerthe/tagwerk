@@ -1,10 +1,11 @@
 //! Menüleisten-App (NSStatusItem) mit Erkennung von Sperren/Entsperren des Macs
-//! und manuellen Entscheidungen: Arbeit unterbrechen/Weiter arbeiten, Arbeitsbeginn, Feierabend.
+//! und manuellen Entscheidungen: Arbeit unterbrechen/Weiter arbeiten, Ohne Mac weiterarbeiten,
+//! Pause als Arbeitszeit zählen, Arbeitsbeginn, Feierabend.
 //! Pausen ergeben sich aus den Sperrzeiten und aus „Arbeit unterbrechen“ (jeweils ab der
 //! eingestellten Mindestdauer).
 
 use crate::about;
-use crate::day::{self, fmt_clock, Mode};
+use crate::day::{self, fmt_clock, Activity, Mode, Span};
 use crate::glyphs;
 use crate::login_item;
 use crate::records;
@@ -58,8 +59,17 @@ struct MenuItems {
     balance: Retained<NSMenuItem>,
     /// Hinweise zu Regelverstößen (so viele, wie es Arten von Hinweisen gibt).
     hints: Vec<Retained<NSMenuItem>>,
-    /// „Arbeit unterbrechen“ bzw. „Weiter arbeiten“.
+    /// „Arbeit unterbrechen“, „Weiter arbeiten“ bzw. „Zurück am Mac“.
     pause: Retained<NSMenuItem>,
+    /// „Ohne Mac weiterarbeiten“ (mit Untermenü Meeting, Telefonat, Sonstiges).
+    away: Retained<NSMenuItem>,
+    /// „Pause als Arbeitszeit zählen“ mit den Pausen von heute im Untermenü.
+    count_pause: Retained<NSMenuItem>,
+    count_pause_menu: Retained<NSMenu>,
+    /// Pausen, die das Untermenü gerade zeigt.
+    count_pause_list: Vec<Span>,
+    /// Ziel der Menüeinträge, die zur Laufzeit entstehen.
+    controller: Retained<Controller>,
     start_reset: Retained<NSMenuItem>,
     close: Retained<NSMenuItem>,
     reopen: Retained<NSMenuItem>,
@@ -70,6 +80,8 @@ struct MenuItems {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum IconKind {
     Running,
+    /// Arbeit ohne Mac (Meeting, Telefonat …).
+    Away,
     Paused,
     Break,
     Outside,
@@ -130,7 +142,7 @@ define_class!(
     }
 
     impl Controller {
-        /// „Arbeit unterbrechen“ ↔ „Weiter arbeiten“.
+        /// „Arbeit unterbrechen“ ↔ „Weiter arbeiten“; bei Arbeit ohne Mac „Zurück am Mac“.
         #[unsafe(method(togglePause:))]
         fn toggle_pause(&self, _sender: Option<&AnyObject>) {
             act(|s, t| {
@@ -138,6 +150,26 @@ define_class!(
                     s.tracker.take_break(t);
                 } else {
                     s.tracker.start(t);
+                }
+            });
+        }
+
+        /// „Ohne Mac weiterarbeiten“ (Tag = Art der Arbeit).
+        #[unsafe(method(goAway:))]
+        fn go_away(&self, sender: Option<&NSMenuItem>) {
+            let activity = Activity::from_id(sender.map(|s| s.tag()).unwrap_or(0));
+            act(|s, t| {
+                s.tracker.go_away(t, activity);
+            });
+        }
+
+        /// Eine Pause von heute als Arbeitszeit zählen (Tag = Beginn der Pause).
+        #[unsafe(method(countPause:))]
+        fn count_pause(&self, sender: Option<&NSMenuItem>) {
+            let Some(from) = sender.map(|s| s.tag() as i64) else { return };
+            act(|s, t| {
+                if let Some(p) = s.tracker.pauses_today(t).into_iter().find(|p| p.from == from) {
+                    s.tracker.add_work(t.date(), p.from, p.to, "");
                 }
             });
         }
@@ -207,7 +239,7 @@ define_class!(
                 s.week_snapshot(t)
             });
             if let Some(snap) = snap {
-                week_window::show(snap, open_day_in_records);
+                week_window::show(snap, open_day_in_records, count_gap_as_work);
             }
         }
 
@@ -241,6 +273,7 @@ define_class!(
                 } else if !s.tracker.is_running()
                     && !locked
                     && !s.tracker.on_break()
+                    && !s.tracker.on_away()
                     && s.tracker.paused_since.is_some_and(|p| p.date() == t.date())
                 {
                     // Entsperrt, aber nicht erfasst (z. B. Feierabend im Fenster zurückgenommen).
@@ -293,14 +326,17 @@ define_class!(
             shutdown();
         }
 
-        /// Abmelden, Neustart, Ausschalten: Eine Pause über „Arbeit unterbrechen“ endet damit (nach
-        /// dem Anmelden wird wieder erfasst). Beim bloßen Beenden der App bleibt sie bestehen.
+        /// Abmelden, Neustart, Ausschalten: Eine Pause über „Arbeit unterbrechen“ und Arbeit ohne Mac
+        /// enden damit (nach dem Anmelden wird wieder erfasst). Beim bloßen Beenden der App bleiben
+        /// sie bestehen.
         #[unsafe(method(willPowerOff:))]
         fn will_power_off(&self, _n: &NSNotification) {
             with_state(|s| {
                 if s.tracker.on_break() {
                     s.tracker.pause_reason = PauseReason::Manual;
                 }
+                // Arbeit ohne Mac endet ebenfalls (bis jetzt zählt sie).
+                s.tracker.end_away(now());
             });
             shutdown();
         }
@@ -339,6 +375,11 @@ fn resume_auto() {
 /// Doppelklick auf einen Tag in der Wochenansicht: im Fenster „Aufzeichnungen“ zeigen.
 fn open_day_in_records(date: chrono::NaiveDate) {
     open_records(Some(date));
+}
+
+/// Klick auf eine Pause in der Wochenansicht: als Arbeitszeit zählen.
+fn count_gap_as_work(date: chrono::NaiveDate, from: i64, to: i64, activity: Activity) {
+    act(|s, _| s.tracker.add_work(date, from, to, activity.note()));
 }
 
 /// Öffnet das Fenster „Aufzeichnungen“ (oder holt es nach vorn), auf Wunsch mit
@@ -474,24 +515,7 @@ impl AppState {
         let mtm = MainThreadMarker::new().expect("main thread");
         let midnight = t.date().and_hms_opt(0, 0, 0).unwrap();
 
-        let (status_text, icon) = match (status, info.mode) {
-            (_, Mode::Closed(at)) => (format!("Feierabend um {} Uhr", fmt_clock(at)), IconKind::Closed),
-            (store::Status::Break(since), _) => (break_text(since, t, self.tracker.settings.min_pause), IconKind::Break),
-            (store::Status::Outside, _) => (
-                format!("Außerhalb des Arbeitszeitrahmens ({})", self.tracker.settings.frame_text()),
-                IconKind::Outside,
-            ),
-            (store::Status::Running, _) => ("Zeiterfassung läuft".to_string(), IconKind::Running),
-            _ => (
-                match self.tracker.paused_since {
-                    Some(p) if p.date() == t.date() => {
-                        format!("Zeiterfassung pausiert seit {} Uhr", p.format("%H:%M"))
-                    }
-                    _ => "Zeiterfassung pausiert".to_string(),
-                },
-                IconKind::Paused,
-            ),
-        };
+        let (status_text, icon) = status_line(&self.tracker, t);
         self.items.status.setAttributedTitle(Some(&status_title(&status_text, icon)));
         if self.last_icon != Some(icon) {
             set_item_symbol(&self.items.status, icon.symbol().0, icon.symbol().1);
@@ -543,12 +567,32 @@ impl AppState {
         self.items.start_reset.setTitle(&ns(&reset));
 
         let closed = matches!(info.mode, Mode::Closed(_));
+        let away = self.tracker.on_away();
         self.items.pause.setHidden(closed);
-        let (title, symbol) = if running { ("Arbeit unterbrechen", "pause.fill") } else { ("Weiter arbeiten", "play.fill") };
+        let (title, symbol) = if running {
+            ("Arbeit unterbrechen", "pause.fill")
+        } else if away {
+            ("Zurück am Mac", "desktopcomputer")
+        } else {
+            ("Weiter arbeiten", "play.fill")
+        };
         if self.items.pause.title().to_string() != title {
             self.items.pause.setTitle(&ns(title));
             set_item_symbol(&self.items.pause, symbol, title);
         }
+        self.items.away.setHidden(closed || away);
+        let pauses = self.tracker.pauses_today(t);
+        if pauses != self.items.count_pause_list {
+            self.items.count_pause_menu.removeAllItems();
+            for p in &pauses {
+                let title = format!("{} – {} Uhr  ({})", fmt_clock(p.from), fmt_clock(p.to), fmt_minutes(p.len()));
+                let item = menu_item(mtm, &title, Some(sel!(countPause:)), "", &self.items.controller);
+                item.setTag(p.from as isize);
+                self.items.count_pause_menu.addItem(&item);
+            }
+            self.items.count_pause_list = pauses;
+        }
+        self.items.count_pause.setHidden(self.items.count_pause_list.is_empty());
         self.items.close.setHidden(closed);
         self.items.reopen.setHidden(!closed);
         if week_window::is_open() {
@@ -559,6 +603,7 @@ impl AppState {
         if let Some(button) = self.status_item.button(mtm) {
             let state = match icon {
                 IconKind::Running => "läuft",
+                IconKind::Away => "Arbeit ohne Mac",
                 IconKind::Paused => "pausiert",
                 IconKind::Break => "Pause",
                 IconKind::Outside => "außerhalb des Arbeitszeitrahmens",
@@ -586,7 +631,7 @@ impl AppState {
             days: self.tracker.snapshot(t),
             settings: self.tracker.settings,
             now: t,
-            running: self.tracker.is_running(),
+            running: self.tracker.is_running() || self.tracker.on_away(),
         }
     }
 }
@@ -606,11 +651,60 @@ fn break_text(since: NaiveDateTime, t: NaiveDateTime, min_pause: i64) -> String 
     }
 }
 
+/// Statuszeile und Symbol für das Menü und die Menüleiste.
+fn status_line(tracker: &Tracker, t: NaiveDateTime) -> (String, IconKind) {
+    let settings = &tracker.settings;
+    match (tracker.status(t), tracker.mode(t)) {
+        (_, Mode::Closed(at)) => (format!("Feierabend um {} Uhr", fmt_clock(at)), IconKind::Closed),
+        // Außerhalb des Rahmens zählt auch Arbeit ohne Mac nicht: Symbol wie bei „außerhalb“.
+        (store::Status::Away(since, activity), _) if !tracker.in_frame(t) => (
+            format!("{} – außerhalb des Arbeitszeitrahmens", away_text(since, t, activity)),
+            IconKind::Outside,
+        ),
+        (store::Status::Away(since, activity), _) => (away_text(since, t, activity), IconKind::Away),
+        (store::Status::Break(since), _) => (break_text(since, t, settings.min_pause), IconKind::Break),
+        (store::Status::Outside, _) => {
+            (format!("Außerhalb des Arbeitszeitrahmens ({})", settings.frame_text()), IconKind::Outside)
+        }
+        (store::Status::Running, _) => ("Zeiterfassung läuft".to_string(), IconKind::Running),
+        _ => (
+            match tracker.paused_since {
+                Some(p) if p.date() == t.date() => format!("Zeiterfassung pausiert seit {} Uhr", p.format("%H:%M")),
+                _ => "Zeiterfassung pausiert".to_string(),
+            },
+            IconKind::Paused,
+        ),
+    }
+}
+
+/// „Ohne Mac seit 12:03 Uhr – Meeting“
+fn away_text(since: NaiveDateTime, t: NaiveDateTime, activity: Activity) -> String {
+    let at = if since.date() == t.date() {
+        format!("{} Uhr", since.format("%H:%M"))
+    } else {
+        format!("{} Uhr", since.format("%d.%m. %H:%M"))
+    };
+    match activity.note() {
+        "" => format!("Ohne Mac seit {at}"),
+        note => format!("Ohne Mac seit {at} – {note}"),
+    }
+}
+
+/// `55 Min.` bzw. `1:20 h`
+fn fmt_minutes(secs: i64) -> String {
+    if secs < 3600 {
+        format!("{} Min.", secs / 60)
+    } else {
+        store::fmt_hm(secs)
+    }
+}
+
 impl IconKind {
     /// SF-Symbol (für den Eintrag im Menü) und Beschreibung.
     fn symbol(self) -> (&'static str, &'static str) {
         match self {
             IconKind::Running => ("clock.fill", "Zeiterfassung läuft"),
+            IconKind::Away => ("figure.walk", "Arbeit ohne Mac"),
             IconKind::Paused => ("pause.circle", "Zeiterfassung pausiert"),
             IconKind::Break => ("cup.and.saucer.fill", "Pause"),
             IconKind::Outside => ("moon.stars", "Außerhalb des Arbeitszeitrahmens"),
@@ -621,7 +715,8 @@ impl IconKind {
     /// Zustand des Menüleisten-Symbols.
     fn glyph(self) -> glyphs::State {
         match self {
-            IconKind::Running => glyphs::State::Running,
+            // Arbeit ohne Mac zählt wie die laufende Erfassung.
+            IconKind::Running | IconKind::Away => glyphs::State::Running,
             // gesperrt oder im Ruhezustand – in der Menüleiste kaum je zu sehen
             IconKind::Paused | IconKind::Break => glyphs::State::Break,
             IconKind::Outside => glyphs::State::Outside,
@@ -711,7 +806,7 @@ fn rich(parts: &[(&str, Tone)]) -> Retained<NSAttributedString> {
 /// der Menüleiste: grün = läuft, orange = Pause; Feierabend indigo).
 fn status_title(text: &str, kind: IconKind) -> Retained<NSAttributedString> {
     let color: fn() -> Retained<NSColor> = match kind {
-        IconKind::Running => green,
+        IconKind::Running | IconKind::Away => green,
         IconKind::Break | IconKind::Paused => orange,
         IconKind::Closed => indigo,
         IconKind::Outside => NSColor::labelColor,
@@ -925,6 +1020,34 @@ pub fn run() {
     start_sub.addItem(&start_reset);
     let (close, _) = time_menu(mtm, "Feierabend", sel!(closeDay:), &[0, 15, 30], &controller, &mut relative);
 
+    // Ohne Mac weiterarbeiten: Meeting, Telefonat, Sonstiges
+    let away_sub = NSMenu::new(mtm);
+    away_sub.setAutoenablesItems(false);
+    for (activity, title, symbol) in [
+        (Activity::Meeting, "Meeting", "person.2"),
+        (Activity::Call, "Telefonat", "phone"),
+        (Activity::Other, "Sonstiges", "ellipsis.circle"),
+    ] {
+        let it = menu_item(mtm, title, Some(sel!(goAway:)), "", &controller);
+        it.setTag(activity.id());
+        set_item_symbol(&it, symbol, title);
+        away_sub.addItem(&it);
+    }
+    let away_note = menu_item(mtm, "Zählt als Arbeitszeit, auch bei gesperrtem Mac – bis zum Entsperren.", None, "", &controller);
+    away_sub.addItem(&NSMenuItem::separatorItem(mtm));
+    away_sub.addItem(&away_note);
+    let away = menu_item(mtm, "Ohne Mac weiterarbeiten", None, "", &controller);
+    away.setEnabled(true);
+    away.setSubmenu(Some(&away_sub));
+
+    // Pause als Arbeitszeit zählen (die Pausen von heute; wird in `refresh` gefüllt)
+    let count_pause_menu = NSMenu::new(mtm);
+    count_pause_menu.setAutoenablesItems(false);
+    let count_pause = menu_item(mtm, "Pause als Arbeitszeit zählen", None, "", &controller);
+    count_pause.setEnabled(true);
+    count_pause.setSubmenu(Some(&count_pause_menu));
+    count_pause.setHidden(true);
+
     let items = MenuItems {
         // Status und Kennzahlen sind anklickbar (öffnen den heutigen Tag), damit macOS
         // sie nicht ausgraut – deaktivierte Einträge wären schlecht lesbar und farblos.
@@ -940,6 +1063,11 @@ pub fn run() {
         close,
         reopen: menu_item(mtm, "Feierabend aufheben", Some(sel!(reopenDay:)), "", &controller),
         relative,
+        away,
+        count_pause,
+        count_pause_menu,
+        count_pause_list: Vec::new(),
+        controller: controller.clone(),
     };
     let records = menu_item(mtm, "Aufzeichnungen …", Some(sel!(showRecords:)), "a", &controller);
     let week = menu_item(mtm, "Wochenansicht …", Some(sel!(showWeek:)), "w", &controller);
@@ -952,6 +1080,8 @@ pub fn run() {
         (&items.pauses, "cup.and.saucer", "Pausen"),
         (&items.first, "sunrise", "Arbeitsbeginn"),
         (&items.balance, "plusminus", "Saldo"),
+        (&items.away, "figure.walk", "Ohne Mac weiterarbeiten"),
+        (&items.count_pause, "arrow.uturn.backward.circle", "Pause als Arbeitszeit zählen"),
         (&start_item, "sunrise", "Arbeitsbeginn"),
         (&items.close, "moon", "Feierabend"),
         (&items.reopen, "arrow.uturn.backward", "Feierabend aufheben"),
@@ -979,6 +1109,8 @@ pub fn run() {
     }
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&items.pause);
+    menu.addItem(&items.away);
+    menu.addItem(&items.count_pause);
     menu.addItem(&NSMenuItem::separatorItem(mtm));
     menu.addItem(&start_item);
     menu.addItem(&items.close);
@@ -1015,12 +1147,20 @@ pub fn run() {
     let t = now();
     tracker.roll_over(t);
     let locked = screen_locked();
-    // Pause über „Arbeit unterbrechen“ vor dem Beenden der App? Dann bleibt sie bestehen.
-    let open_break = match store::read_status() {
+    // Pause über „Arbeit unterbrechen“ oder Arbeit ohne Mac vor dem Beenden der App? Dann
+    // bleibt sie bestehen (Arbeit ohne Mac auch bei gesperrtem Mac).
+    let status = store::read_status();
+    let open_break = match status {
         Some(store::Status::Break(since)) if !locked && since <= t && since.date() == t.date() => Some(since),
         _ => None,
     };
-    if let Some(since) = open_break {
+    let open_away = match status {
+        Some(store::Status::Away(since, a)) if since <= t && since.date() == t.date() => Some((since, a)),
+        _ => None,
+    };
+    if let Some((since, activity)) = open_away {
+        tracker.restore_away(since, activity);
+    } else if let Some(since) = open_break {
         tracker.restore_break(since);
     } else if locked || !tracker.start(t) {
         tracker.pause_reason = if locked { PauseReason::Locked } else { PauseReason::Manual };
@@ -1107,6 +1247,22 @@ mod tests {
     };
     use objc2_foundation::NSSize;
 
+    #[test]
+    fn away_outside_frame_shows_outside() {
+        let at = |h: u32, m: u32| chrono::NaiveDate::from_ymd_opt(2026, 11, 18).unwrap().and_hms_opt(h, m, 0).unwrap();
+        let mut t = Tracker::new(vec![], Default::default());
+        assert!(t.go_away(at(6, 9), Activity::Other));
+        let (text, icon) = status_line(&t, at(6, 30));
+        assert!(icon == IconKind::Outside, "{text}");
+        assert_eq!(text, "Ohne Mac seit 06:09 Uhr – außerhalb des Arbeitszeitrahmens");
+        // Ab Beginn des Rahmens zählt es: grün wie „läuft“.
+        let (text, icon) = status_line(&t, at(7, 5));
+        assert!(icon == IconKind::Away, "{text}");
+        assert_eq!(text, "Ohne Mac seit 06:09 Uhr");
+        assert_eq!(icon.glyph(), glyphs::State::Running);
+        assert_eq!(IconKind::Outside.glyph(), glyphs::State::Outside);
+    }
+
     /// Vorschau der Status- und Kennzahl-Zeilen (hell und dunkel, @2x):
     /// `TAGWERK_MENU_PNG=/pfad/menu cargo test render_menu_lines -- --ignored`
     #[test]
@@ -1124,6 +1280,7 @@ mod tests {
             let lines = [
                 status_title("Zeiterfassung läuft", IconKind::Running),
                 status_title("Pause seit 12:03 Uhr", IconKind::Break),
+                status_title("Ohne Mac seit 14:00 Uhr – Meeting", IconKind::Away),
                 status_title("Außerhalb des Arbeitszeitrahmens (07:00–22:00 Uhr)", IconKind::Outside),
                 status_title("Feierabend um 17:30 Uhr", IconKind::Closed),
                 rich(&[("Heute gearbeitet:  ", Tone::Label), ("3:57 h", Tone::Value), ("  von 7:48 h", Tone::Muted)]),

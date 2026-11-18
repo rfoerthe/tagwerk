@@ -6,6 +6,26 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt
+- **Arbeit ohne Mac:** Telefonate, Meetings oder Termine bei gesperrtem Mac zählen jetzt
+  als Arbeitszeit. Sie liegen als eigene Korrektur über den erfassten Perioden und lassen
+  sich jederzeit wieder entfernen.
+  - Menüleiste: „Ohne Mac weiterarbeiten“ (Meeting, Telefonat, Sonstiges) zählt die Zeit
+    bis zum nächsten Entsperren bzw. „Zurück am Mac“ – auch wenn der Mac dazwischen
+    gesperrt ist oder schläft; spätestens um Mitternacht oder mit dem Feierabend endet es.
+  - Menüleiste: „Pause als Arbeitszeit zählen“ listet die Pausen von heute.
+  - Inspektor im Fenster „Aufzeichnungen“: neuer Abschnitt „Arbeit ohne Mac“ mit Notiz.
+  - Wochenansicht: Arbeit ohne Mac ist schraffiert; ein Klick auf eine Pause zählt sie als
+    Arbeitszeit, Meeting oder Telefonat. Pausen zeigen ihre Dauer, wenn Platz ist.
+  - Export und Import: Art „Arbeit ohne Mac“ mit neuer Spalte „Notiz“ unter „Korrekturen“.
+
+### Geändert
+- Eine manuelle Pause und Arbeit ohne Mac überschneiden sich nie: Der zuletzt
+  eingetragene Eintrag gilt, der andere wird gekürzt.
+- Datenbankschema 3 (neue Tabelle `work_blocks`); vorhandene Datenbanken werden beim
+  Start automatisch erweitert. Ältere Tagwerk-Versionen können eine Datenbank im
+  Schema 3 nicht mehr öffnen.
+
 ## [1.1.0] - 2026-11-17
 
 ### Zusammenfassung

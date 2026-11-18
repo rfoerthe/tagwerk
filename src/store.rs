@@ -6,12 +6,13 @@
 //! - `breaks`    – manuell eingetragene Pausen (`to_s` NULL = offene Mittagspause früherer
 //!   Versionen; wird beim Laden ignoriert),
 //! - `day_marks` – manuell festgelegter Arbeitsbeginn und Feierabend,
+//! - `work_blocks` – Arbeit ohne Mac (Telefonat, Meeting …) mit Notiz,
 //! - `settings`  – Einstellungen (Schlüssel → ganze Zahl, Zeiten in Sekunden).
 //!
 //! Die Markdown-Datei früherer Versionen (`tagwerk.md`) wird beim ersten Öffnen der
 //! Datenbank einmalig übernommen und danach in `tagwerk.md.importiert` umbenannt.
 
-use crate::day::{self, fmt_clock_s, parse_clock, Break, Day, Span, DAY_END};
+use crate::day::{self, fmt_clock_s, parse_clock, Activity, Break, Day, Span, DAY_END};
 use crate::rules::{self, Settings};
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Weekday};
 use rusqlite::{params, Connection, TransactionBehavior};
@@ -28,7 +29,7 @@ pub const EXPORT_DAYS: i64 = 28;
 const DB_FILE: &str = "tagwerk.db";
 const LEGACY_FILE: &str = "tagwerk.md";
 const LEGACY_IMPORTED: &str = "tagwerk.md.importiert";
-const SCHEMA_VERSION: i32 = 2;
+const SCHEMA_VERSION: i32 = 3;
 const SCHEMA: &str = "
     CREATE TABLE periods (
         date TEXT NOT NULL,
@@ -57,6 +58,17 @@ const SCHEMA_SETTINGS: &str = "
         value INTEGER NOT NULL
     ) WITHOUT ROWID;
 ";
+/// Ab Schema 3.
+const SCHEMA_WORK: &str = "
+    CREATE TABLE IF NOT EXISTS work_blocks (
+        date TEXT NOT NULL,
+        idx INTEGER NOT NULL,
+        from_s INTEGER NOT NULL,
+        to_s INTEGER NOT NULL,
+        note TEXT NOT NULL DEFAULT '',
+        PRIMARY KEY (date, idx)
+    ) WITHOUT ROWID;
+";
 const KEY_MIN_PAUSE: &str = "min_pause_s";
 const KEY_WEEKLY: &str = "weekly_target_s";
 const KEY_FRAME_FROM: &str = "frame_from_s";
@@ -69,6 +81,7 @@ const HEAD_WARNINGS: &str = "## Hinweise";
 const KIND_START: &str = "Arbeitsbeginn";
 const KIND_BREAK: &str = "Pause";
 const KIND_END: &str = "Feierabend";
+const KIND_WORK: &str = "Arbeit ohne Mac";
 
 /// `$HOME/Library/Application Support/Tagwerk` (zum Testen per `TAGWERK_DIR` änderbar).
 pub fn data_dir() -> PathBuf {
@@ -238,7 +251,7 @@ impl Db {
         let result = (|| -> Result<()> {
             let rows: i64 = self.conn.query_row(
                 "SELECT (SELECT count(*) FROM periods) + (SELECT count(*) FROM breaks)
-                      + (SELECT count(*) FROM day_marks)",
+                      + (SELECT count(*) FROM day_marks) + (SELECT count(*) FROM work_blocks)",
                 [],
                 |r| r.get(0),
             )?;
@@ -272,6 +285,7 @@ fn init_schema(conn: &mut Connection, dir: &Path, import_trackmywork: bool) -> R
     let mut imported_file = None;
     if version < SCHEMA_VERSION {
         tx.execute_batch(SCHEMA_SETTINGS)?;
+        tx.execute_batch(SCHEMA_WORK)?;
         tx.pragma_update(None, "user_version", SCHEMA_VERSION)?;
     }
     if version == 0 {
@@ -351,6 +365,17 @@ fn load_between(conn: &Connection, from: &str, to: &str) -> Result<Vec<Day>> {
     }
 
     let mut stmt = conn.prepare(
+        "SELECT date, from_s, to_s, note FROM work_blocks WHERE date BETWEEN ?1 AND ?2 ORDER BY date, idx",
+    )?;
+    let rows = stmt.query_map([from, to], |r| Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))?;
+    for row in rows {
+        let (date, f, t, note): (String, i64, i64, String) = row?;
+        if let Some(date) = parse(date) {
+            day::day_mut(&mut days, date).add_work(f, t, &note);
+        }
+    }
+
+    let mut stmt = conn.prepare(
         "SELECT date, start_s, end_s FROM day_marks WHERE date BETWEEN ?1 AND ?2 ORDER BY date",
     )?;
     let rows = stmt.query_map([from, to], |r| Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?)))?;
@@ -372,6 +397,7 @@ fn delete_day(conn: &Connection, date: NaiveDate) -> Result<()> {
     conn.execute("DELETE FROM periods WHERE date = ?1", [&key])?;
     conn.execute("DELETE FROM breaks WHERE date = ?1", [&key])?;
     conn.execute("DELETE FROM day_marks WHERE date = ?1", [&key])?;
+    conn.execute("DELETE FROM work_blocks WHERE date = ?1", [&key])?;
     Ok(())
 }
 
@@ -392,6 +418,12 @@ fn write_day(conn: &Connection, d: &Day) -> Result<()> {
         conn.execute(
             "INSERT INTO breaks (date, idx, from_s, to_s) VALUES (?1, ?2, ?3, ?4)",
             params![key, i as i64, b.from, b.to],
+        )?;
+    }
+    for (i, w) in d.work.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO work_blocks (date, idx, from_s, to_s, note) VALUES (?1, ?2, ?3, ?4, ?5)",
+            params![key, i as i64, w.from, w.to, w.note],
         )?;
     }
     if d.start.is_some() || d.end.is_some() {
@@ -539,6 +571,11 @@ pub fn parse_file(text: &str) -> Vec<Day> {
                         d.breaks.push(Break { from, to: to.max(from) });
                         d.sort_breaks();
                     }
+                } else if kind.contains("ohne mac") || kind.contains("arbeit") {
+                    if let Some(to) = to {
+                        let note = cells.get(4).copied().unwrap_or("");
+                        d.add_work(from, to, if note == "–" { "" } else { note });
+                    }
                 }
             }
             Section::Periods if cells.len() >= 3 => {
@@ -663,23 +700,31 @@ pub fn export_markdown(
     }
 
     s.push_str(&format!("\n{HEAD_CORRECTIONS}\n\n"));
-    s.push_str("Manuell festgelegt. Art: Arbeitsbeginn, Pause oder Feierabend.\n\n");
-    s.push_str("| Datum | Art | Von | Bis |\n");
-    s.push_str("|:------|:----|:---:|:---:|\n");
+    s.push_str("Manuell festgelegt. Art: Arbeitsbeginn, Pause, Arbeit ohne Mac (z. B. Telefonat oder Meeting) oder Feierabend.\n\n");
+    s.push_str("| Datum | Art | Von | Bis | Notiz |\n");
+    s.push_str("|:------|:----|:---:|:---:|:------|\n");
     for d in &days {
         let date = fmt_date(d.date);
         if let Some(st) = d.start {
-            s.push_str(&format!("| {date} | {KIND_START} | {} | – |\n", fmt_clock_s(st)));
+            s.push_str(&format!("| {date} | {KIND_START} | {} | – | |\n", fmt_clock_s(st)));
         }
         for b in &d.breaks {
             s.push_str(&format!(
-                "| {date} | {KIND_BREAK} | {} | {} |\n",
+                "| {date} | {KIND_BREAK} | {} | {} | |\n",
                 fmt_clock_s(b.from),
                 fmt_clock_s(b.to)
             ));
         }
+        for w in &d.work {
+            s.push_str(&format!(
+                "| {date} | {KIND_WORK} | {} | {} | {} |\n",
+                fmt_clock_s(w.from),
+                fmt_clock_s(w.to),
+                w.note.replace('|', "/").replace('\n', " ")
+            ));
+        }
         if let Some(e) = d.end {
-            s.push_str(&format!("| {date} | {KIND_END} | {} | – |\n", fmt_clock_s(e)));
+            s.push_str(&format!("| {date} | {KIND_END} | {} | – | |\n", fmt_clock_s(e)));
         }
     }
 
@@ -706,6 +751,8 @@ pub enum Status {
     Paused,
     /// Der Benutzer hat „Arbeit unterbrechen“ gewählt – seit diesem Zeitpunkt.
     Break(NaiveDateTime),
+    /// Der Benutzer arbeitet ohne Mac weiter (Meeting, Telefonat …) – seit diesem Zeitpunkt.
+    Away(NaiveDateTime, Activity),
     /// Außerhalb des Arbeitszeitrahmens: es wird nichts gezählt.
     Outside,
     Closed,
@@ -719,6 +766,7 @@ impl Status {
             Status::Running => "running".into(),
             Status::Paused => "paused".into(),
             Status::Break(since) => format!("break {}", since.format(STATUS_TIME)),
+            Status::Away(since, a) => format!("away {} {}", since.format(STATUS_TIME), a.key()),
             Status::Outside => "outside".into(),
             Status::Closed => "closed".into(),
         }
@@ -730,6 +778,10 @@ impl Status {
             "running" => Some(Status::Running),
             "paused" => Some(Status::Paused),
             "break" => NaiveDateTime::parse_from_str(words.next()?, STATUS_TIME).ok().map(Status::Break),
+            "away" => {
+                let since = NaiveDateTime::parse_from_str(words.next()?, STATUS_TIME).ok()?;
+                Some(Status::Away(since, Activity::from_key(words.next().unwrap_or(""))))
+            }
             "outside" => Some(Status::Outside),
             "closed" => Some(Status::Closed),
             _ => None,
@@ -758,10 +810,20 @@ mod tests {
     #[test]
     fn status_line_round_trip() {
         let since = date(17).and_hms_opt(12, 3, 9).unwrap();
-        for st in [Status::Running, Status::Paused, Status::Break(since), Status::Outside, Status::Closed] {
+        for st in [
+            Status::Running,
+            Status::Paused,
+            Status::Break(since),
+            Status::Away(since, Activity::Meeting),
+            Status::Away(since, Activity::Other),
+            Status::Outside,
+            Status::Closed,
+        ] {
             assert_eq!(Status::parse(&st.to_line()), Some(st));
         }
         assert_eq!(Status::to_line(Status::Break(since)), "break 2026-11-17T12:03:09");
+        assert_eq!(Status::to_line(Status::Away(since, Activity::Call)), "away 2026-11-17T12:03:09 call");
+        assert_eq!(Status::parse("away 2026-11-17T12:03:09"), Some(Status::Away(since, Activity::Other)));
         assert_eq!(Status::parse("break"), None);
         assert_eq!(Status::parse("break\n"), None);
         assert_eq!(Status::parse("paused\n"), Some(Status::Paused));
@@ -794,6 +856,7 @@ mod tests {
         d.start = Some(h(8, 0));
         d.breaks.push(Break { from: h(12, 0), to: h(12, 45) });
         d.end = Some(h(17, 15));
+        d.add_work(h(18, 0), h(18, 30), "Telefonat");
         let mut short_lock = Day::new(date(17));
         short_lock.add_period(h(8, 0), h(9, 30));
         short_lock.add_period(h(9, 40), h(10, 0)); // 10 Min. gesperrt: zählt als Arbeit
@@ -859,10 +922,11 @@ mod tests {
         let days = sample_days();
         let md = export_markdown(&days, date(16), date(17), now(), &st());
         assert!(md.contains("# Tagwerk – Arbeitszeiten 16.11.2026 bis 17.11.2026"), "{md}");
-        assert!(md.contains("| Mo, 16.11.2026 | 08:00:00 | 17:15:00 | 08:28:00 | 00:47:00 | +0:40 h |"), "{md}");
-        assert!(md.contains("| Mo, 16.11.2026 | Pause | 12:00:00 | 12:45:00 |"));
+        assert!(md.contains("| Mo, 16.11.2026 | 08:00:00 | 18:30:00 | 08:58:00 | 01:32:00 | +1:10 h |"), "{md}");
+        assert!(md.contains("| Mo, 16.11.2026 | Pause | 12:00:00 | 12:45:00 | |"));
+        assert!(md.contains("| Mo, 16.11.2026 | Arbeit ohne Mac | 18:00:00 | 18:30:00 | Telefonat |"), "{md}");
         assert!(md.contains("| Di, 17.11.2026 | 08:00:00 | 10:00:00 | 02:00:00 | 00:00:00 | −5:48 h |"), "{md}");
-        assert!(md.contains("| **Summe: 2 Arbeitstage** | | | **10:28:00** | **00:47:00** | **−5:08 h** |"), "{md}");
+        assert!(md.contains("| **Summe: 2 Arbeitstage** | | | **10:58:00** | **01:32:00** | **−4:38 h** |"), "{md}");
         assert!(md.contains("Keine Verstöße"), "{md}");
         assert_eq!(parse_file(&md), days);
 
