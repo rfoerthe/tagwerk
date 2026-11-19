@@ -310,8 +310,7 @@ Perioden.
 
 ## Regeln
 
-Tagwerk berücksichtigt die folgenden Regeln aus Arbeitszeitgesetz und
-Betriebsvereinbarung. Verstöße werden in der Menüleiste, in der Tabelle, im Inspektor,
+Tagwerk berücksichtigt die folgenden Regeln aus dem Arbeitszeitgesetz und einer fiktiven Betriebsvereinbarung. Verstöße werden in der Menüleiste, in der Tabelle, im Inspektor,
 in der Wochenansicht und im Export angezeigt – die Arbeitszeit selbst wird dadurch nicht
 verändert.
 
