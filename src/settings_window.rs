@@ -21,7 +21,7 @@ use crate::glyphs;
 use crate::hotkey;
 use crate::login_item;
 use crate::notify::{self, Permission};
-use crate::rules::{self, IconSet, Settings, IDLE_RANGE, MIN_PAUSE_RANGE, MIN_WORK_MAX, WEEKLY_RANGE};
+use crate::rules::{self, IconSet, Settings, IDLE_RANGE, MIN_PAUSE_RANGE, MIN_WORK_RANGE, WEEKLY_RANGE};
 use crate::store;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, TimeZone};
 use objc2::rc::Retained;
@@ -233,8 +233,8 @@ define_class!(
         #[unsafe(method(workStepped:))]
         fn work_stepped(&self, _sender: Option<&AnyObject>) {
             with_state(|s| {
-                let value = s.work_stepper.integerValue() as i64 * 60;
-                s.set_work(Some(value));
+                let value = step_minutes(s.settings.min_work / 60, s.work_stepper.integerValue() as i64);
+                s.set_work(Some(value * 60));
             });
             save();
         }
@@ -404,7 +404,6 @@ impl State {
         self.pause.setStringValue(&ns(&(s.min_pause / 60).to_string()));
         self.pause_stepper.setIntegerValue((s.min_pause / 60) as isize);
         self.work.setStringValue(&ns(&(s.min_work / 60).to_string()));
-        self.work_stepper.setMinValue((s.min_pause / 60) as f64);
         self.work_stepper.setIntegerValue((s.min_work / 60) as isize);
         self.daily_note.setStringValue(&ns(&format!(
             "{}  ·  {} pro Arbeitstag",
@@ -458,8 +457,6 @@ impl State {
         match value {
             Some(v) if (MIN_PAUSE_RANGE.0..=MIN_PAUSE_RANGE.1).contains(&v) => {
                 self.settings.min_pause = v;
-                // Arbeit ohne Mac darf nicht kürzer als die Mindestpause sein.
-                self.settings.min_work = self.settings.min_work.max(v);
                 self.error.setHidden(true);
             }
             _ => self.show_error(&format!(
@@ -471,16 +468,15 @@ impl State {
     }
 
     fn set_work(&mut self, value: Option<i64>) {
-        let min = self.settings.min_pause;
         match value {
-            Some(v) if (min..=MIN_WORK_MAX).contains(&v) => {
+            Some(v) if (MIN_WORK_RANGE.0..=MIN_WORK_RANGE.1).contains(&v) => {
                 self.settings.min_work = v;
                 self.error.setHidden(true);
             }
             _ => self.show_error(&format!(
-                "Arbeit ohne Mac muss mindestens {} Min. (die Mindestpause) und höchstens {} Min. dauern.",
-                min / 60,
-                MIN_WORK_MAX / 60
+                "Die Mindestdauer für Arbeit ohne Mac muss zwischen {} und {} Minuten liegen.",
+                MIN_WORK_RANGE.0 / 60,
+                MIN_WORK_RANGE.1 / 60
             )),
         }
     }
@@ -595,6 +591,26 @@ fn number_field(target: &Controller, action: Sel) -> Retained<NSTextField> {
         f.setAction(Some(action));
     }
     f
+}
+
+/// Schrittweite der Pfeile für die Mindestdauer von Arbeit ohne Mac (Minuten).
+const WORK_STEP: i64 = 5;
+
+/// Neuer Wert nach einem Klick auf die Pfeile, wenn vorher `old` Minuten galten und der
+/// Schalter `stepped` meldet: Es geht in Fünferschritten über glatte Werte (1 → 5 → 10 …),
+/// auch von einem krummen eingetippten Wert aus (12 → 15 bzw. 10), und unter 5 direkt auf
+/// die Untergrenze.
+fn step_minutes(old: i64, stepped: i64) -> i64 {
+    let (min, max) = (MIN_WORK_RANGE.0 / 60, MIN_WORK_RANGE.1 / 60);
+    let value = if stepped > old {
+        (stepped / WORK_STEP * WORK_STEP).max(old + 1)
+    } else if stepped < old {
+        let up = (stepped + WORK_STEP - 1) / WORK_STEP * WORK_STEP;
+        if up < old { up } else { min }
+    } else {
+        old
+    };
+    value.clamp(min, max)
 }
 
 fn stepper(target: &Controller, action: Sel, min: f64, max: f64, step: f64) -> Retained<NSStepper> {
@@ -783,7 +799,13 @@ fn build(on_change: fn()) -> State {
         1.0,
     );
     let work = number_field(target, sel!(workChanged:));
-    let work_stepper = stepper(target, sel!(workStepped:), (MIN_PAUSE_RANGE.0 / 60) as f64, (MIN_WORK_MAX / 60) as f64, 5.0);
+    let work_stepper = stepper(
+        target,
+        sel!(workStepped:),
+        (MIN_WORK_RANGE.0 / 60) as f64,
+        (MIN_WORK_RANGE.1 / 60) as f64,
+        WORK_STEP as f64,
+    );
     let daily_note = caption("");
     let icon_popup = icon_popup(target);
     let (preview_row, icon_preview) = icon_preview();
@@ -889,8 +911,8 @@ fn build(on_change: fn()) -> State {
                 row(
                     None,
                     &caption(
-                        "Kürzere Abschnitte lassen sich nicht eintragen. Nie weniger als die Mindestpause – \
-                         wird sie erhöht, steigt dieser Wert mit.",
+                        "Kürzere Abschnitte lassen sich im Fenster „Aufzeichnungen“ nicht eintragen. \
+                         Das schützt vor versehentlichen Einträgen.",
                     ),
                 ),
                 row(Some("Inaktivität:"), &idle_row),
@@ -1151,4 +1173,26 @@ pub fn screenshot(path: &std::path::Path) -> Result<(), String> {
     let data = unsafe { rep.representationUsingType_properties(NSBitmapImageFileType::PNG, &objc2_foundation::NSDictionary::new()) }
         .ok_or("PNG konnte nicht erzeugt werden")?;
     std::fs::write(path, data.to_vec()).map_err(|e| e.to_string())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn work_stepper_moves_over_round_values() {
+        // abwärts: 15 → 10 → 5 → 1 (der Schalter bleibt an der Untergrenze stehen)
+        assert_eq!(step_minutes(15, 10), 10);
+        assert_eq!(step_minutes(10, 5), 5);
+        assert_eq!(step_minutes(5, 1), 1);
+        assert_eq!(step_minutes(3, 1), 1);
+        assert_eq!(step_minutes(1, 1), 1);
+        // aufwärts: 1 → 5 → 10
+        assert_eq!(step_minutes(1, 6), 5);
+        assert_eq!(step_minutes(5, 10), 10);
+        // von einem krummen Wert zum nächsten glatten
+        assert_eq!(step_minutes(12, 17), 15);
+        assert_eq!(step_minutes(12, 7), 10);
+        assert_eq!(step_minutes(240, 240), 240);
+    }
 }

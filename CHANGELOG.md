@@ -115,6 +115,12 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   eingetragen ist.
 - Einstellungen › Erfassung: „Arbeit ohne Mac: mindestens 15 Minuten“ sagt jetzt selbst,
   dass es um die Mindestdauer geht; der Text darunter ist kürzer.
+- Die Mindestdauer für Arbeit ohne Mac hängt nicht mehr an der Mindestpause. Bisher durfte
+  sie nie darunter liegen und stieg mit ihr – ein Telefonat von zehn Minuten in einer
+  langen Mittagspause oder vor dem Arbeitsbeginn ließ sich so nicht eintragen, obwohl es
+  mit der Frage, ab wann eine Sperre eine Pause ist, nichts zu tun hat. Jetzt sind 1 bis
+  240 Minuten möglich, der Standard bleibt 15; die Pfeile gehen in Fünferschritten. Für
+  gespeicherte Werte und Tage ändert sich nichts.
 - Die Bilder im README sind neu und zeigen den aktuellen Stand: das Menü mit Zeitkonto,
   die Ansicht „Woche“ im Fenster „Aufzeichnungen“ und alle vier Reiter der Einstellungen,
   die jetzt auch einzeln beschrieben sind.

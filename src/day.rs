@@ -963,6 +963,22 @@ mod tests {
     }
 
     #[test]
+    fn short_work_without_mac_counts_like_any_other() {
+        // Zehn Minuten telefoniert, mitten in der Mittagssperre 11:58–12:41: Davor und danach
+        // bleibt je eine Pause (16 und 17 Min.) – die Dauer des Termins spielt keine Rolle.
+        let mut d = day();
+        d.add_work(h(12, 14), h(12, 24), "Telefonat");
+        let r = d.record(&st()).unwrap();
+        assert_eq!((r.work_secs, r.pause_secs()), (h(3, 46) + h(4, 49) + h(0, 10), h(0, 33)));
+        assert_eq!(d.pauses(&st()), vec![Span::new(h(11, 58), h(12, 14)), Span::new(h(12, 24), h(12, 41))]);
+        // Zehn Minuten lange vor dem ersten Entsperren: zählen und ziehen den Beginn vor.
+        let mut d = day();
+        d.add_work(h(7, 30), h(7, 40), "Telefonat");
+        let r = d.record(&st()).unwrap();
+        assert_eq!((r.first_start, r.work_secs), (h(7, 30), h(0, 10) + h(3, 46) + h(4, 49)));
+    }
+
+    #[test]
     fn work_without_mac_outside_start_and_end() {
         let mut d = day();
         d.start = Some(h(8, 30));

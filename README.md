@@ -243,7 +243,7 @@ Die Einstellungen stehen auf vier Reitern:
 |              | Arbeitstage            | Mo bis Fr einzeln wählbar; das Wochensoll verteilt sich gleichmäßig auf sie (angezeigt als „4-Tage-Woche · 9:45 h pro Arbeitstag“) | Mo–Fr |
 |              | Zeitkonto              | Zählt alle erfassten Tage oder erst ab einem Datum; der Übertrag ist der Saldo aus der Zeit davor (z. B. `+12:30`) | alle Tage, kein Übertrag |
 | Erfassung    | Mindestpause           | Ab dieser Sperrdauer gilt eine Unterbrechung als Pause                  | 15 Min.         |
-|              | Arbeit ohne Mac        | „mindestens … Minuten“: kürzere Abschnitte lassen sich nicht eintragen; nie weniger als die Mindestpause | 15 Min. |
+|              | Arbeit ohne Mac        | „mindestens … Minuten“ (1 bis 240): kürzere Abschnitte lassen sich im Fenster „Aufzeichnungen“ nicht eintragen | 15 Min. |
 |              | Inaktivität            | Erfassung anhalten nach so vielen Minuten ohne Eingabe                  | aus (10 Min.)   |
 |              | Lange Sperre           | Beim Entsperren nach mindestens 30 Min. Sperre nachfragen               | aus             |
 | Mitteilungen | Mitteilungen           | Zeigt, ob Tagwerk Mitteilungen senden darf; wenn nicht, öffnet „Systemeinstellungen öffnen“ die Mitteilungseinstellungen von Tagwerk | – |
@@ -256,8 +256,11 @@ Die Einstellungen stehen auf vier Reitern:
   Arbeitstagen – gibt es kein Soll; Arbeit dort zählt als Mehrarbeit. Das Zeitkonto zählt
   ohne Haken alle erfassten Tage, mit Haken erst ab dem Datum; der Übertrag wird mit
   Vorzeichen eingegeben (`+12:30`, `−3:15`).
-- **Erfassung** – die Mindestdauer für Arbeit ohne Mac liegt nie unter der Mindestpause:
-  Wird die Mindestpause erhöht, steigt sie mit. Die Minuten für die Inaktivität lassen sich
+- **Erfassung** – die Mindestdauer für Arbeit ohne Mac schützt vor versehentlichen
+  Einträgen und hängt nicht an der Mindestpause: Auch ein Telefonat von zehn Minuten in
+  einer langen Mittagspause oder vor dem Arbeitsbeginn lässt sich eintragen, wenn der Wert
+  entsprechend gesenkt ist. Sie gilt für Einträge von Hand im Inspektor und in der
+  Wochenansicht, nicht für „Ohne Mac weiterarbeiten“ im Menü. Die Minuten für die Inaktivität lassen sich
   erst einstellen, wenn die Erkennung eingeschaltet ist. Die Nachfrage nach langer Sperre
   braucht Mitteilungen.
 - **Mitteilungen** – oben steht, ob macOS Mitteilungen von Tagwerk zulässt (erlaubt, nicht

@@ -40,8 +40,10 @@ pub const ASK_AFTER_LOCK: i64 = 30 * 60;
 /// Grenzen der Einstellungen.
 pub const MIN_PAUSE_RANGE: (i64, i64) = (60, 120 * 60);
 pub const WEEKLY_RANGE: (i64, i64) = (3600, 60 * 3600);
-/// Höchstwert für die Mindestdauer von Arbeit ohne Mac (Untergrenze: die Mindestpause).
-pub const MIN_WORK_MAX: i64 = 240 * 60;
+/// Grenzen für die Mindestdauer von Arbeit ohne Mac beim Eintragen. Mit der Mindestpause hat
+/// sie nichts zu tun: Auch ein kurzer Termin in einer langen Pause oder vor dem Arbeitsbeginn
+/// ist Arbeit; die Grenze schützt nur vor versehentlichen Einträgen.
+pub const MIN_WORK_RANGE: (i64, i64) = (60, 240 * 60);
 
 /// Symbolsatz für die Menüleiste.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
@@ -120,7 +122,7 @@ impl IconSet {
 pub struct Settings {
     /// Mindestdauer einer Pause: kürzere Sperrzeiten zählen zur Arbeitszeit.
     pub min_pause: i64,
-    /// Mindestdauer von Arbeit ohne Mac beim Eintragen (nie kürzer als `min_pause`).
+    /// Mindestdauer von Arbeit ohne Mac beim Eintragen von Hand (unabhängig von `min_pause`).
     pub min_work: i64,
     /// Regelwochenarbeitszeit.
     pub weekly_target: i64,
@@ -178,10 +180,9 @@ impl Settings {
     /// Werte in gültige Grenzen bringen (z. B. nach dem Laden aus der Datenbank).
     pub fn sanitized(self) -> Self {
         let d = Self::default();
-        let min_pause = self.min_pause.clamp(MIN_PAUSE_RANGE.0, MIN_PAUSE_RANGE.1);
         let mut s = Self {
-            min_pause,
-            min_work: self.min_work.clamp(min_pause, MIN_WORK_MAX),
+            min_pause: self.min_pause.clamp(MIN_PAUSE_RANGE.0, MIN_PAUSE_RANGE.1),
+            min_work: self.min_work.clamp(MIN_WORK_RANGE.0, MIN_WORK_RANGE.1),
             weekly_target: self.weekly_target.clamp(WEEKLY_RANGE.0, WEEKLY_RANGE.1),
             frame_from: self.frame_from.clamp(0, DAY_END),
             frame_to: self.frame_to.clamp(0, DAY_END),
@@ -661,11 +662,12 @@ mod tests {
         assert_eq!((fixed.frame_from, fixed.frame_to), (h(7, 0), h(22, 0)));
         assert_eq!(fixed.min_pause, 60);
         assert_eq!(fixed.weekly_target, 3600);
-        // Arbeit ohne Mac nie kürzer als die Mindestpause.
         assert_eq!(fixed.min_work, s.min_work);
-        let s20 = Settings { min_pause: 20 * 60, min_work: 15 * 60, ..s }.sanitized();
-        assert_eq!(s20.min_work, 20 * 60);
-        assert_eq!(Settings { min_work: 999 * 60, ..s }.sanitized().min_work, MIN_WORK_MAX);
+        // Die Mindestdauer von Arbeit ohne Mac hängt nicht an der Mindestpause.
+        let s20 = Settings { min_pause: 20 * 60, min_work: 5 * 60, ..s }.sanitized();
+        assert_eq!((s20.min_pause, s20.min_work), (20 * 60, 5 * 60));
+        assert_eq!(Settings { min_work: 0, ..s }.sanitized().min_work, MIN_WORK_RANGE.0);
+        assert_eq!(Settings { min_work: 999 * 60, ..s }.sanitized().min_work, MIN_WORK_RANGE.1);
     }
 
     #[test]
