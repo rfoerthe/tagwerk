@@ -159,6 +159,12 @@ impl Db {
         }
     }
 
+    /// Die nächste Abfrage von [`Db::changed_externally`] meldet wieder eine Änderung – wenn
+    /// das Einlesen danach gescheitert ist und wiederholt werden soll.
+    pub fn recheck_external_change(&mut self) {
+        self.data_version = -1;
+    }
+
     /// Alle Tage, nach Datum sortiert.
     pub fn load(&self) -> Result<Vec<Day>> {
         load_between(&self.conn, "", "~")

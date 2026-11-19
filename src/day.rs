@@ -477,6 +477,21 @@ impl Day {
             .filter(|g| *g >= LEGAL_BREAK_SEGMENT)
             .sum()
     }
+
+    /// Längste Arbeitszeit am Stück: Arbeitsabschnitte, zwischen denen keine Pause von
+    /// mindestens 15 Minuten liegt, zählen zusammen (kürzere Unterbrechungen sind nach dem
+    /// Arbeitszeitgesetz keine Pause; mitgezählt wird nur die Arbeit, nicht die Unterbrechung).
+    pub fn longest_stretch_secs(spans: &[Span]) -> i64 {
+        let (mut longest, mut current) = (0, 0);
+        for (i, sp) in spans.iter().enumerate() {
+            if i > 0 && sp.from - spans[i - 1].to >= LEGAL_BREAK_SEGMENT {
+                current = 0;
+            }
+            current += sp.len();
+            longest = longest.max(current);
+        }
+        longest
+    }
 }
 
 /// Schließt Lücken, die kürzer als `min_pause` sind: der Mac war nur kurz gesperrt,

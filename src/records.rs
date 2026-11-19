@@ -264,7 +264,16 @@ struct Inspector {
     work_from: Retained<NSDatePicker>,
     work_to: Retained<NSDatePicker>,
     work_reason: Retained<NSPopUpButton>,
-    error: Retained<NSTextField>,
+    /// Hinweise zu einer abgelehnten Eingabe, jeweils direkt über den Feldern.
+    break_error: Retained<NSTextField>,
+    work_error: Retained<NSTextField>,
+}
+
+/// Eingabe im Inspektor, zu der ein Hinweis gehört.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Input {
+    Break,
+    Work,
 }
 
 /// Steuerelemente der Zusatzansicht im Sichern-Dialog.
@@ -681,11 +690,13 @@ define_class!(
             });
             match times {
                 Some((Some(from), Some(to))) if to - from >= min => apply(Edit::AddBreak(from, to), true),
-                Some((Some(from), Some(to))) if to > from => show_inspector_error(&format!(
-                    "Eine Pause dauert mindestens {} Min. (siehe Einstellungen).",
-                    min / 60
-                )),
-                Some((Some(_), Some(_))) => show_inspector_error("Das Ende der Pause muss nach ihrem Beginn liegen."),
+                Some((Some(from), Some(to))) if to > from => show_inspector_error(
+                    Input::Break,
+                    &format!("Eine Pause dauert mindestens {} Min. (siehe Einstellungen).", min / 60),
+                ),
+                Some((Some(_), Some(_))) => {
+                    show_inspector_error(Input::Break, "Das Ende der Pause muss nach ihrem Beginn liegen.")
+                }
                 _ => {}
             }
         }
@@ -707,7 +718,7 @@ define_class!(
             let min_work = model(|m| m.settings.min_work);
             match input {
                 Some((Some(from), Some(to), _)) if to > from && shown_len(from, to) < min_work => {
-                    show_inspector_error(&min_work_text(min_work))
+                    show_inspector_error(Input::Work, &min_work_text(min_work))
                 }
                 Some((Some(from), Some(to), note)) if to > from => {
                     // Kurze Lücken zu benachbarter Arbeit ohne Mac gehören zum neuen Abschnitt.
@@ -724,7 +735,7 @@ define_class!(
                     }
                 }
                 Some((Some(_), Some(_), _)) => {
-                    show_inspector_error("Das Ende der Arbeit ohne Mac muss nach ihrem Beginn liegen.")
+                    show_inspector_error(Input::Work, "Das Ende der Arbeit ohne Mac muss nach ihrem Beginn liegen.")
                 }
                 _ => {}
             }
@@ -999,7 +1010,7 @@ enum Edit {
 fn apply(edit: Edit, rebuild: bool) {
     let Some(date) = model(|m| m.inspector.as_ref().map(|i| i.date)) else { return };
     if let Err(e) = save(date, edit, rebuild) {
-        show_inspector_error(&format!("Speichern fehlgeschlagen: {e}"));
+        show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e);
     }
 }
 
@@ -1048,13 +1059,29 @@ fn save(date: NaiveDate, edit: Edit, rebuild: bool) -> Result<(), String> {
     }
 }
 
-fn show_inspector_error(text: &str) {
-    model(|m| {
-        if let Some(i) = m.inspector.as_ref() {
-            i.error.setStringValue(&ns(text));
-            i.error.setHidden(false);
-        }
-    });
+/// Hinweis zu einer abgelehnten Eingabe direkt über deren Feldern zeigen – und in den
+/// sichtbaren Bereich holen, falls der Inspektor gerade anders gerollt ist.
+fn show_inspector_error(input: Input, text: &str) {
+    let labels = model(|m| m.inspector.as_ref().map(|i| (i.break_error.clone(), i.work_error.clone())));
+    let Some((break_error, work_error)) = labels else { return };
+    let (shown, other) = match input {
+        Input::Break => (break_error, work_error),
+        Input::Work => (work_error, break_error),
+    };
+    other.setHidden(true);
+    shown.setStringValue(&ns(text));
+    shown.setHidden(false);
+    // Erst nach dem Layout hat der Hinweis seinen Platz.
+    ui().inspector.layoutSubtreeIfNeeded();
+    shown.scrollRectToVisible(shown.bounds());
+}
+
+/// Hinweisfeld des Inspektors: rot, zunächst ausgeblendet (belegt dann keinen Platz).
+fn inspector_error_label() -> Retained<NSTextField> {
+    let l = caption("");
+    l.setTextColor(Some(&NSColor::systemRedColor()));
+    l.setHidden(true);
+    l
 }
 
 fn day_subtitle(day: Option<&Day>, settings: &Settings) -> String {
@@ -1239,6 +1266,9 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         last = Retained::into_super(row);
     }
     stack.setCustomSpacing_afterView(12.0, &last);
+    let break_error = inspector_error_label();
+    stack.addArrangedSubview(&break_error);
+    pin_width(&break_error, stack, 40.0);
     let (bf, bt) = (12 * 3600, 12 * 3600 + settings.min_pause.max(30 * 60));
     let break_from = time_picker(date, bf, sel!(exportRange:), target);
     let break_to = time_picker(date, bt, sel!(exportRange:), target);
@@ -1306,6 +1336,9 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         last = Retained::into_super(row);
     }
     stack.setCustomSpacing_afterView(12.0, &last);
+    let work_error = inspector_error_label();
+    stack.addArrangedSubview(&work_error);
+    pin_width(&work_error, stack, 40.0);
     // Vorschlag: die erste Pause des Tages, sonst die Mittagszeit.
     let (wf, wt) = day
         .as_ref()
@@ -1385,12 +1418,6 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         stack.addArrangedSubview(&row);
     }
 
-    let error = caption("");
-    error.setTextColor(Some(&NSColor::systemRedColor()));
-    error.setHidden(true);
-    stack.addArrangedSubview(&error);
-    pin_width(&error, stack, 40.0);
-
     model(|m| {
         m.built = Some((date, day, settings));
         m.inspector = Some(Inspector {
@@ -1403,7 +1430,8 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
             work_from,
             work_to,
             work_reason,
-            error,
+            break_error,
+            work_error,
         });
     });
 }

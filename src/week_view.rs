@@ -851,7 +851,8 @@ fn fmt_span(sp: Span) -> String {
 }
 
 /// Dialog „Arbeit ohne Mac eintragen“ als Sheet am Fenster „Aufzeichnungen“: von, bis und Grund.
-/// `error` zeigt einen Hinweis zur vorigen Eingabe (dann sind die Felder schon gefüllt).
+/// `error` zeigt rot über den Feldern einen Hinweis zur vorigen, abgelehnten Eingabe (dann
+/// sind die Felder schon gefüllt) – wie im Inspektor.
 fn show_add_work(date: NaiveDate, preset: Span, error: Option<(&str, Span, Activity)>) {
     let Some(window) = UI.with(|u| u.borrow().as_ref().and_then(|u| u.view.window())) else { return };
     if window.attachedSheet().is_some() {
@@ -882,6 +883,17 @@ fn show_add_work(date: NaiveDate, preset: Span, error: Option<(&str, Span, Activ
     stack.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
     stack.setAlignment(NSLayoutAttribute::Leading);
     stack.setSpacing(10.0);
+    if let Some((text, ..)) = error {
+        // So breit wie die Felder darunter, damit der Dialog nicht breiter wird.
+        let width = times.fittingSize().width.max(why.fittingSize().width);
+        let problem = NSTextField::wrappingLabelWithString(&ns(text), mtm);
+        problem.setFont(Some(&NSFont::systemFontOfSize(NSFont::smallSystemFontSize())));
+        problem.setTextColor(Some(&NSColor::systemRedColor()));
+        problem.setSelectable(false);
+        problem.setPreferredMaxLayoutWidth(width);
+        problem.widthAnchor().constraintLessThanOrEqualToConstant(width).setActive(true);
+        stack.addArrangedSubview(&problem);
+    }
     stack.addArrangedSubview(&times);
     stack.addArrangedSubview(&why);
     // Felder bündig unter „Von“ bzw. „Grund“ (erst jetzt: beide brauchen eine gemeinsame
@@ -891,15 +903,11 @@ fn show_add_work(date: NaiveDate, preset: Span, error: Option<(&str, Span, Activ
 
     let alert = NSAlert::new(mtm);
     alert.setMessageText(&ns("Arbeit ohne Mac eintragen"));
-    let info = match error {
-        Some((text, ..)) => text.to_string(),
-        None => format!(
-            "{}: Telefonat, Meeting oder Termin bei gesperrtem Mac zählt als Arbeitszeit. \
-             Eine Pause in dieser Zeit entfällt.",
-            fmt_day(date)
-        ),
-    };
-    alert.setInformativeText(&ns(&info));
+    alert.setInformativeText(&ns(&format!(
+        "{}: Telefonat, Meeting oder Termin bei gesperrtem Mac zählt als Arbeitszeit. \
+         Eine Pause in dieser Zeit entfällt.",
+        fmt_day(date)
+    )));
     if error.is_some() {
         alert.setAlertStyle(NSAlertStyle::Warning);
     }
@@ -1227,7 +1235,8 @@ fn draw(bounds: NSRect, d: &Data, flash: Option<&Flash>, hover: Option<(NaiveDat
 
     fill(bounds, &NSColor::textBackgroundColor());
 
-    // Wochenende und Zeit außerhalb des Arbeitszeitrahmens schattiert (wird nicht gezählt).
+    // Schattiert: das Wochenende (kein Arbeitstag) und die Zeit außerhalb des
+    // Arbeitszeitrahmens (wird nicht gezählt).
     for (i, c) in d.cols.iter().enumerate() {
         let x = geo.x(i);
         if !Settings::is_workday(c.date) {

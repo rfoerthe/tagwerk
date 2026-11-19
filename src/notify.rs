@@ -191,15 +191,21 @@ pub fn open_settings() {
 
 /// Mitteilung zur Höchstarbeitszeit sofort zeigen.
 pub fn post(alert: LimitAlert) {
+    post_text(alert.id(), &alert.title(), &alert.body());
+}
+
+/// Mitteilung sofort zeigen. Eine neue ersetzt eine ältere mit derselben Kennung `id`.
+/// Ohne App-Bundle passiert nichts.
+pub fn post_text(id: &str, title: &str, body: &str) {
     if !ENABLED.with(Cell::get) {
         return;
     }
     let content = UNMutableNotificationContent::new();
-    content.setTitle(&NSString::from_str(&alert.title()));
-    content.setBody(&NSString::from_str(&alert.body()));
+    content.setTitle(&NSString::from_str(title));
+    content.setBody(&NSString::from_str(body));
     content.setSound(Some(&UNNotificationSound::defaultSound()));
     let request = UNNotificationRequest::requestWithIdentifier_content_trigger(
-        &NSString::from_str(alert.id()),
+        &NSString::from_str(id),
         &content,
         None,
     );

@@ -67,6 +67,9 @@ anklicken.
   Mitteilungen senden darf; den Stand zeigen die [Einstellungen](#einstellungen), ändern
   lässt er sich unter Systemeinstellungen › Mitteilungen › Tagwerk. Nur in der
   installierten App.
+- **Fehler beim Speichern** – lässt sich die Datenbank nicht schreiben oder lesen, steht
+  das rot unter dem Status im Menü und im Tooltip des Symbols, bis es wieder gelingt; beim
+  ersten Mal kommt zusätzlich eine Mitteilung. Die Arbeitszeit zählt währenddessen weiter.
 
 - **Pausen ohne Zutun** – jede Sperre ab der eingestellten Mindestdauer (Standard
   15 Minuten) ist eine Pause, egal ob Mittags- oder Kaffeepause. Kürzere Sperren zählen
@@ -84,7 +87,8 @@ anklicken.
   „Arbeit ohne Mac“ mit der gewählten Notiz. Beim Beenden der App bleibt der Zustand
   bestehen, beim Abmelden oder Neustarten endet er.
 - **Pause als Arbeitszeit zählen** – nachträglich: das Untermenü listet die Pausen von
-  heute; ein Klick trägt die Pause als Arbeit ohne Mac ein.
+  heute; zu jeder Pause wählt man den Grund (Meeting, Telefonat, Networking oder
+  Sonstiges), dann ist sie als Arbeit ohne Mac eingetragen.
 - **Arbeitsbeginn und Feierabend festlegen** – „jetzt“, „vor N Minuten“ oder zu einer
   frei gewählten Uhrzeit. Korrekturen liegen als eigene Schicht über den erfassten
   Perioden und lassen sich jederzeit zurücknehmen.
@@ -166,7 +170,7 @@ Titelleiste zeigt den Datenordner im Finder.
 |-----------------------|------------------------------------------------------------------------|-----------------|
 | Bei Anmeldung starten | Tagwerk als Anmeldeobjekt eintragen (nur in der installierten App)     | ein             |
 | Mitteilungen          | Zeigt, ob Tagwerk Mitteilungen senden darf; wenn nicht, öffnet „Systemeinstellungen öffnen“ die Mitteilungseinstellungen von Tagwerk | – |
-| Arbeitszeitrahmen     | Nur Mo–Fr in diesem Zeitraum wird Arbeitszeit bzw. Pause gezählt        | 07:00–22:00 Uhr |
+| Arbeitszeitrahmen     | Nur in diesem Zeitraum wird Arbeitszeit bzw. Pause gezählt – an jedem Tag | 07:00–22:00 Uhr |
 | Regelarbeitszeit      | Wochenarbeitszeit, daraus ergibt sich das Tagessoll                     | 39 Std. (7:48 h/Tag) |
 | Mindestpause          | Ab dieser Sperrdauer gilt eine Unterbrechung als Pause                 | 15 Min.         |
 | Arbeit ohne Mac       | Mindestdauer beim Eintragen; nie kürzer als die Mindestpause           | 15 Min.         |
@@ -208,9 +212,9 @@ verändert.
 
 | Regel                | Inhalt                                                                  |
 |----------------------|-------------------------------------------------------------------------|
-| Arbeitszeitrahmen    | Mo–Fr im eingestellten Zeitraum; Zeit außerhalb wird nicht gezählt, Arbeit am Wochenende gemeldet |
+| Arbeitszeitrahmen    | Zeit außerhalb des eingestellten Zeitraums wird nicht gezählt; Arbeit am Wochenende zählt ohne Soll als Mehrarbeit und wird gemeldet |
 | Sollarbeitszeit      | Regelwochenarbeitszeit / 5 je Arbeitstag (39 Std. → 7:48 Std.)          |
-| Pausen (§ 4 ArbZG)   | mehr als 6 Std. Arbeit: 30 Min., mehr als 9 Std.: 45 Min.; es zählen Pausen ab 15 Min. |
+| Pausen (§ 4 ArbZG)   | mehr als 6 Std. Arbeit: 30 Min., mehr als 9 Std.: 45 Min.; höchstens 6 Std. am Stück ohne Pause; es zählen Pausen ab 15 Min. |
 | Ruhezeit (§ 5 ArbZG) | mindestens 11 Std. zwischen dem Ende eines Arbeitstags und dem nächsten Beginn |
 | Höchstarbeitszeit    | mehr als 10 Std. Arbeit an einem Tag; Mitteilung bei 9:45 und 10 Std.   |
 | Erfassung            | Beginn und Ende durch Entsperren/Sperren, Arbeit unterbrechen/Weiter arbeiten oder Ohne Mac weiterarbeiten; keine Einträge in der Zukunft |

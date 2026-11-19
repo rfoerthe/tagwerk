@@ -596,7 +596,8 @@ fn build(on_change: fn()) -> State {
         NSArray::from_retained_slice(&[
             empty(),
             view(&caption(
-                "Montag bis Freitag. Außerhalb dieses Zeitraums wird weder Arbeitszeit noch eine Pause erfasst.",
+                "Gilt an jedem Tag. Außerhalb dieses Zeitraums wird weder Arbeitszeit noch eine Pause \
+                 gezählt; Arbeit am Wochenende zählt als Mehrarbeit.",
             )),
         ]),
         NSArray::from_retained_slice(&[view(&label("Regelarbeitszeit:")), view(&weekly_row)]),

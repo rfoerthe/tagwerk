@@ -20,6 +20,34 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   Fenster aktiv wird – auch nach der Rückkehr aus den Systemeinstellungen.
 - `--settings-screenshot`: Stand der Mitteilungen zur Ansicht über
   `TAGWERK_NOTIFICATIONS=allowed|denied|hidden|undetermined`.
+- Neuer Hinweis bei mehr als 6 Std. Arbeit am Stück ohne Pause (§ 4 ArbZG), z. B.
+  „7:00 Std. ohne Pause – erlaubt sind höchstens 6 Std. am Stück“. Bisher wurde nur die
+  Summe der Pausen geprüft: Wer sieben Stunden durcharbeitete und danach 30 Min. Pause
+  machte, bekam keinen Hinweis. Unterbrechungen unter 15 Min. gelten dabei nicht als Pause.
+  Fehlt die Pause ganz, bleibt es beim bisherigen Hinweis auf die vorgeschriebene Pause.
+- Fehler der Datenbank bleiben nicht mehr unbemerkt: Schlägt das Speichern oder das
+  Einlesen in der Menüleisten-App fehl, steht das rot unter dem Status im Menü und im
+  Tooltip des Symbols, bis es wieder gelingt; beim ersten Mal kommt zusätzlich eine
+  Mitteilung. Bisher stand der Fehler nur in der Standardfehlerausgabe. Ein gescheitertes
+  Einlesen wird jetzt beim nächsten Takt wiederholt.
+
+### Geändert
+- „Pause als Arbeitszeit zählen“ in der Menüleiste fragt den Grund ab: Jede Pause hat ein
+  Untermenü mit Meeting, Telefonat, Networking und Sonstiges – wie „Ohne Mac
+  weiterarbeiten“ und die Dialoge im Fenster „Aufzeichnungen“. Bisher wurde die Pause ohne
+  Grund eingetragen.
+- Hinweise zu einer abgelehnten Eingabe im Inspektor (z. B. „Eine Pause dauert mindestens
+  15 Min.“) stehen jetzt direkt über den Feldern der Pause bzw. der Arbeit ohne Mac statt
+  ganz am Ende des Inspektors, wo sie meist außerhalb des sichtbaren Bereichs lagen. Ein
+  Fehler beim Speichern erscheint als Dialog am Fenster.
+- Der Dialog „Arbeit ohne Mac eintragen“ in der Wochenansicht zeigt den Hinweis zu einer
+  abgelehnten Eingabe ebenfalls rot direkt über den Feldern; der erklärende Text darüber
+  bleibt stehen. Bisher ersetzte der Hinweis den erklärenden Text in normaler Schrift.
+- Texte zum Wochenende richtiggestellt: Der Arbeitszeitrahmen gilt an jedem Tag, und
+  Arbeit am Wochenende zählt ohne Soll als Mehrarbeit. Die Einstellungen, der Hinweis
+  („Arbeit am Wochenende – zählt ohne Soll als Mehrarbeit“) und die Fußzeile im Fenster
+  „Aufzeichnungen“ behaupteten bisher, außerhalb von Mo–Fr werde nichts gezählt. An der
+  Berechnung ändert sich nichts.
 
 ## [1.3.0] - 2026-11-18
 

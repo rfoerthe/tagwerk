@@ -3,12 +3,15 @@
 //! Einstellbar sind der Arbeitszeitrahmen, die Regelwochenarbeitszeit und die Mindestdauer
 //! einer Pause. Fest sind die Regeln aus Arbeitszeitgesetz und Betriebsvereinbarung:
 //!
-//! - **Arbeitszeitrahmen** – Arbeit nur Mo–Fr im eingestellten Zeitraum (Standard 07:00–22:00);
-//!   außerhalb wird weder Arbeitszeit noch Pause gezählt, es gibt aber einen Hinweis.
+//! - **Arbeitszeitrahmen** – Arbeit nur im eingestellten Zeitraum (Standard 07:00–22:00), an
+//!   jedem Tag; außerhalb wird weder Arbeitszeit noch Pause gezählt, es gibt aber einen Hinweis.
+//!   Arbeitstage sind Mo–Fr: Arbeit am Wochenende zählt ohne Soll als Mehrarbeit und wird
+//!   ebenfalls gemeldet.
 //! - **Sollarbeitszeit** – Regelwochenarbeitszeit verteilt auf fünf Arbeitstage
 //!   (39 Std. = 7:48 Std. pro Tag); daraus ergibt sich der Saldo.
 //! - **Pausen** (§ 4 ArbZG) – mehr als 6 Std. Arbeit: 30 Min., mehr als 9 Std.: 45 Min.;
-//!   gezählt werden Abschnitte von mindestens 15 Min.
+//!   gezählt werden Abschnitte von mindestens 15 Min. Länger als 6 Std. am Stück ohne
+//!   solche Pause sind ebenfalls ein Verstoß.
 //! - **Ruhezeit** (§ 5 ArbZG) – mindestens 11 Std. zwischen zwei Arbeitstagen.
 //! - **Höchstarbeitszeit** – mehr als 10 Std. am Tag gelten als Verstoß; bei 9:45 und 10 Std.
 //!   kommt eine Mitteilung (siehe [`LimitWatch`]).
@@ -18,6 +21,8 @@ use chrono::{Datelike, NaiveDate, Weekday};
 
 /// Gesetzlich zählen nur Pausenabschnitte von mindestens 15 Minuten.
 pub const LEGAL_BREAK_SEGMENT: i64 = 15 * 60;
+/// Länger als 6 Stunden am Stück darf niemand ohne Pause arbeiten.
+pub const MAX_STRETCH: i64 = 6 * 3600;
 /// Mehr als 10 Stunden Arbeit am Tag sind ein Verstoß.
 pub const MAX_DAILY_WORK: i64 = 10 * 3600;
 /// Mindestruhezeit zwischen zwei Arbeitstagen.
@@ -185,7 +190,7 @@ impl Settings {
     /// Kurzfassung für Fußzeilen und Export.
     pub fn summary(&self) -> String {
         format!(
-            "Arbeitszeitrahmen Mo–Fr {}  ·  Regelarbeitszeit {} Std./Woche  ·  Pausen ab {} Min.",
+            "Arbeitszeitrahmen {}  ·  Regelarbeitszeit {} Std./Woche (Mo–Fr)  ·  Pausen ab {} Min.",
             self.frame_text(),
             fmt_hours(self.weekly_target),
             self.min_pause / 60
@@ -212,6 +217,8 @@ pub fn parse_hours(s: &str) -> Option<i64> {
 pub enum Warning {
     /// Zu wenig Pause für die Arbeitszeit (`required` Sekunden vorgeschrieben).
     Breaks { required: i64 },
+    /// Mehr als 6 Stunden am Stück ohne Pause gearbeitet (`work` Sekunden).
+    LongStretch { work: i64 },
     /// Mehr als 10 Stunden Arbeit.
     MaxHours { work: i64 },
     /// Ruhezeit seit dem letzten Arbeitstag zu kurz.
@@ -230,6 +237,9 @@ impl Warning {
                 if *required >= 45 * 60 { 9 } else { 6 },
                 required / 60
             ),
+            Warning::LongStretch { work } => {
+                format!("{} ohne Pause – erlaubt sind höchstens 6 Std. am Stück (§ 4 ArbZG)", fmt_hm(*work))
+            }
             Warning::MaxHours { work } => {
                 format!("{} Arbeitszeit – mehr als 10 Std. am Tag (§ 3 ArbZG)", fmt_hm(*work))
             }
@@ -239,7 +249,7 @@ impl Warning {
             Warning::OutsideFrame { spans, frame } => {
                 format!("{} außerhalb des Arbeitszeitrahmens ({frame}) – nicht gezählt", fmt_spans(spans))
             }
-            Warning::Weekend => "Arbeit am Wochenende – außerhalb des Arbeitszeitrahmens (Mo–Fr)".to_string(),
+            Warning::Weekend => "Arbeit am Wochenende – zählt ohne Soll als Mehrarbeit".to_string(),
         }
     }
 }
@@ -281,6 +291,12 @@ pub fn day_warnings(days: &[Day], date: NaiveDate, s: &Settings) -> Vec<Warning>
         out.push(Warning::Breaks { required: 45 * 60 });
     } else if work > 6 * 3600 && pause < 30 * 60 {
         out.push(Warning::Breaks { required: 30 * 60 });
+    }
+    // Fehlt die Pause ganz, sagt der Hinweis oben schon alles; sonst zählt auch, wann sie lag.
+    let no_break_at_all = pause == 0 && !out.is_empty();
+    let stretch = Day::longest_stretch_secs(&spans);
+    if stretch > MAX_STRETCH && !no_break_at_all {
+        out.push(Warning::LongStretch { work: stretch });
     }
     if work > MAX_DAILY_WORK {
         out.push(Warning::MaxHours { work });
@@ -487,6 +503,40 @@ mod tests {
         long.add_period(h(13, 0), h(19, 0));
         let w = day_warnings(&[long], date(18), &s);
         assert_eq!(w, vec![Warning::MaxHours { work: h(11, 0) }]);
+    }
+
+    #[test]
+    fn long_stretch_without_break() {
+        let s = Settings::default();
+        let day = |periods: &[(i64, i64)]| {
+            let mut d = Day::new(date(18));
+            for &(from, to) in periods {
+                d.add_period(from, to);
+            }
+            d
+        };
+        // 7 Std. am Stück, die Pause kommt erst danach: genug Pause, aber zu spät.
+        let late = day(&[(h(7, 0), h(14, 0)), (h(14, 30), h(15, 30))]);
+        let w = day_warnings(&[late], date(18), &s);
+        assert_eq!(w, vec![Warning::LongStretch { work: h(7, 0) }]);
+        assert_eq!(w[0].text(), "7:00 Std. ohne Pause – erlaubt sind höchstens 6 Std. am Stück (§ 4 ArbZG)");
+        // Genau 6 Std. am Stück sind erlaubt.
+        let ok = day(&[(h(7, 0), h(13, 0)), (h(13, 30), h(15, 0))]);
+        assert!(day_warnings(&[ok], date(18), &s).is_empty());
+        // Ganz ohne Pause genügt der Hinweis auf die fehlende Pause.
+        let none = day(&[(h(7, 0), h(14, 0))]);
+        assert_eq!(day_warnings(&[none], date(18), &s), vec![Warning::Breaks { required: 30 * 60 }]);
+        // Zu wenig Pause und zu spät: beide Hinweise.
+        let both = day(&[(h(7, 0), h(13, 10)), (h(13, 30), h(14, 30))]);
+        assert_eq!(
+            day_warnings(&[both], date(18), &s),
+            vec![Warning::Breaks { required: 30 * 60 }, Warning::LongStretch { work: h(6, 10) }]
+        );
+        // Mindestpause 5 Min.: Eine Unterbrechung von 10 Min. ist keine Pause nach dem Gesetz –
+        // die Arbeit davor und danach zählt zusammen (ohne die Unterbrechung).
+        let short = Settings { min_pause: 5 * 60, min_work: 5 * 60, ..s };
+        let split = day(&[(h(7, 0), h(10, 0)), (h(10, 10), h(13, 30)), (h(14, 0), h(15, 0))]);
+        assert_eq!(day_warnings(&[split], date(18), &short), vec![Warning::LongStretch { work: h(6, 20) }]);
     }
 
     #[test]

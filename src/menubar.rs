@@ -60,11 +60,14 @@ struct MenuItems {
     balance: InfoLine,
     /// Hinweise zu Regelverstößen (so viele, wie es Arten von Hinweisen gibt).
     hints: Vec<InfoLine>,
+    /// Fehler beim Speichern oder Lesen der Datenbank (sonst ausgeblendet).
+    error: InfoLine,
     /// „Arbeit unterbrechen“, „Weiter arbeiten“ bzw. „Zurück am Mac“.
     pause: Retained<NSMenuItem>,
     /// „Ohne Mac weiterarbeiten“ (mit Untermenü Meeting, Telefonat, Sonstiges).
     away: Retained<NSMenuItem>,
-    /// „Pause als Arbeitszeit zählen“ mit den Pausen von heute im Untermenü.
+    /// „Pause als Arbeitszeit zählen“ mit den Pausen von heute im Untermenü; jede Pause
+    /// bietet die Gründe an (Meeting, Telefonat …).
     count_pause: Retained<NSMenuItem>,
     count_pause_menu: Retained<NSMenu>,
     /// Pausen, die das Untermenü gerade zeigt.
@@ -100,6 +103,17 @@ struct AppState {
     /// Mitteilungen bei 9:45 und 10 Std. Arbeit.
     limit: LimitWatch,
     db: store::Db,
+    /// Die Datenbank ließ sich zuletzt nicht schreiben bzw. nicht lesen (mit dem Text für das
+    /// Menü). Solange das Schreiben scheitert, ist die Zeit seit dem letzten Speichern nur im
+    /// Speicher der App.
+    db_error: Option<(DbFault, String)>,
+}
+
+/// Wobei die Datenbank versagt hat – ein Fehler gilt, bis genau das wieder gelingt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DbFault {
+    Read,
+    Write,
 }
 
 thread_local! {
@@ -166,13 +180,14 @@ define_class!(
             });
         }
 
-        /// Eine Pause von heute als Arbeitszeit zählen (Tag = Beginn der Pause).
+        /// Eine Pause von heute als Arbeitszeit zählen (Tag = Beginn der Pause und Grund,
+        /// siehe [`count_pause_tag`]).
         #[unsafe(method(countPause:))]
         fn count_pause(&self, sender: Option<&NSMenuItem>) {
-            let Some(from) = sender.map(|s| s.tag() as i64) else { return };
+            let Some((from, activity)) = sender.map(|s| count_pause_from_tag(s.tag())) else { return };
             act(|s, t| {
                 if let Some(p) = s.tracker.pauses_today(t).into_iter().find(|p| p.from == from) {
-                    s.tracker.add_work(t.date(), p.from, p.to, "");
+                    s.tracker.add_work(t.date(), p.from, p.to, activity.note());
                 }
             });
         }
@@ -497,21 +512,52 @@ impl AppState {
         match self.db.load().and_then(|days| Ok((days, self.db.load_settings()?))) {
             Ok((days, settings)) => {
                 self.tracker.replace_days(days, settings, t);
+                self.clear_db_error(DbFault::Read);
                 true
             }
             Err(e) => {
-                eprintln!("Tagwerk: Datenbank konnte nicht neu gelesen werden: {e}");
+                // Beim nächsten Mal noch einmal versuchen (z. B. war die Datenbank gesperrt).
+                self.db.recheck_external_change();
+                self.report_db_error(DbFault::Read, &e.to_string());
                 false
             }
         }
     }
 
     fn persist(&mut self, t: NaiveDateTime) {
-        if let Err(e) = self.tracker.save(&mut self.db, t) {
-            eprintln!("Tagwerk: Speichern fehlgeschlagen: {e}");
+        match self.tracker.save(&mut self.db, t) {
+            // Gespeichert wird immer der ganze Stand – damit ist nichts verloren gegangen.
+            Ok(()) => self.clear_db_error(DbFault::Write),
+            Err(e) => self.report_db_error(DbFault::Write, &e.to_string()),
         }
         store::write_status(self.tracker.status(t));
         self.last_save = Instant::now();
+    }
+
+    /// Fehler der Datenbank merken (für das Menü) und beim ersten Auftreten melden – sonst
+    /// bemerkt ihn niemand: Die App läuft ohne Fenster und ohne Terminal.
+    fn report_db_error(&mut self, fault: DbFault, detail: &str) {
+        let (what, consequence) = match fault {
+            DbFault::Write => (
+                "Speichern fehlgeschlagen",
+                "Die Arbeitszeit wird weiter gezählt, aber erst gesichert, wenn das Speichern wieder gelingt.",
+            ),
+            DbFault::Read => (
+                "Die Datenbank konnte nicht gelesen werden",
+                "Änderungen aus dem Fenster „Aufzeichnungen“ fehlen, bis das Lesen wieder gelingt.",
+            ),
+        };
+        eprintln!("Tagwerk: {what}: {detail}");
+        if self.db_error.is_none() {
+            notify::post_text("db-error", &format!("Tagwerk: {what}"), &format!("{detail}. {consequence}"));
+        }
+        self.db_error = Some((fault, db_error_text(what, detail)));
+    }
+
+    fn clear_db_error(&mut self, fault: DbFault) {
+        if self.db_error.as_ref().is_some_and(|(f, _)| *f == fault) {
+            self.db_error = None;
+        }
     }
 
     fn refresh(&mut self) {
@@ -543,6 +589,13 @@ impl AppState {
             parts.push(("  (manuell)", Tone::Muted));
         }
         self.items.first.set(&rich(&parts));
+        match &self.db_error {
+            Some((_, text)) => {
+                self.items.error.set(&error_title(text));
+                self.items.error.item.setHidden(false);
+            }
+            None => self.items.error.item.setHidden(true),
+        }
         for (i, line) in self.items.hints.iter().enumerate() {
             match info.warnings.get(i) {
                 Some(w) => {
@@ -592,9 +645,19 @@ impl AppState {
         if pauses != self.items.count_pause_list {
             self.items.count_pause_menu.removeAllItems();
             for p in &pauses {
-                let title = pause_title(*p);
-                let item = menu_item(mtm, &title, Some(sel!(countPause:)), "", &self.items.controller);
-                item.setTag(p.from as isize);
+                // Je Pause ein Untermenü mit dem Grund – wie bei „Ohne Mac weiterarbeiten“.
+                let reasons = NSMenu::new(mtm);
+                reasons.setAutoenablesItems(false);
+                for activity in Activity::ALL {
+                    let title = activity.label();
+                    let it = menu_item(mtm, title, Some(sel!(countPause:)), "", &self.items.controller);
+                    it.setTag(count_pause_tag(p.from, activity));
+                    set_item_symbol(&it, activity_symbol(activity), title);
+                    reasons.addItem(&it);
+                }
+                let item = menu_item(mtm, &pause_title(*p), None, "", &self.items.controller);
+                item.setEnabled(true);
+                item.setSubmenu(Some(&reasons));
                 self.items.count_pause_menu.addItem(&item);
             }
             self.items.count_pause_list = pauses;
@@ -616,11 +679,14 @@ impl AppState {
                 IconKind::Outside => "außerhalb des Arbeitszeitrahmens",
                 IconKind::Closed => "Feierabend",
             };
-            let tip = format!(
+            let mut tip = format!(
                 "Tagwerk – {state}\nHeute gearbeitet: {}\nPausen: {}",
                 store::fmt_hm(info.work_secs),
                 store::fmt_hm(info.pause_secs)
             );
+            if let Some((_, text)) = &self.db_error {
+                tip.push_str(&format!("\n{text}"));
+            }
             button.setToolTip(Some(&ns(&tip)));
             let set = self.tracker.settings.icon_set;
             let height = icon_height(&self.status_item);
@@ -702,6 +768,29 @@ fn away_text(since: NaiveDateTime, t: NaiveDateTime, activity: Activity) -> Stri
 fn pause_title(p: Span) -> String {
     let len = records::shown_len(p.from, p.to);
     format!("{} – {} Uhr  ({})", fmt_clock(p.from), fmt_clock(p.to), fmt_minutes(len))
+}
+
+/// Menü-Tag unter „Pause als Arbeitszeit zählen“: Beginn der Pause (Sekunden seit
+/// Mitternacht) und Grund in einer Zahl.
+fn count_pause_tag(from: i64, activity: Activity) -> isize {
+    from as isize * COUNT_PAUSE_REASONS + activity.id()
+}
+
+fn count_pause_from_tag(tag: isize) -> (i64, Activity) {
+    ((tag / COUNT_PAUSE_REASONS) as i64, Activity::from_id(tag % COUNT_PAUSE_REASONS))
+}
+
+/// Platz für den Grund im Menü-Tag (mehr als es Gründe gibt).
+const COUNT_PAUSE_REASONS: isize = 8;
+
+/// SF-Symbol für den Grund von Arbeit ohne Mac.
+fn activity_symbol(activity: Activity) -> &'static str {
+    match activity {
+        Activity::Meeting => "person.2",
+        Activity::Call => "phone",
+        Activity::Networking => "person.3",
+        Activity::Other => "ellipsis.circle",
+    }
 }
 
 /// `55 Min.` bzw. `1:20 h`
@@ -837,10 +926,33 @@ fn warning_color() -> Retained<NSColor> {
     NSColor::systemOrangeColor()
 }
 
+/// Längste Fehlerzeile im Menü (die Zeile bestimmt dessen Breite).
+const DB_ERROR_MAX: usize = 90;
+
+/// `Speichern fehlgeschlagen: database is locked` – auf eine Zeile und eine Länge gebracht,
+/// die das Menü nicht sprengt.
+fn db_error_text(what: &str, detail: &str) -> String {
+    let text = format!("{what}: {}", detail.split_whitespace().collect::<Vec<_>>().join(" "));
+    if text.chars().count() <= DB_ERROR_MAX {
+        return text;
+    }
+    let cut: String = text.chars().take(DB_ERROR_MAX - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
+/// Fehlerzeile im Menü: rot mit Warnschild.
+fn error_title(text: &str) -> Retained<NSAttributedString> {
+    marked_title(text, &red())
+}
+
 /// Menütitel in Warnfarbe mit vorangestelltem Warnschild. Das Schild steckt im Text
 /// (nicht im Bild des Menüeintrags), weil macOS Bilder in Menüs nicht immer anzeigt.
 fn warning_title(text: &str) -> Retained<NSAttributedString> {
-    let color = warning_color();
+    marked_title(text, &warning_color())
+}
+
+/// Menütitel in der Farbe `color` mit vorangestelltem Warnschild in derselben Farbe.
+fn marked_title(text: &str, color: &Retained<NSColor>) -> Retained<NSAttributedString> {
     let font = NSFont::menuFontOfSize(0.0);
     let keys = unsafe { [NSForegroundColorAttributeName, NSFontAttributeName] };
     let values: [Retained<AnyObject>; 2] = [
@@ -849,7 +961,7 @@ fn warning_title(text: &str) -> Retained<NSAttributedString> {
     ];
     let attrs = NSDictionary::from_retained_objects(&keys, &values);
     let title = NSMutableAttributedString::new();
-    if let Some(img) = warning_symbol(&color, font.pointSize()) {
+    if let Some(img) = warning_symbol(color, font.pointSize()) {
         let attachment = NSTextAttachment::new();
         let size = img.size();
         // Auf die Grundlinie setzen und mittig zu den Großbuchstaben ausrichten.
@@ -1077,15 +1189,9 @@ pub fn run() {
     away_sub.setAutoenablesItems(false);
     for activity in Activity::ALL {
         let title = activity.label();
-        let symbol = match activity {
-            Activity::Meeting => "person.2",
-            Activity::Call => "phone",
-            Activity::Networking => "person.3",
-            Activity::Other => "ellipsis.circle",
-        };
         let it = menu_item(mtm, title, Some(sel!(goAway:)), "", &controller);
         it.setTag(activity.id());
-        set_item_symbol(&it, symbol, title);
+        set_item_symbol(&it, activity_symbol(activity), title);
         away_sub.addItem(&it);
     }
     let away_note = menu_item(mtm, "Zählt als Arbeitszeit, auch bei gesperrtem Mac – bis zum Entsperren.", None, "", &controller);
@@ -1110,7 +1216,8 @@ pub fn run() {
         pauses: InfoLine::new(mtm),
         first: InfoLine::new(mtm),
         balance: InfoLine::new(mtm),
-        hints: (0..5).map(|_| InfoLine::new(mtm)).collect(),
+        hints: (0..6).map(|_| InfoLine::new(mtm)).collect(),
+        error: InfoLine::new(mtm),
         pause: menu_item(mtm, "", Some(sel!(togglePause:)), "p", &controller),
         start_reset,
         close,
@@ -1140,7 +1247,8 @@ pub fn run() {
     ] {
         set_item_symbol(item, symbol, desc);
     }
-    for line in [&items.status, &items.worked, &items.pauses, &items.first, &items.balance]
+    // Ein Fehler der Datenbank steht direkt unter dem Status, vor den Kennzahlen.
+    for line in [&items.status, &items.error, &items.worked, &items.pauses, &items.first, &items.balance]
         .into_iter()
         .chain(&items.hints)
     {
@@ -1173,12 +1281,20 @@ pub fn run() {
             return;
         }
     };
+    // Lässt sich die Datenbank öffnen, aber nicht lesen, läuft Tagwerk mit leerem Stand weiter –
+    // das steht dann im Menü, statt unbemerkt zu bleiben.
+    let mut db_error = None;
     let days = db.load().unwrap_or_else(|e| {
         eprintln!("Tagwerk: Datenbank konnte nicht gelesen werden: {e}");
+        db_error = Some((DbFault::Read, db_error_text("Die Datenbank konnte nicht gelesen werden", &e.to_string())));
         Vec::new()
     });
     let settings = db.load_settings().unwrap_or_else(|e| {
         eprintln!("Tagwerk: Einstellungen konnten nicht gelesen werden: {e}");
+        db_error.get_or_insert((
+            DbFault::Read,
+            db_error_text("Die Einstellungen konnten nicht gelesen werden", &e.to_string()),
+        ));
         Default::default()
     });
     let mut tracker = Tracker::new(days, settings);
@@ -1217,6 +1333,7 @@ pub fn run() {
         last_icon: None,
         button_icon: None,
         db,
+        db_error,
     };
     state.persist(t);
     state.refresh();
@@ -1298,6 +1415,23 @@ mod tests {
     }
 
     #[test]
+    fn count_pause_tags_round_trip() {
+        for activity in Activity::ALL {
+            for from in [0, 12 * 3600 + 3 * 60 + 17, day::DAY_END - 1] {
+                assert!(count_pause_from_tag(count_pause_tag(from, activity)) == (from, activity));
+            }
+        }
+    }
+
+    #[test]
+    fn db_error_text_fits_one_menu_line() {
+        assert_eq!(db_error_text("Speichern fehlgeschlagen", "database is locked"), "Speichern fehlgeschlagen: database is locked");
+        let long = db_error_text("Speichern fehlgeschlagen", &"disk I/O error\n ".repeat(20));
+        assert_eq!(long.chars().count(), DB_ERROR_MAX);
+        assert!(long.ends_with('…') && !long.contains('\n'), "{long}");
+    }
+
+    #[test]
     fn away_outside_frame_shows_outside() {
         let at = |h: u32, m: u32| chrono::NaiveDate::from_ymd_opt(2026, 11, 18).unwrap().and_hms_opt(h, m, 0).unwrap();
         let mut t = Tracker::new(vec![], Default::default());
@@ -1333,6 +1467,8 @@ mod tests {
                 status_title("Ohne Mac seit 14:00 Uhr – Meeting", IconKind::Away),
                 status_title("Außerhalb des Arbeitszeitrahmens (07:00–22:00 Uhr)", IconKind::Outside),
                 status_title("Feierabend um 17:30 Uhr", IconKind::Closed),
+                error_title(&db_error_text("Speichern fehlgeschlagen", "database is locked")),
+                warning_title(&rules::Warning::LongStretch { work: 7 * 3600 }.text()),
                 rich(&[("Heute gearbeitet:  ", Tone::Label), ("3:57 h", Tone::Value), ("  von 7:48 h", Tone::Muted)]),
                 rich(&[("Pausen heute:  ", Tone::Label), ("0:35 h", Tone::Value)]),
                 rich(&[("Beginn heute:  ", Tone::Label), ("12:42 Uhr", Tone::Value), ("  (manuell)", Tone::Muted)]),
