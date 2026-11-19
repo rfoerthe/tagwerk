@@ -30,6 +30,32 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   Tooltip des Symbols, bis es wieder gelingt; beim ersten Mal kommt zusätzlich eine
   Mitteilung. Bisher stand der Fehler nur in der Standardfehlerausgabe. Ein gescheitertes
   Einlesen wird jetzt beim nächsten Takt wiederholt.
+- Widerrufen und Wiederholen (⌘Z, ⇧⌘Z) im Fenster „Aufzeichnungen“: Jede Korrektur aus dem
+  Inspektor und der Wochenansicht lässt sich zurücknehmen, bis zu 50 Schritte, solange das
+  Fenster offen ist. Das Menü „Bearbeiten“ nennt den Schritt („Widerrufen: Pause
+  entfernen“), danach wird der betroffene Tag gezeigt. Mehrere Schritte im Uhrzeit-Feld
+  zählen als eine Eingabe. Wiederhergestellt werden nur die Korrekturen des Tages –
+  inzwischen erfasste Zeit bleibt. In Dialogen und im Fenster „Einstellungen“ gilt ⌘Z wie
+  bisher dem Textfeld.
+- Filter für die Tabelle der Tage (Symbolleiste und Menü „Darstellung“): Zeitraum (dieser
+  oder letzter Monat, dieses oder letztes Jahr), „Nur Tage mit Hinweisen“ und „Nur
+  korrigierte Tage“, beliebig kombinierbar. Bei aktivem Filter ist das Symbol gefüllt, und
+  die Fußzeile zeigt „Filter: 5 von 33 Tagen“. Kennzahlen und Wochensummen zählen weiter
+  alle Tage. Wird ein ausgeblendeter Tag geöffnet, hebt das den Filter auf.
+- Wochenansicht: Ein Doppelklick auf einen Tageskopf oder Abschnitt öffnet den Tag in der
+  Ansicht „Tage“ mit dem Inspektor. Ein Rechtsklick zeigt ein Kontextmenü mit allem, was an
+  der Stelle geht (Tag bearbeiten, Uhrzeit kopieren, Arbeit ohne Mac eintragen oder
+  löschen). Die Klicks mit der linken Taste bleiben, wie sie waren.
+- Die Wochenansicht ist für VoiceOver zugänglich: eine Gruppe mit der Woche und ihren
+  Summen, darin je Tag ein Element mit Arbeitszeit, Pausen und Hinweisen sowie je Abschnitt,
+  Pause und Arbeit ohne Mac eines mit den Uhrzeiten. Bisher war das selbst gezeichnete
+  Raster für Bedienungshilfen leer.
+- Einstellung „Arbeitszeit von heute zeigen“: Die Arbeitszeit steht dann rechts neben dem
+  Symbol in der Menüleiste (z. B. `6:12`), mit gleich breiten Ziffern. Standard: aus.
+- Einstellung „Kurzbefehle“: ⌃⌥⌘P („Arbeit unterbrechen“ bzw. „Weiter arbeiten“) und ⌃⌥⌘A
+  („Aufzeichnungen“) wirken dann in jeder App, auch bei geschlossenem Menü. Standard: aus.
+  Die Kurzbefehle brauchen keine Freigabe unter „Bedienungshilfen“; ist eine
+  Tastenkombination schon vergeben, meldet Tagwerk das.
 
 ### Geändert
 - „Pause als Arbeitszeit zählen“ in der Menüleiste fragt den Grund ab: Jede Pause hat ein

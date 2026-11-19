@@ -20,6 +20,8 @@ mod day;
 #[cfg(target_os = "macos")]
 mod glyphs;
 #[cfg(target_os = "macos")]
+mod hotkey;
+#[cfg(target_os = "macos")]
 mod login_item;
 #[cfg(target_os = "macos")]
 mod menubar;

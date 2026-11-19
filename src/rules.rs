@@ -123,6 +123,10 @@ pub struct Settings {
     pub frame_to: i64,
     /// Symbolsatz der Menüleiste.
     pub icon_set: IconSet,
+    /// Arbeitszeit von heute neben dem Symbol in der Menüleiste zeigen.
+    pub show_time: bool,
+    /// Globale Kurzbefehle (wirken in jeder App).
+    pub hotkeys: bool,
 }
 
 impl Default for Settings {
@@ -134,6 +138,8 @@ impl Default for Settings {
             frame_from: 7 * 3600,
             frame_to: 22 * 3600,
             icon_set: IconSet::default(),
+            show_time: false,
+            hotkeys: false,
         }
     }
 }
@@ -150,6 +156,8 @@ impl Settings {
             frame_from: self.frame_from.clamp(0, DAY_END),
             frame_to: self.frame_to.clamp(0, DAY_END),
             icon_set: self.icon_set,
+            show_time: self.show_time,
+            hotkeys: self.hotkeys,
         };
         if s.frame_to <= s.frame_from {
             s.frame_from = d.frame_from;

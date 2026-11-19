@@ -92,6 +92,11 @@ anklicken.
 - **Arbeitsbeginn und Feierabend festlegen** – „jetzt“, „vor N Minuten“ oder zu einer
   frei gewählten Uhrzeit. Korrekturen liegen als eigene Schicht über den erfassten
   Perioden und lassen sich jederzeit zurücknehmen.
+- **Arbeitszeit neben dem Symbol** – auf Wunsch steht die Arbeitszeit von heute (z. B.
+  `6:12`) rechts neben dem Symbol in der Menüleiste; sonst zeigt sie der Tooltip.
+- **Globale Kurzbefehle** – auf Wunsch wirken ⌃⌥⌘P („Arbeit unterbrechen“ bzw. „Weiter
+  arbeiten“) und ⌃⌥⌘A („Aufzeichnungen“) in jeder App, auch bei geschlossenem Menü. Beides
+  wird in den [Einstellungen](#einstellungen) eingeschaltet.
 - **Über Tagwerk** – Version, Lizenz und Link zum Projekt.
 
 ### Aufzeichnungen
@@ -114,6 +119,17 @@ Ein Abschnitt dauert mindestens so lange wie in den Einstellungen festgelegt (St
 15 Min.). Tage mit Regelverstößen tragen ein Warnsymbol, manuell korrigierte Tage einen
 Stift.
 
+- **Widerrufen und Wiederholen** (⌘Z, ⇧⌘Z, Menü „Bearbeiten“) – jede Korrektur aus dem
+  Inspektor und der Wochenansicht lässt sich zurücknehmen, bis zu 50 Schritte, solange das
+  Fenster offen ist. Das Menü nennt den Schritt („Widerrufen: Pause entfernen“), und der
+  betroffene Tag wird gezeigt. Zurückgenommen werden nur die Korrekturen des Tages; inzwischen
+  erfasste Zeit bleibt.
+- **Filter** (Symbolleiste oder Menü „Darstellung“) – schränkt die Tabelle auf einen Zeitraum
+  ein (dieser oder letzter Monat, dieses oder letztes Jahr), auf Tage mit Hinweisen oder auf
+  korrigierte Tage; die Merkmale lassen sich kombinieren. Solange gefiltert wird, ist das
+  Symbol gefüllt, und die Fußzeile nennt, wie viele Tage zu sehen sind. Kennzahlen und
+  Wochensummen zählen weiter alles.
+
 ### Wochenansicht
 
 <img src="doc/screenshots/wochenansicht-hinweise.png" alt="Wochenansicht mit Hinweisen zu Regelverstößen und nicht gezählter Arbeit" width="860">
@@ -131,6 +147,12 @@ zu „Woche“ zeigt die Woche des ausgewählten Tags. In der Menüleisten-App e
   summieren sich ohne Rundungsreste zur Woche.
 - Der Tooltip eines Blocks nennt manuelle Grenzen.
 - Ein Klick auf die Uhrzeit von Beginn oder Ende kopiert sie in die Zwischenablage.
+- Ein Doppelklick auf einen Tageskopf oder einen Abschnitt öffnet den Tag in der Ansicht
+  „Tage“ mit dem Inspektor – für Pausen, Arbeitsbeginn und Feierabend.
+- Ein Rechtsklick zeigt als Menü alles, was an der Stelle geht: Tag bearbeiten, Uhrzeit
+  kopieren, Arbeit ohne Mac eintragen oder löschen.
+- Für VoiceOver ist die Woche eine Gruppe mit einem Element je Tag (Arbeitszeit, Pausen,
+  Hinweise) und je Abschnitt, Pause und Arbeit ohne Mac.
 - Tage mit Regelverstößen tragen ein Warnschild; ein Klick auf den Tageskopf zeigt die
   Hinweise.
 - Arbeit außerhalb des Arbeitszeitrahmens erscheint orange als „nicht gezählt“.
@@ -175,6 +197,8 @@ Titelleiste zeigt den Datenordner im Finder.
 | Mindestpause          | Ab dieser Sperrdauer gilt eine Unterbrechung als Pause                 | 15 Min.         |
 | Arbeit ohne Mac       | Mindestdauer beim Eintragen; nie kürzer als die Mindestpause           | 15 Min.         |
 | Menüleiste            | Symbolsatz für die Menüleiste, mit Vorschau aller Zustände             | Tagbogen        |
+| Arbeitszeit von heute zeigen | Arbeitszeit von heute neben dem Symbol in der Menüleiste        | aus             |
+| Kurzbefehle           | ⌃⌥⌘P und ⌃⌥⌘A wirken in jeder App, auch bei geschlossenem Menü          | aus             |
 
 Neun Symbolsätze stehen zur Wahl. Sie werden von der App selbst gezeichnet und sind
 damit in jeder Höhe scharf:

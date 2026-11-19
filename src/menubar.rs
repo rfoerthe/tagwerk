@@ -7,6 +7,7 @@
 use crate::about;
 use crate::day::{self, fmt_clock, Activity, Mode, Span};
 use crate::glyphs;
+use crate::hotkey;
 use crate::login_item;
 use crate::notify;
 use crate::records;
@@ -100,6 +101,10 @@ struct AppState {
     last_icon: Option<IconKind>,
     /// Zuletzt gezeigtes Symbol in der Menüleiste (Zustand, Symbolsatz, Höhe).
     button_icon: Option<(IconKind, IconSet, u32)>,
+    /// Zuletzt gezeigter Text neben dem Symbol (leer = keiner).
+    button_title: Option<String>,
+    /// Zuletzt übernommener Stand der Einstellung „Globale Kurzbefehle“.
+    hotkeys: Option<bool>,
     /// Mitteilungen bei 9:45 und 10 Std. Arbeit.
     limit: LimitWatch,
     db: store::Db,
@@ -162,13 +167,7 @@ define_class!(
         /// „Arbeit unterbrechen“ ↔ „Weiter arbeiten“; bei Arbeit ohne Mac „Zurück am Mac“.
         #[unsafe(method(togglePause:))]
         fn toggle_pause(&self, _sender: Option<&AnyObject>) {
-            act(|s, t| {
-                if s.tracker.is_running() {
-                    s.tracker.take_break(t);
-                } else {
-                    s.tracker.start(t);
-                }
-            });
+            toggle_pause();
         }
 
         /// „Ohne Mac weiterarbeiten“ (Tag = Art der Arbeit).
@@ -694,7 +693,23 @@ impl AppState {
                 set_icon(&button, icon, set, height);
                 self.button_icon = Some((icon, set, height));
             }
+            // Auf Wunsch die Arbeitszeit von heute neben dem Symbol.
+            let title = if self.tracker.settings.show_time { bar_time(info.work_secs) } else { String::new() };
+            if self.button_title.as_ref() != Some(&title) {
+                set_bar_title(&button, &title);
+                self.button_title = Some(title);
+            }
             self.last_icon = Some(icon);
+        }
+
+        // Globale Kurzbefehle nach den Einstellungen ein- oder ausschalten.
+        let want = self.tracker.settings.hotkeys;
+        if self.hotkeys != Some(want) {
+            self.hotkeys = Some(want);
+            if let Err(e) = hotkey::set_enabled(want, run_hotkey) {
+                eprintln!("Tagwerk: {e}");
+                notify::post_text("hotkeys", "Tagwerk: Kurzbefehle nicht verfügbar", &e);
+            }
         }
     }
 
@@ -1009,7 +1024,40 @@ fn icon_height(item: &NSStatusItem) -> u32 {
 fn set_icon(button: &objc2_app_kit::NSStatusBarButton, kind: IconKind, set: IconSet, height: u32) {
     let img = glyphs::image(set, kind.glyph(), height as f64, 0.0, kind.symbol().1);
     button.setImage(Some(&img));
-    button.setTitle(&ns(""));
+}
+
+/// Arbeitszeit für die Menüleiste: `6:12` (ohne Einheit, damit sie wenig Platz braucht).
+fn bar_time(work_secs: i64) -> String {
+    let m = work_secs.max(0) / 60;
+    format!("{}:{:02}", m / 60, m % 60)
+}
+
+/// Text rechts neben dem Symbol (leer = nur das Symbol). Gleich breite Ziffern, damit die
+/// Nachbarn in der Menüleiste nicht jede Minute wandern.
+fn set_bar_title(button: &objc2_app_kit::NSStatusBarButton, title: &str) {
+    let size = NSFont::menuBarFontOfSize(0.0).pointSize();
+    button.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(size, unsafe { NSFontWeightRegular })));
+    button.setImagePosition(if title.is_empty() { objc2_app_kit::NSCellImagePosition::ImageOnly } else { objc2_app_kit::NSCellImagePosition::ImageLeading });
+    button.setTitle(&ns(title));
+}
+
+/// Ein globaler Kurzbefehl wurde gedrückt.
+fn run_hotkey(action: hotkey::Action) {
+    match action {
+        hotkey::Action::TogglePause => toggle_pause(),
+        hotkey::Action::ShowRecords => open_records(),
+    }
+}
+
+/// „Arbeit unterbrechen“ ↔ „Weiter arbeiten“; bei Arbeit ohne Mac „Zurück am Mac“.
+fn toggle_pause() {
+    act(|s, t| {
+        if s.tracker.is_running() {
+            s.tracker.take_break(t);
+        } else {
+            s.tracker.start(t);
+        }
+    });
 }
 
 // ---------- Bildschirm gesperrt? ----------
@@ -1332,6 +1380,8 @@ pub fn run() {
         last_save: Instant::now(),
         last_icon: None,
         button_icon: None,
+        button_title: None,
+        hotkeys: None,
         db,
         db_error,
     };
@@ -1412,6 +1462,13 @@ mod tests {
         let hms = |h: i64, m: i64, s: i64| h * 3600 + m * 60 + s;
         assert_eq!(pause_title(Span::new(hms(15, 25, 40), hms(15, 45, 10))), "15:25 – 15:45 Uhr  (20 Min.)");
         assert_eq!(pause_title(Span::new(hms(12, 0, 0), hms(13, 5, 0))), "12:00 – 13:05 Uhr  (1:05 h)");
+    }
+
+    #[test]
+    fn bar_time_is_compact() {
+        assert_eq!(bar_time(0), "0:00");
+        assert_eq!(bar_time(6 * 3600 + 12 * 60 + 59), "6:12");
+        assert_eq!(bar_time(10 * 3600 + 5 * 60), "10:05");
     }
 
     #[test]

@@ -75,6 +75,8 @@ const KEY_WEEKLY: &str = "weekly_target_s";
 const KEY_FRAME_FROM: &str = "frame_from_s";
 const KEY_FRAME_TO: &str = "frame_to_s";
 const KEY_ICON_SET: &str = "icon_set";
+const KEY_SHOW_TIME: &str = "menubar_time";
+const KEY_HOTKEYS: &str = "global_hotkeys";
 
 const HEAD_CORRECTIONS: &str = "## Korrekturen";
 const HEAD_PERIODS: &str = "## Erfasste Perioden";
@@ -207,6 +209,8 @@ impl Db {
                 KEY_FRAME_FROM => s.frame_from = value,
                 KEY_FRAME_TO => s.frame_to = value,
                 KEY_ICON_SET => s.icon_set = rules::IconSet::from_id(value),
+                KEY_SHOW_TIME => s.show_time = value != 0,
+                KEY_HOTKEYS => s.hotkeys = value != 0,
                 _ => {}
             }
         }
@@ -223,6 +227,8 @@ impl Db {
             (KEY_FRAME_FROM, s.frame_from),
             (KEY_FRAME_TO, s.frame_to),
             (KEY_ICON_SET, s.icon_set.id()),
+            (KEY_SHOW_TIME, s.show_time as i64),
+            (KEY_HOTKEYS, s.hotkeys as i64),
         ] {
             tx.execute(
                 "INSERT INTO settings (key, value) VALUES (?1, ?2)
@@ -939,6 +945,8 @@ mod tests {
             frame_from: h(6, 0),
             frame_to: h(20, 0),
             icon_set: rules::IconSet::Schlossuhr,
+            show_time: true,
+            hotkeys: true,
         };
         let mut other = Db::open_in(&dir).unwrap();
         other.save_settings(&custom).unwrap();

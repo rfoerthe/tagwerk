@@ -2,7 +2,8 @@
 //! Änderungen gelten sofort, kein „OK“/„Abbrechen“.
 //!
 //! Einstellbar sind der Arbeitszeitrahmen, die Regelwochenarbeitszeit, die
-//! Mindestdauer einer Pause und der Symbolsatz der Menüleiste. Gespeichert wird in der Datenbank; die jeweils andere
+//! Mindestdauer einer Pause, der Symbolsatz der Menüleiste, ob dort die Arbeitszeit steht,
+//! und die globalen Kurzbefehle. Gespeichert wird in der Datenbank; die jeweils andere
 //! Tagwerk-Instanz (Menüleiste bzw. Fenster „Aufzeichnungen“) übernimmt die Werte.
 //!
 //! „Bei Anmeldung starten“ steht nicht in der Datenbank, sondern ist das Anmeldeobjekt
@@ -16,6 +17,7 @@
 
 use crate::day::{secs_of, DAY_END};
 use crate::glyphs;
+use crate::hotkey;
 use crate::login_item;
 use crate::notify::{self, Permission};
 use crate::rules::{self, IconSet, Settings, MIN_PAUSE_RANGE, MIN_WORK_MAX, WEEKLY_RANGE};
@@ -73,6 +75,8 @@ struct State {
     daily_note: Retained<NSTextField>,
     icon_popup: Retained<NSPopUpButton>,
     icon_preview: Vec<Retained<NSImageView>>,
+    show_time: Retained<NSButton>,
+    hotkeys: Retained<NSButton>,
     error: Retained<NSTextField>,
     on_change: fn(),
 }
@@ -225,6 +229,18 @@ define_class!(
             save();
         }
 
+        #[unsafe(method(showTimeChanged:))]
+        fn show_time_changed(&self, _sender: Option<&AnyObject>) {
+            with_state(|s| s.settings.show_time = s.show_time.state() == NSControlStateValueOn);
+            save();
+        }
+
+        #[unsafe(method(hotkeysChanged:))]
+        fn hotkeys_changed(&self, _sender: Option<&AnyObject>) {
+            with_state(|s| s.settings.hotkeys = s.hotkeys.state() == NSControlStateValueOn);
+            save();
+        }
+
         /// Anmeldeobjekt sofort ein- oder austragen (nicht in der Datenbank).
         #[unsafe(method(loginChanged:))]
         fn login_changed(&self, _sender: Option<&AnyObject>) {
@@ -284,6 +300,9 @@ impl State {
         for (view, (state, desc)) in self.icon_preview.iter().zip(PREVIEW_STATES) {
             view.setImage(Some(&glyphs::image(s.icon_set, state, PREVIEW_H, 0.0, desc)));
         }
+        let state = |on: bool| if on { NSControlStateValueOn } else { NSControlStateValueOff };
+        self.show_time.setState(state(s.show_time));
+        self.hotkeys.setState(state(s.hotkeys));
     }
 
     fn set_weekly(&mut self, value: Option<i64>) {
@@ -531,6 +550,23 @@ fn build(on_change: fn()) -> State {
     let login = unsafe {
         NSButton::checkboxWithTitle_target_action(&ns("Bei Anmeldung starten"), Some(target), Some(sel!(loginChanged:)), mtm)
     };
+    let show_time = unsafe {
+        NSButton::checkboxWithTitle_target_action(
+            &ns("Arbeitszeit von heute zeigen"),
+            Some(target),
+            Some(sel!(showTimeChanged:)),
+            mtm,
+        )
+    };
+    show_time.setToolTip(Some(&ns("Zeigt die Arbeitszeit von heute neben dem Symbol in der Menüleiste, z. B. 6:12")));
+    let hotkeys = unsafe {
+        NSButton::checkboxWithTitle_target_action(
+            &ns("In jeder App, auch bei geschlossenem Menü"),
+            Some(target),
+            Some(sel!(hotkeysChanged:)),
+            mtm,
+        )
+    };
     let notify_icon = NSImageView::new(mtm);
     notify_icon.setImageScaling(NSImageScaling::ScaleNone);
     let notify_status = label("");
@@ -587,6 +623,8 @@ fn build(on_change: fn()) -> State {
     let weekly_row = hstack(&[&weekly, &weekly_stepper, &label("Stunden pro Woche")]);
     let pause_row = hstack(&[&pause, &pause_stepper, &label("Minuten")]);
     let work_row = hstack(&[&work, &work_stepper, &label("Minuten")]);
+    let bar_row = hstack(&[&icon_popup, &show_time]);
+    bar_row.setSpacing(14.0);
     let empty = || NSGridCell::emptyContentView(mtm);
     let rows: Vec<Retained<NSArray<NSView>>> = vec![
         NSArray::from_retained_slice(&[view(&label("Allgemein:")), view(&login)]),
@@ -618,12 +656,14 @@ fn build(on_change: fn()) -> State {
                  die Mindestpause – wird sie erhöht, steigt dieser Wert mit.",
             )),
         ]),
-        NSArray::from_retained_slice(&[view(&label("Menüleiste:")), view(&icon_popup)]),
+        NSArray::from_retained_slice(&[view(&label("Menüleiste:")), view(&bar_row)]),
         NSArray::from_retained_slice(&[empty(), view(&preview_row)]),
         NSArray::from_retained_slice(&[
             empty(),
             view(&caption("Von links: läuft, Pause, außerhalb des Arbeitszeitrahmens, Feierabend.")),
         ]),
+        NSArray::from_retained_slice(&[view(&label("Kurzbefehle:")), view(&hotkeys)]),
+        NSArray::from_retained_slice(&[empty(), view(&caption(&hotkey::summary()))]),
         NSArray::from_retained_slice(&[empty(), view(&error)]),
         NSArray::from_retained_slice(&[empty(), view(&reset)]),
     ];
@@ -632,7 +672,7 @@ fn build(on_change: fn()) -> State {
     grid.setColumnSpacing(8.0);
     grid.setRowSpacing(4.0);
     grid.columnAtIndex(0).setXPlacement(NSGridCellPlacement::Trailing);
-    for r in [1, 3, 5, 7, 9, 11, 15] {
+    for r in [1, 3, 5, 7, 9, 11, 14, 17] {
         grid.rowAtIndex(r).setTopPadding(14.0);
     }
     // Bilder haben keine Grundlinie
@@ -700,6 +740,8 @@ fn build(on_change: fn()) -> State {
         daily_note,
         icon_popup,
         icon_preview,
+        show_time,
+        hotkeys,
         error,
         on_change,
     };

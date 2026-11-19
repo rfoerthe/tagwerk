@@ -16,7 +16,7 @@
 //! `Tagwerk --records` öffnet das Fenster ohne Menüleisten-App ([`run`]).
 
 use crate::about;
-use crate::day::{fmt_clock, secs_of, Activity, Day, DayRecord, Span, DAY_END};
+use crate::day::{fmt_clock, secs_of, Activity, Break, Day, DayRecord, Span, WorkBlock, DAY_END};
 use crate::rules::{self, Settings, Warning};
 use crate::settings_window;
 use crate::store::{self, Status};
@@ -298,6 +298,130 @@ struct Model {
     inspector: Option<Inspector>,
     export: Option<Export>,
     error: Option<String>,
+    /// Zuletzt gemachte Korrekturen zum Widerrufen und Wiederholen.
+    history: History,
+    /// Welche Tage die Tabelle zeigt.
+    filter: Filter,
+}
+
+/// Zeitraum, auf den die Tabelle eingeschränkt ist.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Period {
+    #[default]
+    All,
+    ThisMonth,
+    LastMonth,
+    ThisYear,
+    LastYear,
+}
+
+impl Period {
+    const ALL: [Period; 5] = [Period::All, Period::ThisMonth, Period::LastMonth, Period::ThisYear, Period::LastYear];
+
+    fn label(self) -> &'static str {
+        match self {
+            Period::All => "Alle Tage",
+            Period::ThisMonth => "Dieser Monat",
+            Period::LastMonth => "Letzter Monat",
+            Period::ThisYear => "Dieses Jahr",
+            Period::LastYear => "Letztes Jahr",
+        }
+    }
+
+    /// Liegt `date` im Zeitraum (von `today` aus gesehen)?
+    fn contains(self, date: NaiveDate, today: NaiveDate) -> bool {
+        let month = |d: NaiveDate| (d.year(), d.month());
+        match self {
+            Period::All => true,
+            Period::ThisMonth => month(date) == month(today),
+            Period::LastMonth => month(date) == month(month_start(today) - Duration::days(1)),
+            Period::ThisYear => date.year() == today.year(),
+            Period::LastYear => date.year() == today.year() - 1,
+        }
+    }
+}
+
+/// Filter der Tabelle: Zeitraum und Merkmale der Tage. Er gilt nur für die Zeilen – die
+/// Kennzahlen darüber und die Wochensummen zählen immer alles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Filter {
+    period: Period,
+    /// Nur Tage mit Hinweisen auf Regelverstöße.
+    warnings: bool,
+    /// Nur Tage mit manuellen Korrekturen.
+    corrected: bool,
+}
+
+impl Filter {
+    fn is_active(&self) -> bool {
+        *self != Self::default()
+    }
+
+    fn shows(&self, day: &Day, warnings: &[Warning], today: NaiveDate) -> bool {
+        self.period.contains(day.date, today)
+            && (!self.warnings || !warnings.is_empty())
+            && (!self.corrected || day.has_corrections())
+    }
+}
+
+/// Die manuellen Korrekturen eines Tages – alles, was sich im Fenster ändern lässt. Die
+/// automatisch erfassten Perioden gehören nicht dazu: Widerrufen stellt nur Korrekturen
+/// wieder her und lässt inzwischen erfasste Zeit stehen.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Corrections {
+    start: Option<i64>,
+    end: Option<i64>,
+    breaks: Vec<Break>,
+    work: Vec<WorkBlock>,
+}
+
+impl Corrections {
+    fn of(day: &Day) -> Self {
+        Self { start: day.start, end: day.end, breaks: day.breaks.clone(), work: day.work.clone() }
+    }
+
+    fn apply(&self, day: &mut Day) {
+        day.start = self.start;
+        day.end = self.end;
+        day.breaks = self.breaks.clone();
+        day.work = self.work.clone();
+    }
+}
+
+/// Ein Schritt zum Widerrufen bzw. Wiederholen: die Korrekturen des Tages davor.
+#[derive(Clone, Debug, PartialEq)]
+struct Step {
+    /// Was geändert wurde, für das Menü („Widerrufen: Pause entfernen“).
+    name: &'static str,
+    date: NaiveDate,
+    before: Corrections,
+}
+
+/// Verlauf der Korrekturen (jeweils der jüngste Schritt zuletzt).
+#[derive(Default)]
+struct History {
+    undo: Vec<Step>,
+    redo: Vec<Step>,
+}
+
+impl History {
+    /// So viele Schritte lassen sich höchstens widerrufen.
+    const MAX: usize = 50;
+
+    /// Eine neue Änderung merken. `follow_up`: Die Eingabe läuft weiter (Pfeiltasten im
+    /// Uhrzeit-Feld) – gehört sie zur selben Angabe wie der letzte Schritt, bleibt es bei
+    /// diesem, damit einmal Widerrufen die ganze Eingabe zurücknimmt.
+    fn record(&mut self, step: Step, follow_up: bool) {
+        self.redo.clear();
+        let same = self.undo.last().is_some_and(|last| last.date == step.date && last.name == step.name);
+        if follow_up && same {
+            return;
+        }
+        self.undo.push(step);
+        if self.undo.len() > Self::MAX {
+            self.undo.remove(0);
+        }
+    }
 }
 
 impl Model {
@@ -337,6 +461,7 @@ impl Model {
 
     fn build_rows(&mut self) {
         let s = &self.settings;
+        let today = now().date();
         let mut recs: Vec<(Day, DayRecord)> =
             self.days.iter().filter_map(|d| d.record(s).map(|r| (d.clone(), r))).collect();
         recs.reverse();
@@ -349,7 +474,9 @@ impl Model {
             let sunday = monday + Duration::days(6);
             let total: i64 = recs[i..j].iter().map(|(_, r)| r.shown_work_secs).sum();
             let (_, target) = rules::balance(&self.days, monday, sunday, s);
-            rows.push(Row::Week {
+            // Die Wochenzeile zählt die ganze Woche, auch wenn der Filter Tage ausblendet;
+            // Wochen ohne sichtbaren Tag entfallen.
+            let week_row = Row::Week {
                 title: format!(
                     "KW {}  ·  {} – {}",
                     week.week(),
@@ -362,10 +489,18 @@ impl Model {
                     store::fmt_hm(total),
                     rules::fmt_balance(total - target)
                 ),
-            });
-            for (day, rec) in recs[i..j].iter().cloned() {
-                let warnings = rules::day_warnings(&self.days, day.date, s);
-                rows.push(Row::Day { day, rec, warnings });
+            };
+            let days: Vec<Row> = recs[i..j]
+                .iter()
+                .cloned()
+                .filter_map(|(day, rec)| {
+                    let warnings = rules::day_warnings(&self.days, day.date, s);
+                    self.filter.shows(&day, &warnings, today).then_some(Row::Day { day, rec, warnings })
+                })
+                .collect();
+            if !days.is_empty() {
+                rows.push(week_row);
+                rows.extend(days);
             }
             i = j;
         }
@@ -427,6 +562,8 @@ thread_local! {
     static TIMER: RefCell<Option<Retained<NSTimer>>> = const { RefCell::new(None) };
     /// Umschalter „Tage | Woche“, bevor die Symbolleiste ihn abholt.
     static SWITCHER: RefCell<Option<Retained<NSSegmentedControl>>> = const { RefCell::new(None) };
+    /// Filter in der Symbolleiste (sein Symbol zeigt, ob gefiltert wird).
+    static FILTER_ITEM: RefCell<Option<Retained<NSMenuToolbarItem>>> = const { RefCell::new(None) };
 }
 
 fn embedded() -> bool {
@@ -472,6 +609,11 @@ const TB_ADD: &str = "add";
 const TB_EXPORT: &str = "export";
 const TB_INSPECTOR: &str = "inspector";
 const TB_VIEW: &str = "view";
+const TB_FILTER: &str = "filter";
+
+/// Menü-Tags der Merkmale im Filter.
+const FILTER_WARNINGS: isize = 0;
+const FILTER_CORRECTED: isize = 1;
 
 /// Vorgaben im Export-Dialog (Tag des Menüpunkts).
 const PRESET_4W: isize = 0;
@@ -588,6 +730,50 @@ define_class!(
         #[unsafe(method(closeRecords:))]
         fn close_records(&self, _sender: Option<&AnyObject>) {
             ui().window.performClose(None);
+        }
+
+        /// „Widerrufen“: im Fenster „Aufzeichnungen“ die letzte Korrektur, sonst (Dialog,
+        /// Einstellungen) wie gewohnt die Eingabe im Textfeld.
+        #[unsafe(method(undoEdit:))]
+        fn undo_edit(&self, sender: Option<&AnyObject>) {
+            if records_is_key() {
+                step_history(false);
+            } else {
+                unsafe { NSApplication::sharedApplication(mtm()).sendAction_to_from(sel!(undo:), None, sender) };
+            }
+        }
+
+        #[unsafe(method(redoEdit:))]
+        fn redo_edit(&self, sender: Option<&AnyObject>) {
+            if records_is_key() {
+                step_history(true);
+            } else {
+                unsafe { NSApplication::sharedApplication(mtm()).sendAction_to_from(sel!(redo:), None, sender) };
+            }
+        }
+
+        /// Filter: Zeitraum (Tag = Stelle in [`Period::ALL`]).
+        #[unsafe(method(filterPeriod:))]
+        fn filter_period(&self, sender: Option<&NSMenuItem>) {
+            let period = sender.and_then(|s| usize::try_from(s.tag()).ok()).and_then(|i| Period::ALL.get(i).copied());
+            if let Some(period) = period {
+                set_filter(|f| f.period = period);
+            }
+        }
+
+        /// Filter: Merkmal ein- oder ausschalten.
+        #[unsafe(method(filterToggle:))]
+        fn filter_toggle(&self, sender: Option<&NSMenuItem>) {
+            match sender.map(|s| s.tag()) {
+                Some(FILTER_WARNINGS) => set_filter(|f| f.warnings = !f.warnings),
+                Some(FILTER_CORRECTED) => set_filter(|f| f.corrected = !f.corrected),
+                _ => {}
+            }
+        }
+
+        #[unsafe(method(filterReset:))]
+        fn filter_reset(&self, _sender: Option<&AnyObject>) {
+            set_filter(|f| *f = Filter::default());
         }
 
         #[unsafe(method(reload:))]
@@ -955,7 +1141,12 @@ fn refresh_summary() {
             (store::fmt_hm(mw), format!("{} · Saldo {}", plural(mn, "Arbeitstag", "Arbeitstage"), rules::fmt_balance(mw - mt))),
             (store::fmt_hm(avg(mw)), format!("Pausen Ø {} · im {}", store::fmt_hm(avg(mp)), MONTHS[today.month0() as usize])),
         ];
-        (texts, m.status, recs.len(), m.error.clone(), st.summary())
+        // Mit Filter: wie viele der Tage die Tabelle zeigt.
+        let shown = m.filter.is_active().then(|| {
+            let rows = m.rows.iter().filter(|r| matches!(r, Row::Day { .. })).count();
+            format!("Filter: {rows} von {}", plural(m.records().len(), "Tag", "Tagen"))
+        });
+        (texts, m.status, shown.unwrap_or_else(|| format!("{} erfasst", plural(recs.len(), "Arbeitstag", "Arbeitstage"))), m.error.clone(), st.summary())
     });
     for ((value, detail), (v, d)) in ui.cards.iter().zip(texts) {
         value.setStringValue(&ns(&v));
@@ -973,7 +1164,7 @@ fn refresh_summary() {
     ui.window.setSubtitle(&ns(&subtitle));
     let footer = match error {
         Some(e) => e,
-        None => format!("{} erfasst  ·  {rules_text}", plural(count, "Arbeitstag", "Arbeitstage")),
+        None => format!("{count}  ·  {rules_text}"),
     };
     ui.footer.setStringValue(&ns(&footer));
 }
@@ -1007,6 +1198,20 @@ enum Edit {
     CutWork(i64, i64),
 }
 
+impl Edit {
+    /// Bezeichnung im Menü „Bearbeiten“ („Widerrufen: …“).
+    fn name(&self) -> &'static str {
+        match self {
+            Edit::SetStart(_) => "Arbeitsbeginn ändern",
+            Edit::SetEnd(_) => "Feierabend ändern",
+            Edit::AddBreak(..) => "Pause eintragen",
+            Edit::RemoveBreak(_) => "Pause entfernen",
+            Edit::AddWork(..) => "Arbeit ohne Mac eintragen",
+            Edit::RemoveWork(_) | Edit::CutWork(..) => "Arbeit ohne Mac entfernen",
+        }
+    }
+}
+
 fn apply(edit: Edit, rebuild: bool) {
     let Some(date) = model(|m| m.inspector.as_ref().map(|i| i.date)) else { return };
     if let Err(e) = save(date, edit, rebuild) {
@@ -1016,46 +1221,100 @@ fn apply(edit: Edit, rebuild: bool) {
 
 /// Änderung an einem Tag speichern und anzeigen. `rebuild` baut den Inspektor neu auf.
 fn save(date: NaiveDate, edit: Edit, rebuild: bool) -> Result<(), String> {
+    let name = edit.name();
+    // Die Korrekturen davor und danach, wie sie in der Datenbank stehen.
+    let mut change = None;
     let result = model(|m| {
         let db = m.db.as_mut()?;
-        Some(db.edit_day(date, now(), |d| match edit {
-            Edit::SetStart(s) => d.start = s,
-            Edit::SetEnd(e) => d.end = e,
-            Edit::AddBreak(from, to) => d.add_break(from, to),
-            Edit::RemoveBreak(i) => {
-                if i < d.breaks.len() {
-                    d.breaks.remove(i);
+        Some(db.edit_day(date, now(), |d| {
+            let before = Corrections::of(d);
+            match edit {
+                Edit::SetStart(s) => d.start = s,
+                Edit::SetEnd(e) => d.end = e,
+                Edit::AddBreak(from, to) => d.add_break(from, to),
+                Edit::RemoveBreak(i) => {
+                    if i < d.breaks.len() {
+                        d.breaks.remove(i);
+                    }
                 }
-            }
-            Edit::AddWork(from, to, note) => d.add_work(from, to, &note),
-            Edit::RemoveWork(i) => {
-                if i < d.work.len() {
-                    d.work.remove(i);
+                Edit::AddWork(from, to, note) => d.add_work(from, to, &note),
+                Edit::RemoveWork(i) => {
+                    if i < d.work.len() {
+                        d.work.remove(i);
+                    }
                 }
+                Edit::CutWork(from, to) => d.cut_work(from, to),
             }
-            Edit::CutWork(from, to) => d.cut_work(from, to),
+            change = Some((before, Corrections::of(d)));
         }))
     });
     match result {
         None => Ok(()),
         Some(Err(e)) => Err(e.to_string()),
         Some(Ok(())) => {
-            model(|m| {
-                m.load();
-                if !rebuild {
-                    // Eingabe läuft weiter: Felder stehen lassen, nur die Zahlen aktualisieren.
-                    if let Some(date) = m.selected {
-                        m.built = Some((date, m.day(date).cloned(), m.settings));
-                    }
+            if let Some((before, after)) = change {
+                if before != after {
+                    model(|m| m.history.record(Step { name, date, before }, !rebuild));
                 }
-            });
-            reload_table();
-            refresh_summary();
-            refresh_inspector(rebuild);
-            week_from_model();
-            notify_change();
+            }
+            saved(rebuild);
             Ok(())
         }
+    }
+}
+
+/// Nach dem Speichern: neu einlesen, alles anzeigen und der Menüleisten-App Bescheid geben.
+fn saved(rebuild: bool) {
+    model(|m| {
+        m.load();
+        if !rebuild {
+            // Eingabe läuft weiter: Felder stehen lassen, nur die Zahlen aktualisieren.
+            if let Some(date) = m.selected {
+                m.built = Some((date, m.day(date).cloned(), m.settings));
+            }
+        }
+    });
+    reload_table();
+    refresh_summary();
+    refresh_inspector(rebuild);
+    week_from_model();
+    notify_change();
+}
+
+/// „Widerrufen“ bzw. „Wiederholen“ (`redo`): die Korrekturen des Tages aus dem letzten
+/// Schritt wiederherstellen und den Tag zeigen. Der Stand davor wandert in die jeweils
+/// andere Richtung, sodass sich beides beliebig abwechseln lässt.
+fn step_history(redo: bool) {
+    let Some(step) = model(|m| if redo { m.history.redo.pop() } else { m.history.undo.pop() }) else { return };
+    let mut current = None;
+    let result = model(|m| {
+        let db = m.db.as_mut()?;
+        Some(db.edit_day(step.date, now(), |d| {
+            current = Some(Corrections::of(d));
+            step.before.apply(d);
+        }))
+    });
+    let back = |m: &mut Model, s: Step| if redo { m.history.undo.push(s) } else { m.history.redo.push(s) };
+    match (result, current) {
+        (Some(Ok(())), Some(before)) => {
+            let (name, date) = (step.name, step.date);
+            model(|m| back(m, Step { name, date, before }));
+            saved(true);
+            // Zeigen, was sich geändert hat.
+            match mode() {
+                Mode::Days => go_to(date),
+                Mode::Week => {
+                    model(|m| m.selected = Some(date));
+                    refresh_week(Some(date));
+                }
+            }
+        }
+        (Some(Err(e)), _) => {
+            // Nichts geändert: Der Schritt bleibt, wo er war.
+            model(|m| if redo { m.history.redo.push(step) } else { m.history.undo.push(step) });
+            show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e.to_string());
+        }
+        _ => {}
     }
 }
 
@@ -1438,6 +1697,10 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
 
 /// Springt zu einem Tag (auch einem ohne Aufzeichnung).
 fn go_to(date: NaiveDate) {
+    // Blendet der Filter den Tag aus, wird er aufgehoben – sonst bliebe die Zeile unsichtbar.
+    if model(|m| m.filter.is_active() && m.row_of(date).is_none() && m.day(date).is_some()) {
+        set_filter(|f| *f = Filter::default());
+    }
     let row = model(|m| {
         m.selected = Some(date);
         m.row_of(date)
@@ -1469,8 +1732,87 @@ fn validate_menu_item(item: &NSMenuItem) -> bool {
         return mode == Mode::Days;
     } else if action == sel!(goToday:) {
         return mode == Mode::Week;
+    } else if action == sel!(filterPeriod:) {
+        let filter = model(|m| m.filter);
+        check(usize::try_from(item.tag()).ok().and_then(|i| Period::ALL.get(i)) == Some(&filter.period));
+        return mode == Mode::Days;
+    } else if action == sel!(filterToggle:) {
+        let filter = model(|m| m.filter);
+        check(if item.tag() == FILTER_WARNINGS { filter.warnings } else { filter.corrected });
+        return mode == Mode::Days;
+    } else if action == sel!(filterReset:) {
+        return mode == Mode::Days && model(|m| m.filter.is_active());
+    } else if action == sel!(undoEdit:) || action == sel!(redoEdit:) {
+        let redo = action == sel!(redoEdit:);
+        // In einem Dialog oder im Fenster „Einstellungen“ gilt der Befehl dem Textfeld.
+        if !records_is_key() {
+            item.setTitle(&ns(&history_title(redo, None)));
+            return true;
+        }
+        let name = model(|m| if redo { m.history.redo.last() } else { m.history.undo.last() }.map(|s| s.name));
+        item.setTitle(&ns(&history_title(redo, name)));
+        return name.is_some();
     }
     true
+}
+
+/// Hat das Fenster „Aufzeichnungen“ selbst die Tastatur (kein Dialog davor, kein anderes Fenster)?
+fn records_is_key() -> bool {
+    UI.with(|u| u.borrow().as_ref().is_some_and(|u| u.window.isKeyWindow()))
+}
+
+/// `Widerrufen: Pause entfernen` bzw. ohne Schritt nur `Widerrufen`.
+fn history_title(redo: bool, name: Option<&str>) -> String {
+    let verb = if redo { "Wiederholen" } else { "Widerrufen" };
+    match name {
+        Some(n) => format!("{verb}: {n}"),
+        None => verb.to_string(),
+    }
+}
+
+/// Filter der Tabelle ändern und die Zeilen neu aufbauen.
+fn set_filter(change: impl FnOnce(&mut Filter)) {
+    model(|m| {
+        change(&mut m.filter);
+        m.build_rows();
+    });
+    reload_table();
+    refresh_summary();
+    update_filter_item();
+}
+
+/// Das Filter-Symbol ist gefüllt, solange die Tabelle nicht alle Tage zeigt.
+fn update_filter_item() {
+    let Some(item) = FILTER_ITEM.with(|f| f.borrow().clone()) else { return };
+    let active = model(|m| m.filter.is_active());
+    let (image, tip) = if active {
+        ("line.3.horizontal.decrease.circle.fill", "Filter aktiv – die Tabelle zeigt nicht alle Tage")
+    } else {
+        ("line.3.horizontal.decrease.circle", "Tabelle auf einen Zeitraum oder bestimmte Tage einschränken")
+    };
+    item.setImage(symbol(image, "Filter").as_deref());
+    item.setToolTip(Some(&ns(tip)));
+}
+
+/// Menü des Filters: Zeitraum (einer davon) und Merkmale (beliebig kombinierbar).
+fn filter_menu(target: &Controller) -> Retained<NSMenu> {
+    let mtm = mtm();
+    let none = NSEventModifierFlags::empty();
+    let menu = NSMenu::new(mtm);
+    for (i, period) in Period::ALL.into_iter().enumerate() {
+        let item = menu_item(period.label(), Some(sel!(filterPeriod:)), "", none, Some(target));
+        item.setTag(i as isize);
+        menu.addItem(&item);
+    }
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+    for (title, tag) in [("Nur Tage mit Hinweisen", FILTER_WARNINGS), ("Nur korrigierte Tage", FILTER_CORRECTED)] {
+        let item = menu_item(title, Some(sel!(filterToggle:)), "", none, Some(target));
+        item.setTag(tag);
+        menu.addItem(&item);
+    }
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+    menu.addItem(&menu_item("Filter zurücksetzen", Some(sel!(filterReset:)), "", none, Some(target)));
+    menu
 }
 
 /// Einen Tag in der Ansicht „Tage“ zeigen.
@@ -1545,16 +1887,40 @@ fn model_snapshot() -> week_view::Snapshot {
     })
 }
 
-/// Eigenständig gestartet: Arbeit ohne Mac aus der Wochenansicht direkt speichern.
+/// Arbeit ohne Mac aus der Wochenansicht eintragen: eigenständig gestartet direkt in die
+/// Datenbank, sonst über die Menüleisten-App (sie kennt die laufende Erfassung).
 fn week_add_work(date: NaiveDate, from: i64, to: i64, activity: Activity) {
-    if let Err(e) = save(date, Edit::AddWork(from, to, activity.note().to_string()), true) {
-        show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e);
+    let edit = Edit::AddWork(from, to, activity.note().to_string());
+    match EMBED.with(|c| c.get()) {
+        Some(e) => via_menubar(edit.name(), date, || (e.add_work)(date, from, to, activity)),
+        None => {
+            if let Err(e) = save(date, edit, true) {
+                show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e);
+            }
+        }
     }
 }
 
 fn week_remove_work(date: NaiveDate, from: i64, to: i64) {
-    if let Err(e) = save(date, Edit::CutWork(from, to), true) {
-        show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e);
+    let edit = Edit::CutWork(from, to);
+    match EMBED.with(|c| c.get()) {
+        Some(e) => via_menubar(edit.name(), date, || (e.remove_work)(date, from, to)),
+        None => {
+            if let Err(e) = save(date, edit, true) {
+                show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e);
+            }
+        }
+    }
+}
+
+/// Eine Änderung, die die Menüleisten-App speichert (`change`), zum Widerrufen merken. Sie
+/// liest das Fenster danach neu ein – daran zeigt sich, was sich geändert hat.
+fn via_menubar(name: &'static str, date: NaiveDate, change: impl FnOnce()) {
+    let corrections = || model(|m| m.day(date).map(Corrections::of).unwrap_or_default());
+    let before = corrections();
+    change();
+    if corrections() != before {
+        model(|m| m.history.record(Step { name, date, before }, false));
     }
 }
 
@@ -1803,7 +2169,7 @@ fn reveal(path: &std::path::Path) {
 
 fn toolbar_ids() -> Retained<NSArray<NSString>> {
     let flex: Retained<NSString> = unsafe { NSToolbarFlexibleSpaceItemIdentifier }.copy();
-    NSArray::from_retained_slice(&[ns(TB_VIEW), flex, ns(TB_RELOAD), ns(TB_ADD), ns(TB_EXPORT), ns(TB_INSPECTOR)])
+    NSArray::from_retained_slice(&[ns(TB_VIEW), flex, ns(TB_FILTER), ns(TB_RELOAD), ns(TB_ADD), ns(TB_EXPORT), ns(TB_INSPECTOR)])
 }
 
 /// Umschalter „Tage | Woche“ (in der Symbolleiste).
@@ -1834,6 +2200,16 @@ fn toolbar_item(target: &Controller, id: &NSString) -> Option<Retained<NSToolbar
         item.setToolTip(Some(&ns("Zwischen Tagen und Woche wechseln")));
         item.setView(Some(&seg));
         return Some(item);
+    }
+    if id.to_string() == TB_FILTER {
+        let item = NSMenuToolbarItem::initWithItemIdentifier(NSMenuToolbarItem::alloc(mtm), id);
+        item.setLabel(&ns("Filter"));
+        item.setPaletteLabel(&ns("Filter"));
+        item.setMenu(&filter_menu(target));
+        item.setShowsIndicator(true);
+        FILTER_ITEM.with(|f| *f.borrow_mut() = Some(item.clone()));
+        update_filter_item();
+        return Some(Retained::into_super(item));
     }
     let (label, tip, image, action) = match id.to_string().as_str() {
         TB_RELOAD => ("Aktualisieren", "Aufzeichnungen neu laden", "arrow.clockwise", sel!(reload:)),
@@ -1913,8 +2289,10 @@ fn build_main_menu(app: &NSApplication, target: &Controller) {
     submenu(
         "Bearbeiten",
         vec![
-            Some(menu_item("Widerrufen", Some(sel!(undo:)), "z", cmd, None)),
-            Some(menu_item("Wiederholen", Some(sel!(redo:)), "z", cmd | NSEventModifierFlags::Shift, None)),
+            // Korrekturen des Fensters (siehe `step_history`); Titel und Zustand setzt
+            // `validate_menu_item`.
+            Some(menu_item("Widerrufen", Some(sel!(undoEdit:)), "z", cmd, Some(target))),
+            Some(menu_item("Wiederholen", Some(sel!(redoEdit:)), "z", cmd | NSEventModifierFlags::Shift, Some(target))),
             None,
             Some(menu_item("Ausschneiden", Some(sel!(cut:)), "x", cmd, None)),
             Some(menu_item("Kopieren", Some(sel!(copy:)), "c", cmd, None)),
@@ -1927,6 +2305,12 @@ fn build_main_menu(app: &NSApplication, target: &Controller) {
         vec![
             Some(menu_item("Tage", Some(sel!(showDays:)), "1", cmd, Some(target))),
             Some(menu_item("Woche", Some(sel!(showWeek:)), "2", cmd, Some(target))),
+            None,
+            Some({
+                let filter = menu_item("Filter", None, "", cmd, None);
+                filter.setSubmenu(Some(&filter_menu(target)));
+                filter
+            }),
             None,
             Some(menu_item("Heute", Some(sel!(goToday:)), "t", cmd, Some(target))),
             Some(menu_item("Aktualisieren", Some(sel!(reload:)), "r", cmd, Some(target))),
@@ -2296,7 +2680,8 @@ pub fn show(status: Status, embed: Embed) {
     NSApplication::sharedApplication(mtm()).setActivationPolicy(NSApplicationActivationPolicy::Regular);
     let fresh = !OPEN.with(|o| o.replace(true));
     let ui = build(false);
-    week_view::set_actions(Some(embed.add_work), Some(embed.remove_work));
+    week_view::set_actions(Some(week_add_work), Some(week_remove_work));
+    week_view::set_open_day(Some(open_day));
     model(|m| m.status = Some(status));
     reload();
     let today = now().date();
@@ -2385,6 +2770,7 @@ pub fn run(screenshot: Option<PathBuf>, week: bool) -> Result<(), String> {
         week_view::set_actions(None, None);
     } else {
         week_view::set_actions(Some(week_add_work), Some(week_remove_work));
+        week_view::set_open_day(Some(open_day));
     }
     let mode = match (shot, week) {
         (_, true) => Mode::Week,
@@ -2430,3 +2816,82 @@ pub fn run(screenshot: Option<PathBuf>, week: bool) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn date(d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 11, d).unwrap()
+    }
+
+    fn step(name: &'static str, d: u32, start: Option<i64>) -> Step {
+        Step { name, date: date(d), before: Corrections { start, ..Corrections::default() } }
+    }
+
+    #[test]
+    fn corrections_leave_recorded_periods_alone() {
+        let mut day = Day::new(date(17));
+        day.add_period(8 * 3600, 12 * 3600);
+        day.start = Some(7 * 3600);
+        day.add_break(10 * 3600, 10 * 3600 + 1800);
+        let before = Corrections::of(&day);
+        // Inzwischen erfasst der Mac weiter, und der Tag wird anders korrigiert.
+        day.add_period(13 * 3600, 17 * 3600);
+        day.start = None;
+        day.breaks.clear();
+        day.add_work(12 * 3600, 13 * 3600, "Meeting");
+        before.apply(&mut day);
+        assert_eq!(Corrections::of(&day), before);
+        assert_eq!(day.periods.len(), 2, "erfasste Zeit bleibt");
+        assert!(day.work.is_empty());
+    }
+
+    #[test]
+    fn history_merges_follow_ups_and_forgets_redo() {
+        let mut h = History::default();
+        h.record(step("Arbeitsbeginn ändern", 17, None), false);
+        // Pfeiltasten im Uhrzeit-Feld: derselbe Schritt.
+        h.record(step("Arbeitsbeginn ändern", 17, Some(7 * 3600)), true);
+        h.record(step("Arbeitsbeginn ändern", 17, Some(7 * 3600 + 600)), true);
+        assert_eq!(h.undo.len(), 1);
+        assert_eq!(h.undo[0].before.start, None, "der Stand vor der ganzen Eingabe");
+        // Ein anderer Tag oder eine andere Angabe ist ein neuer Schritt – auch als Folgeeingabe.
+        h.record(step("Arbeitsbeginn ändern", 18, None), true);
+        h.record(step("Feierabend ändern", 18, None), true);
+        assert_eq!(h.undo.len(), 3);
+        // Eine neue Änderung verwirft, was sich wiederholen ließ.
+        h.redo.push(step("Pause entfernen", 17, None));
+        h.record(step("Pause eintragen", 17, None), false);
+        assert!(h.redo.is_empty());
+        for _ in 0..History::MAX + 10 {
+            h.record(step("Pause eintragen", 17, None), false);
+        }
+        assert_eq!(h.undo.len(), History::MAX);
+        assert_eq!(history_title(false, Some("Pause entfernen")), "Widerrufen: Pause entfernen");
+        assert_eq!(history_title(true, None), "Wiederholen");
+    }
+
+    #[test]
+    fn filter_by_period_and_marks() {
+        let today = date(19);
+        let on = |y: i32, m: u32, d: u32| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+        assert!(Period::ThisMonth.contains(date(1), today) && !Period::ThisMonth.contains(on(2026, 10, 31), today));
+        assert!(Period::LastMonth.contains(on(2026, 10, 31), today) && !Period::LastMonth.contains(date(1), today));
+        assert!(Period::ThisYear.contains(on(2026, 1, 1), today) && !Period::ThisYear.contains(on(2025, 12, 31), today));
+        assert!(Period::LastYear.contains(on(2025, 12, 31), today));
+        // Januar: „Letzter Monat“ ist der Dezember des Vorjahrs.
+        assert!(Period::LastMonth.contains(on(2026, 12, 15), on(2027, 1, 10)));
+
+        let plain = Day::new(date(17));
+        let mut corrected = Day::new(date(18));
+        corrected.start = Some(7 * 3600);
+        let warning = [Warning::Weekend];
+        assert!(!Filter::default().is_active());
+        assert!(Filter::default().shows(&plain, &[], today));
+        let warnings = Filter { warnings: true, ..Filter::default() };
+        assert!(warnings.is_active() && !warnings.shows(&plain, &[], today) && warnings.shows(&plain, &warning, today));
+        let both = Filter { warnings: true, corrected: true, period: Period::ThisMonth };
+        assert!(both.shows(&corrected, &warning, today) && !both.shows(&plain, &warning, today));
+        assert!(!both.shows(&corrected, &warning, on(2026, 12, 1)), "anderer Monat");
+    }
+}
