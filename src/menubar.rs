@@ -24,13 +24,14 @@ use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
     NSApplicationActivationPolicy, NSAttributedStringAttachmentConveniences, NSColor, NSDatePicker,
     NSDatePickerElementFlags, NSDatePickerStyle, NSFont, NSFontAttributeName, NSFontWeightRegular,
-    NSFontWeightSemibold, NSForegroundColorAttributeName, NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuDelegate, NSMenuItem,
-    NSStatusBar, NSStatusItem, NSTextAttachment, NSTextField, NSVariableStatusItemLength, NSView,
+    NSFontWeightSemibold, NSForegroundColorAttributeName, NSImage, NSImageSymbolConfiguration, NSLineBreakMode, NSMenu,
+    NSMenuDelegate, NSMenuItem, NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSStatusBar, NSStatusItem,
+    NSTextAttachment, NSTextField, NSVariableStatusItemLength, NSView,
     NSWorkspace,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSDate, NSDictionary, NSDistributedNotificationCenter, NSMutableAttributedString,
-    NSNotification, NSNotificationCenter, NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
+    NSNotification, NSNotificationCenter, NSPoint, NSRange, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
     NSTimer,
 };
 use std::cell::RefCell;
@@ -588,9 +589,16 @@ impl AppState {
             parts.push(("  (manuell)", Tone::Muted));
         }
         self.items.first.set(&rich(&parts));
+        // Fehler und Hinweise brechen um, statt das Menü zu verbreitern: höchstens so breit wie
+        // die breiteste Zeile mit Status und Kennzahlen.
+        let items = &self.items;
+        let wrap = [&items.status, &items.worked, &items.pauses, &items.first, &items.balance]
+            .iter()
+            .map(|line| line.text_width())
+            .fold(InfoLine::MIN_WRAP, f64::max);
         match &self.db_error {
             Some((_, text)) => {
-                self.items.error.set(&error_title(text));
+                self.items.error.set_wrapped(&error_title(text), wrap);
                 self.items.error.item.setHidden(false);
             }
             None => self.items.error.item.setHidden(true),
@@ -598,7 +606,7 @@ impl AppState {
         for (i, line) in self.items.hints.iter().enumerate() {
             match info.warnings.get(i) {
                 Some(w) => {
-                    line.set(&warning_title(&w.text()));
+                    line.set_wrapped(&warning_title(&w.text()), wrap);
                     line.item.setHidden(false);
                 }
                 None => line.item.setHidden(true),
@@ -976,6 +984,7 @@ fn marked_title(text: &str, color: &Retained<NSColor>) -> Retained<NSAttributedS
     ];
     let attrs = NSDictionary::from_retained_objects(&keys, &values);
     let title = NSMutableAttributedString::new();
+    let mut indent = 0.0;
     if let Some(img) = warning_symbol(color, font.pointSize()) {
         let attachment = NSTextAttachment::new();
         let size = img.size();
@@ -985,8 +994,17 @@ fn marked_title(text: &str, color: &Retained<NSColor>) -> Retained<NSAttributedS
         attachment.setImage(Some(&img));
         title.appendAttributedString(&NSAttributedString::attributedStringWithAttachment(&attachment));
         text_with(&title, "\u{2002}", &attrs);
+        // Warnschild und Halbgeviert (halbe Schriftgröße) davor.
+        indent = size.width + font.pointSize() / 2.0;
     }
     text_with(&title, text, &attrs);
+    // Bricht die Zeile um, stehen die Folgezeilen unter dem Text, nicht unter dem Warnschild.
+    let style = NSMutableParagraphStyle::new();
+    style.setHeadIndent(indent);
+    style.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+    unsafe {
+        title.addAttribute_value_range(NSParagraphStyleAttributeName, &style, NSRange::new(0, title.length()));
+    }
     Retained::into_super(title)
 }
 
@@ -1119,14 +1137,59 @@ impl InfoLine {
         Self { item, label }
     }
 
+    /// Schmaler als so bricht keine Zeile um (Punkte) – auch wenn Status und Kennzahlen
+    /// einmal kürzer sind. So breit ist das Menü ohnehin durch seine übrigen Einträge.
+    const MIN_WRAP: f64 = 280.0;
+
+    /// Zeile, die bei Bedarf umbricht (Hinweise und Fehler, siehe [`InfoLine::set_wrapped`]).
+    fn wrapping(mtm: MainThreadMarker) -> Self {
+        let line = Self::new(mtm);
+        line.label.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+        line.label.setMaximumNumberOfLines(0);
+        if let Some(cell) = line.label.cell() {
+            cell.setWraps(true);
+        }
+        line
+    }
+
     fn set(&self, title: &NSAttributedString) {
         self.label.setAttributedStringValue(title);
-        let size = self.label.fittingSize();
-        let y = ((Self::HEIGHT - size.height) / 2.0).round();
+        self.place(self.label.fittingSize());
+    }
+
+    /// Wie [`InfoLine::set`], aber der Text ist höchstens `max_width` breit und bricht sonst
+    /// um; die Zeile wird entsprechend höher.
+    fn set_wrapped(&self, title: &NSAttributedString, max_width: f64) {
+        self.label.setAttributedStringValue(title);
+        self.label.setPreferredMaxLayoutWidth(max_width);
+        let bounds = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(max_width, 10_000.0));
+        let size = match self.label.cell() {
+            Some(cell) => cell.cellSizeForBounds(bounds),
+            None => self.label.fittingSize(),
+        };
+        self.place(NSSize::new(size.width.ceil().min(max_width), size.height.ceil()));
+    }
+
+    /// Text mit der Größe `size` einsetzen; die Zeile hat oben und unten den Abstand
+    /// einer einzeiligen.
+    fn place(&self, size: NSSize) {
+        let height = Self::HEIGHT.max(size.height + Self::HEIGHT - Self::line_height());
+        let y = ((height - size.height) / 2.0).round();
         self.label.setFrame(NSRect::new(NSPoint::new(Self::LEFT, y), size));
         if let Some(view) = self.item.view() {
-            view.setFrameSize(NSSize::new(Self::LEFT + size.width + Self::RIGHT, Self::HEIGHT));
+            view.setFrameSize(NSSize::new(Self::LEFT + size.width + Self::RIGHT, height));
         }
+    }
+
+    /// Höhe einer Textzeile in der Schrift des Menüs.
+    fn line_height() -> f64 {
+        let font = NSFont::menuFontOfSize(0.0);
+        (font.ascender() - font.descender() + font.leading()).ceil()
+    }
+
+    /// Breite des Texts, wie er zuletzt gesetzt wurde.
+    fn text_width(&self) -> f64 {
+        self.label.frame().size.width
     }
 }
 
@@ -1264,8 +1327,8 @@ pub fn run() {
         pauses: InfoLine::new(mtm),
         first: InfoLine::new(mtm),
         balance: InfoLine::new(mtm),
-        hints: (0..6).map(|_| InfoLine::new(mtm)).collect(),
-        error: InfoLine::new(mtm),
+        hints: (0..6).map(|_| InfoLine::wrapping(mtm)).collect(),
+        error: InfoLine::wrapping(mtm),
         pause: menu_item(mtm, "", Some(sel!(togglePause:)), "p", &controller),
         start_reset,
         close,

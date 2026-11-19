@@ -69,6 +69,14 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 - Der Dialog „Arbeit ohne Mac eintragen“ in der Wochenansicht zeigt den Hinweis zu einer
   abgelehnten Eingabe ebenfalls rot direkt über den Feldern; der erklärende Text darüber
   bleibt stehen. Bisher ersetzte der Hinweis den erklärenden Text in normaler Schrift.
+- Hinweise auf Regelverstöße und Fehlermeldungen im Menü der Menüleiste brechen um, statt
+  das Menü zu verbreitern: Sie sind höchstens so breit wie die breiteste Zeile mit Status
+  und Kennzahlen (mindestens 280 Punkte), Folgezeilen stehen eingerückt unter dem Text.
+- Die Tabelle der Tage zeigt Warnschild und Stift nebeneinander, wenn ein Tag sowohl
+  Hinweise hat als auch manuell korrigiert ist; bisher verdrängte das Warnschild den
+  Stift. Beide Symbole haben feste Plätze und einen eigenen Tooltip. Dafür ist die
+  Symbolspalte breiter; gespeicherte Spaltenbreiten der Tabelle werden einmalig
+  zurückgesetzt.
 - Texte zum Wochenende richtiggestellt: Der Arbeitszeitrahmen gilt an jedem Tag, und
   Arbeit am Wochenende zählt ohne Soll als Mehrarbeit. Die Einstellungen, der Hinweis
   („Arbeit am Wochenende – zählt ohne Soll als Mehrarbeit“) und die Fußzeile im Fenster

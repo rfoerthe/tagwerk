@@ -58,7 +58,7 @@ Das Menü zeigt auf einen Blick den Status, die Arbeitszeit von heute samt Soll,
 Pausen, den Beginn, den Saldo der Woche und Hinweise auf Regelverstöße. Der Status ist
 farbig – **grün** = läuft, **orange** = Pause, **indigo** = Feierabend –, der Saldo
 grün im Plus und rot im Minus. Diese Zeilen sind reine Anzeige und lassen sich nicht
-anklicken.
+anklicken. Lange Hinweise brechen um, damit das Menü schmal bleibt.
 
 - **Mitteilungen zur Höchstarbeitszeit** – über die Mitteilungszentrale von macOS kommt
   bei **9:45 Std.** Arbeit eine Vorwarnung („Noch 15 Min. bis 10 Std. Arbeitszeit“) und
@@ -117,7 +117,7 @@ eigene Abschnitte; ist die Lücke zur benachbarten Arbeitszeit (erfasst oder Arb
 Mac) kürzer als die Mindestpause, wird sie dem neuen Abschnitt dazugerechnet (mit Hinweis).
 Ein Abschnitt dauert mindestens so lange wie in den Einstellungen festgelegt (Standard
 15 Min.). Tage mit Regelverstößen tragen ein Warnsymbol, manuell korrigierte Tage einen
-Stift.
+Stift – trifft beides zu, stehen beide Symbole nebeneinander.
 
 - **Widerrufen und Wiederholen** (⌘Z, ⇧⌘Z, Menü „Bearbeiten“) – jede Korrektur aus dem
   Inspektor und der Wochenansicht lässt sich zurücknehmen, bis zu 50 Schritte, solange das

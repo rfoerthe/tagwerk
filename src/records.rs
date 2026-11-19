@@ -595,7 +595,8 @@ fn model<R>(f: impl FnOnce(&mut Model) -> R) -> R {
 
 const COLUMNS: [(&str, &str, f64, f64, f64); 7] = [
     // Kennung, Titel, Breite, Mindest- und Höchstbreite (zusätzlicher Platz geht an „Datum“)
-    ("mark", "", 22.0, 22.0, 22.0),
+    // Platz für zwei Symbole nebeneinander: Hinweis und Stift.
+    ("mark", "", MARK_WIDTH, MARK_WIDTH, MARK_WIDTH),
     ("date", "Datum", 140.0, 110.0, 10_000.0),
     ("start", "Beginn", 64.0, 56.0, 120.0),
     ("end", "Ende", 64.0, 56.0, 120.0),
@@ -603,6 +604,10 @@ const COLUMNS: [(&str, &str, f64, f64, f64); 7] = [
     ("pause", "Pausen", 70.0, 60.0, 130.0),
     ("balance", "Saldo", 76.0, 66.0, 130.0),
 ];
+
+/// Breite der Spalte mit den Symbolen und Platz je Symbol.
+const MARK_WIDTH: f64 = 42.0;
+const MARK_SLOT: f64 = 18.0;
 
 const TB_RELOAD: &str = "reload";
 const TB_ADD: &str = "add";
@@ -1016,25 +1021,34 @@ fn cell_view(m: &Model, column: Option<&str>, row: NSInteger) -> Option<Retained
             unsafe { cell.setTextField(Some(&t)) };
         }
         (Row::Day { day, warnings, .. }, Some("mark")) => {
-            // Hinweise gehen vor; sonst Stift für manuell korrigierte Tage.
-            let mark = if !warnings.is_empty() {
+            // Zwei feste Plätze, damit die Symbole über die Zeilen hinweg untereinanderstehen:
+            // links das Warnschild für Hinweise, rechts der Stift für manuell korrigierte Tage.
+            let warning = (!warnings.is_empty()).then(|| {
                 let tip: Vec<String> = warnings.iter().map(Warning::text).collect();
-                Some(("exclamationmark.triangle.fill", NSColor::systemOrangeColor(), tip.join("\n")))
-            } else if day.has_corrections() {
-                Some(("pencil", NSColor::secondaryLabelColor(), "Manuell korrigiert".to_string()))
-            } else {
-                None
-            };
-            if let Some((name, color, tip)) = mark {
+                ("exclamationmark.triangle.fill", NSColor::systemOrangeColor(), tip.join("\n"))
+            });
+            let pencil = day
+                .has_corrections()
+                .then(|| ("pencil", NSColor::secondaryLabelColor(), "Manuell korrigiert".to_string()));
+            let mut tips = Vec::new();
+            for (slot, mark) in [warning, pencil].into_iter().enumerate() {
+                let Some((name, color, tip)) = mark else { continue };
                 let iv = NSImageView::new(mtm);
                 iv.setImage(symbol(name, &tip).as_deref());
                 iv.setContentTintColor(Some(&color));
+                iv.setToolTip(Some(&ns(&tip)));
                 iv.setTranslatesAutoresizingMaskIntoConstraints(false);
                 cell.addSubview(&iv);
-                iv.centerXAnchor().constraintEqualToAnchor(&cell.centerXAnchor()).setActive(true);
+                let center = 4.0 + MARK_SLOT * (slot as f64 + 0.5);
+                iv.centerXAnchor().constraintEqualToAnchor_constant(&cell.leadingAnchor(), center).setActive(true);
                 iv.centerYAnchor().constraintEqualToAnchor(&cell.centerYAnchor()).setActive(true);
-                unsafe { cell.setImageView(Some(&iv)) };
-                cell.setToolTip(Some(&ns(&tip)));
+                if tips.is_empty() {
+                    unsafe { cell.setImageView(Some(&iv)) };
+                }
+                tips.push(tip);
+            }
+            if !tips.is_empty() {
+                cell.setToolTip(Some(&ns(&tips.join("\n"))));
             }
         }
         (Row::Day { day, rec, .. }, Some(col)) => {
@@ -2438,7 +2452,7 @@ fn build_window(controller: &Retained<Controller>, shot: bool) -> Ui {
         col.setMaxWidth(max);
         if id == "mark" {
             col.setResizingMask(NSTableColumnResizingOptions::empty());
-            col.setHeaderToolTip(Some(&ns("Manuell korrigiert")));
+            col.setHeaderToolTip(Some(&ns("Hinweise auf Regelverstöße und manuelle Korrekturen")));
         } else if id != "date" {
             col.headerCell().setAlignment(NSTextAlignment::Right);
         }
@@ -2448,8 +2462,9 @@ fn build_window(controller: &Retained<Controller>, shot: bool) -> Ui {
         table.setDataSource(Some(ProtocolObject::from_ref(&**controller)));
         table.setDelegate(Some(ProtocolObject::from_ref(&**controller)));
     }
-    // Neuer Name seit der Spalte „Saldo“: alte gespeicherte Spaltenbreiten passen nicht mehr.
-    table.setAutosaveName(Some(&ns("TagwerkRecordsTable2")));
+    // Neuer Name, seit die Symbolspalte zwei Symbole fasst (davor: seit der Spalte „Saldo“):
+    // Mit den alten gespeicherten Spaltenbreiten ragte die Tabelle rechts aus dem Fenster.
+    table.setAutosaveName(Some(&ns("TagwerkRecordsTable3")));
     table.setAutosaveTableColumns(true);
     let table_scroll = NSScrollView::new(mtm);
     table_scroll.setDocumentView(Some(&table));
