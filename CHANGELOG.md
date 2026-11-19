@@ -6,6 +6,14 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+## [1.4.0] - 2026-11-19
+
+### Zusammenfassung
+Tagwerk meldet sich jetzt über die Mitteilungszentrale von macOS, bevor die
+Höchstarbeitszeit erreicht ist: bei 9:45 Std. und bei 10 Std. Arbeit, jeweils einmal am
+Tag. Die Einstellungen zeigen, ob Mitteilungen erlaubt sind, und führen bei Bedarf direkt
+in die Systemeinstellungen.
+
 ### Hinzugefügt
 - Mitteilungen zur Höchstarbeitszeit über die Mitteilungszentrale von macOS: bei 9:45 Std.
   Arbeit „Noch 15 Min. bis 10 Std. Arbeitszeit“, bei 10 Std. „10 Std. Arbeitszeit
@@ -217,7 +225,8 @@ als Markdown. Alle Daten bleiben lokal auf dem Mac.
   notarisiert es und installiert sie auf Wunsch nach `/Applications`.
 - `github-release.sh` veröffentlicht ein geprüftes DMG als Release auf GitHub.
 
-[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.3.0...HEAD
+[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.4.0...HEAD
+[1.4.0]: https://github.com/rfoerthe/tagwerk/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/rfoerthe/tagwerk/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/rfoerthe/tagwerk/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/rfoerthe/tagwerk/compare/v1.0.0...v1.1.0
