@@ -3,9 +3,11 @@
 //! Aufruf:
 //!   Tagwerk                       Menüleisten-App (Standard)
 //!   Tagwerk --records             nur das Fenster "Aufzeichnungen" (ohne Menüleisten-App)
-//!   Tagwerk --export [--from TT.MM.JJJJ] [--to TT.MM.JJJJ] [-o datei.md]
-//!                                 Aufzeichnungen als Markdown exportieren
-//!                                 (Standard: die letzten 28 Tage, Ausgabe auf stdout)
+//!   Tagwerk --export [--from TT.MM.JJJJ] [--to TT.MM.JJJJ] [--format md|csv|pdf] [-o datei]
+//!                                 Aufzeichnungen exportieren: Markdown (vollständig), CSV
+//!                                 (Tabelle) oder PDF (zum Drucken). Ohne --format entscheidet
+//!                                 die Endung von -o, sonst Markdown. Standard: die letzten
+//!                                 28 Tage, Ausgabe auf stdout (PDF nur mit -o)
 //!   Tagwerk --import <datei.md>   Tage aus einem Markdown-Export übernehmen
 //!   Tagwerk --screenshot <png>    Fenster "Aufzeichnungen" öffnen, Bild speichern, beenden
 //!   Tagwerk --week-screenshot <png>
@@ -27,6 +29,8 @@ mod login_item;
 mod menubar;
 #[cfg(target_os = "macos")]
 mod notify;
+#[cfg(target_os = "macos")]
+mod pdf;
 #[cfg(target_os = "macos")]
 mod records;
 mod rules;
@@ -56,7 +60,12 @@ fn main() {
     };
 
     if has("--export") {
-        export(arg_after("--from"), arg_after("--to"), arg_after("-o").or_else(|| arg_after("--output")));
+        export(
+            arg_after("--from"),
+            arg_after("--to"),
+            arg_after("--format"),
+            arg_after("-o").or_else(|| arg_after("--output")),
+        );
         return;
     }
 
@@ -120,7 +129,13 @@ fn main() {
     fail("Die Menüleisten-App und das Fenster „Aufzeichnungen“ gibt es nur für macOS.");
 }
 
-fn export(from: Option<String>, to: Option<String>, output: Option<String>) {
+fn export(from: Option<String>, to: Option<String>, format: Option<String>, output: Option<String>) {
+    // Ausdrücklich angegeben, sonst nach der Endung der Ausgabedatei, sonst Markdown.
+    let format = match format {
+        Some(name) => store::ExportFormat::from_name(&name)
+            .unwrap_or_else(|| fail(format!("„{name}“ ist kein Format (md, csv oder pdf)."))),
+        None => output.as_deref().and_then(store::ExportFormat::from_path).unwrap_or(store::ExportFormat::Markdown),
+    };
     let now = Local::now().naive_local();
     let (default_from, default_to) = store::default_export_range(now.date());
     let date = |arg: Option<String>, default| match arg {
@@ -135,11 +150,14 @@ fn export(from: Option<String>, to: Option<String>, output: Option<String>) {
     // Vortag für die Prüfung der Ruhezeit am ersten Tag
     let days = db.load_range(from - Duration::days(1), to).unwrap_or_else(|e| fail(e));
     let settings = db.load_settings().unwrap_or_else(|e| fail(e));
-    let md = store::export_markdown(&days, from, to, now, &settings);
     match output {
-        None => print!("{md}"),
+        None => match format {
+            store::ExportFormat::Markdown => print!("{}", store::export_markdown(&days, from, to, now, &settings)),
+            store::ExportFormat::Csv => print!("{}", store::export_csv(&store::Report::new(&days, from, to, &settings))),
+            store::ExportFormat::Pdf => fail("Ein PDF braucht eine Ausgabedatei: -o datei.pdf"),
+        },
         Some(path) => {
-            if let Err(e) = std::fs::write(&path, md) {
+            if let Err(e) = store::write_export(&days, from, to, now, &settings, format, std::path::Path::new(&path)) {
                 fail(format!("{path} konnte nicht geschrieben werden: {e}"));
             }
             eprintln!(

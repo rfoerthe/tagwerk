@@ -1,9 +1,10 @@
 //! Fenster „Einstellungen“ nach den macOS Human Interface Guidelines: nicht modal,
 //! Änderungen gelten sofort, kein „OK“/„Abbrechen“.
 //!
-//! Einstellbar sind der Arbeitszeitrahmen, die Regelwochenarbeitszeit, die
-//! Mindestdauer einer Pause, der Symbolsatz der Menüleiste, ob dort die Arbeitszeit steht,
-//! und die globalen Kurzbefehle. Gespeichert wird in der Datenbank; die jeweils andere
+//! Vier Reiter: „Allgemein“ (Anmeldung, Menüleiste, Kurzbefehle), „Arbeitszeit“ (Rahmen,
+//! Regelarbeitszeit, Arbeitstage, Zeitkonto), „Erfassung“ (Mindestpause, Arbeit ohne Mac,
+//! Inaktivität, Nachfrage nach langer Sperre) und „Mitteilungen“ (Stand der Erlaubnis, woran
+//! Tagwerk erinnert). Gespeichert wird in der Datenbank; die jeweils andere
 //! Tagwerk-Instanz (Menüleiste bzw. Fenster „Aufzeichnungen“) übernimmt die Werte.
 //!
 //! „Bei Anmeldung starten“ steht nicht in der Datenbank, sondern ist das Anmeldeobjekt
@@ -20,9 +21,9 @@ use crate::glyphs;
 use crate::hotkey;
 use crate::login_item;
 use crate::notify::{self, Permission};
-use crate::rules::{self, IconSet, Settings, MIN_PAUSE_RANGE, MIN_WORK_MAX, WEEKLY_RANGE};
+use crate::rules::{self, IconSet, Settings, IDLE_RANGE, MIN_PAUSE_RANGE, MIN_WORK_MAX, WEEKLY_RANGE};
 use crate::store;
-use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, TimeZone};
+use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, TimeZone};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly, Message};
@@ -47,6 +48,20 @@ fn to_nsdate(secs: i64) -> Retained<NSDate> {
     let t: NaiveDateTime = ref_date().and_hms_opt(0, 0, 0).unwrap() + Duration::seconds(secs.clamp(0, DAY_END - 60));
     let ts = Local.from_local_datetime(&t).earliest().map(|d| d.timestamp()).unwrap_or(0);
     NSDate::dateWithTimeIntervalSince1970(ts as f64)
+}
+
+/// Mittag des Tages `day` (für Datumsfelder; Mittag, damit die Zeitzone den Tag nicht verschiebt).
+fn day_to_nsdate(day: NaiveDate) -> Retained<NSDate> {
+    let ts = day
+        .and_hms_opt(12, 0, 0)
+        .and_then(|t| Local.from_local_datetime(&t).earliest())
+        .map(|d| d.timestamp())
+        .unwrap_or_else(|| Local::now().timestamp());
+    NSDate::dateWithTimeIntervalSince1970(ts as f64)
+}
+
+fn nsdate_to_day(d: &NSDate) -> Option<NaiveDate> {
+    DateTime::from_timestamp(d.timeIntervalSince1970().floor() as i64, 0).map(|u| u.with_timezone(&Local).date_naive())
 }
 
 fn picker_secs(p: &NSDatePicker) -> Option<i64> {
@@ -77,9 +92,24 @@ struct State {
     icon_preview: Vec<Retained<NSImageView>>,
     show_time: Retained<NSButton>,
     hotkeys: Retained<NSButton>,
+    /// Arbeitstage Montag bis Freitag (Tag der Checkbox = Bit in `Settings::workdays`).
+    workdays: Vec<Retained<NSButton>>,
+    account_check: Retained<NSButton>,
+    account_date: Retained<NSDatePicker>,
+    carry: Retained<NSTextField>,
+    idle_check: Retained<NSButton>,
+    idle: Retained<NSTextField>,
+    idle_stepper: Retained<NSStepper>,
+    ask: Retained<NSButton>,
+    notify_limit: Retained<NSButton>,
+    notify_break: Retained<NSButton>,
+    tabs: Retained<NSTabView>,
     error: Retained<NSTextField>,
     on_change: fn(),
 }
+
+/// Vorgabe im Feld „Minuten ohne Eingabe“, solange die Erkennung aus ist.
+const IDLE_DEFAULT: i64 = 10 * 60;
 
 /// Höhe der Vorschau (wie in der Menüleiste) und der Symbole im Auswahlmenü.
 const PREVIEW_H: f64 = 18.0;
@@ -229,6 +259,90 @@ define_class!(
             save();
         }
 
+        /// Arbeitstag ein- oder ausgeschaltet (Tag der Checkbox = Bit); einer bleibt immer.
+        #[unsafe(method(workdayChanged:))]
+        fn workday_changed(&self, sender: Option<&NSButton>) {
+            let Some(sender) = sender else { return };
+            let bit = 1u8 << sender.tag().clamp(0, 4);
+            let on = sender.state() == NSControlStateValueOn;
+            with_state(|s| {
+                let days = if on { s.settings.workdays | bit } else { s.settings.workdays & !bit };
+                if days & rules::ALL_WORKDAYS == 0 {
+                    s.show_error("Mindestens ein Arbeitstag muss bleiben.");
+                } else {
+                    s.settings.workdays = days;
+                    s.error.setHidden(true);
+                }
+            });
+            save();
+        }
+
+        /// „Zählt erst ab“ ein- oder ausgeschaltet bzw. das Datum geändert.
+        #[unsafe(method(accountFromChanged:))]
+        fn account_from_changed(&self, _sender: Option<&AnyObject>) {
+            with_state(|s| {
+                let on = s.account_check.state() == NSControlStateValueOn;
+                s.settings.account_from = if on { nsdate_to_day(&s.account_date.dateValue()) } else { None };
+            });
+            save();
+        }
+
+        #[unsafe(method(carryChanged:))]
+        fn carry_changed(&self, _sender: Option<&AnyObject>) {
+            with_state(|s| match rules::parse_balance(&s.carry.stringValue().to_string()) {
+                Some(v) => {
+                    s.settings.account_carry = v;
+                    s.error.setHidden(true);
+                }
+                None => s.show_error("Der Übertrag ist ein Saldo wie +12:30 oder −3:15."),
+            });
+            save();
+        }
+
+        #[unsafe(method(idleToggled:))]
+        fn idle_toggled(&self, _sender: Option<&AnyObject>) {
+            with_state(|s| {
+                if s.idle_check.state() == NSControlStateValueOn {
+                    let v = s.idle.stringValue().to_string().trim().parse::<i64>().ok().map(|m| m * 60);
+                    s.settings.idle_secs = v.filter(|v| (IDLE_RANGE.0..=IDLE_RANGE.1).contains(v)).unwrap_or(IDLE_DEFAULT);
+                } else {
+                    s.settings.idle_secs = 0;
+                }
+                s.error.setHidden(true);
+            });
+            save();
+        }
+
+        #[unsafe(method(idleChanged:))]
+        fn idle_changed(&self, _sender: Option<&AnyObject>) {
+            with_state(|s| {
+                let v = s.idle.stringValue().to_string().trim().parse::<i64>().ok().map(|m| m * 60);
+                s.set_idle(v);
+            });
+            save();
+        }
+
+        #[unsafe(method(idleStepped:))]
+        fn idle_stepped(&self, _sender: Option<&AnyObject>) {
+            with_state(|s| {
+                let v = s.idle_stepper.integerValue() as i64 * 60;
+                s.set_idle(Some(v));
+            });
+            save();
+        }
+
+        /// Die übrigen Schalter: Nachfrage nach Sperre und woran Tagwerk erinnert.
+        #[unsafe(method(switchChanged:))]
+        fn switch_changed(&self, _sender: Option<&AnyObject>) {
+            with_state(|s| {
+                let on = |b: &NSButton| b.state() == NSControlStateValueOn;
+                s.settings.ask_after_lock = on(&s.ask);
+                s.settings.notify_limit = on(&s.notify_limit);
+                s.settings.notify_break = on(&s.notify_break);
+            });
+            save();
+        }
+
         #[unsafe(method(showTimeChanged:))]
         fn show_time_changed(&self, _sender: Option<&AnyObject>) {
             with_state(|s| s.settings.show_time = s.show_time.state() == NSControlStateValueOn);
@@ -281,6 +395,7 @@ impl State {
     /// Alle Felder aus `self.settings` neu befüllen.
     fn fill(&self) {
         let s = &self.settings;
+        let state = |on: bool| if on { NSControlStateValueOn } else { NSControlStateValueOff };
         self.login.setState(if login_item::enabled() { NSControlStateValueOn } else { NSControlStateValueOff });
         self.frame_from.setDateValue(&to_nsdate(s.frame_from));
         self.frame_to.setDateValue(&to_nsdate(s.frame_to));
@@ -292,15 +407,35 @@ impl State {
         self.work_stepper.setMinValue((s.min_pause / 60) as f64);
         self.work_stepper.setIntegerValue((s.min_work / 60) as isize);
         self.daily_note.setStringValue(&ns(&format!(
-            "Das sind {} pro Arbeitstag (Montag bis Freitag).",
+            "{}  ·  {} pro Arbeitstag",
+            s.week_text(),
             store::fmt_hm(s.daily_target_workday())
         )));
+        for (bit, check) in self.workdays.iter().enumerate() {
+            check.setState(state(s.workdays & (1 << bit) != 0));
+        }
+        self.account_check.setState(state(s.account_from.is_some()));
+        self.account_date.setEnabled(s.account_from.is_some());
+        // Ohne Beginn als Vorschlag der 1. Januar dieses Jahres.
+        let today = Local::now().date_naive();
+        let from = s.account_from.unwrap_or_else(|| today.with_month(1).and_then(|d| d.with_day(1)).unwrap_or(today));
+        self.account_date.setDateValue(&day_to_nsdate(from));
+        self.carry.setStringValue(&ns(&rules::fmt_signed_hm(s.account_carry)));
+        let idle_on = s.idle_secs > 0;
+        let idle_min = if idle_on { s.idle_secs } else { IDLE_DEFAULT } / 60;
+        self.idle_check.setState(state(idle_on));
+        self.idle.setEnabled(idle_on);
+        self.idle_stepper.setEnabled(idle_on);
+        self.idle.setStringValue(&ns(&idle_min.to_string()));
+        self.idle_stepper.setIntegerValue(idle_min as isize);
+        self.ask.setState(state(s.ask_after_lock));
+        self.notify_limit.setState(state(s.notify_limit));
+        self.notify_break.setState(state(s.notify_break));
         let index = IconSet::ALL.iter().position(|&x| x == s.icon_set).unwrap_or(0);
         self.icon_popup.selectItemAtIndex(index as isize);
         for (view, (state, desc)) in self.icon_preview.iter().zip(PREVIEW_STATES) {
             view.setImage(Some(&glyphs::image(s.icon_set, state, PREVIEW_H, 0.0, desc)));
         }
-        let state = |on: bool| if on { NSControlStateValueOn } else { NSControlStateValueOff };
         self.show_time.setState(state(s.show_time));
         self.hotkeys.setState(state(s.hotkeys));
     }
@@ -346,6 +481,21 @@ impl State {
                 "Arbeit ohne Mac muss mindestens {} Min. (die Mindestpause) und höchstens {} Min. dauern.",
                 min / 60,
                 MIN_WORK_MAX / 60
+            )),
+        }
+    }
+
+    /// Inaktivität in Sekunden übernehmen (nur wenn die Erkennung eingeschaltet ist).
+    fn set_idle(&mut self, value: Option<i64>) {
+        match value {
+            Some(v) if (IDLE_RANGE.0..=IDLE_RANGE.1).contains(&v) => {
+                self.settings.idle_secs = v;
+                self.error.setHidden(true);
+            }
+            _ => self.show_error(&format!(
+                "Die Inaktivität muss zwischen {} und {} Minuten liegen.",
+                IDLE_RANGE.0 / 60,
+                IDLE_RANGE.1 / 60
             )),
         }
     }
@@ -567,6 +717,38 @@ fn build(on_change: fn()) -> State {
             mtm,
         )
     };
+    let checkbox = |title: &str, action: Sel| unsafe {
+        NSButton::checkboxWithTitle_target_action(&ns(title), Some(target), Some(action), mtm)
+    };
+    let workdays: Vec<Retained<NSButton>> = ["Mo", "Di", "Mi", "Do", "Fr"]
+        .iter()
+        .enumerate()
+        .map(|(bit, name)| {
+            let c = checkbox(name, sel!(workdayChanged:));
+            c.setTag(bit as isize);
+            c
+        })
+        .collect();
+    let account_check = checkbox("Zählt erst ab", sel!(accountFromChanged:));
+    let account_date = NSDatePicker::new(mtm);
+    account_date.setDatePickerStyle(NSDatePickerStyle::TextFieldAndStepper);
+    account_date.setDatePickerElements(NSDatePickerElementFlags::YearMonthDay);
+    account_date.setLocale(Some(&NSLocale::localeWithLocaleIdentifier(&ns("de_DE"))));
+    account_date.setBezeled(true);
+    account_date.setDrawsBackground(true);
+    unsafe {
+        account_date.setTarget(Some(target));
+        account_date.setAction(Some(sel!(accountFromChanged:)));
+    }
+    let carry = number_field(target, sel!(carryChanged:));
+    carry.widthAnchor().constraintEqualToConstant(76.0).setPriority(999.0);
+    let idle_check = checkbox("Erfassung anhalten nach", sel!(idleToggled:));
+    let idle = number_field(target, sel!(idleChanged:));
+    let idle_stepper =
+        stepper(target, sel!(idleStepped:), (IDLE_RANGE.0 / 60) as f64, (IDLE_RANGE.1 / 60) as f64, 1.0);
+    let ask = checkbox("Beim Entsperren nach langer Sperre nachfragen", sel!(switchChanged:));
+    let notify_limit = checkbox("Höchstarbeitszeit (bei 9:45 und 10 Std. Arbeit)", sel!(switchChanged:));
+    let notify_break = checkbox("Pause (bei 5:45 und 6 Std. Arbeit am Stück)", sel!(switchChanged:));
     let notify_icon = NSImageView::new(mtm);
     notify_icon.setImageScaling(NSImageScaling::ScaleNone);
     let notify_status = label("");
@@ -625,63 +807,186 @@ fn build(on_change: fn()) -> State {
     let work_row = hstack(&[&work, &work_stepper, &label("Minuten")]);
     let bar_row = hstack(&[&icon_popup, &show_time]);
     bar_row.setSpacing(14.0);
-    let empty = || NSGridCell::emptyContentView(mtm);
-    let rows: Vec<Retained<NSArray<NSView>>> = vec![
-        NSArray::from_retained_slice(&[view(&label("Allgemein:")), view(&login)]),
-        NSArray::from_retained_slice(&[view(&label("Mitteilungen:")), view(&notify_row)]),
-        NSArray::from_retained_slice(&[empty(), view(&notify_note)]),
-        NSArray::from_retained_slice(&[view(&label("Arbeitszeitrahmen:")), view(&frame_row)]),
-        NSArray::from_retained_slice(&[
-            empty(),
-            view(&caption(
-                "Gilt an jedem Tag. Außerhalb dieses Zeitraums wird weder Arbeitszeit noch eine Pause \
-                 gezählt; Arbeit am Wochenende zählt als Mehrarbeit.",
-            )),
-        ]),
-        NSArray::from_retained_slice(&[view(&label("Regelarbeitszeit:")), view(&weekly_row)]),
-        NSArray::from_retained_slice(&[empty(), view(&daily_note)]),
-        NSArray::from_retained_slice(&[view(&label("Mindestpause:")), view(&pause_row)]),
-        NSArray::from_retained_slice(&[
-            empty(),
-            view(&caption(
-                "Ist der Mac kürzer gesperrt, zählt die Zeit weiter zur Arbeitszeit. \
-                 Nach dem Arbeitszeitgesetz zählen Pausen erst ab 15 Minuten.",
-            )),
-        ]),
-        NSArray::from_retained_slice(&[view(&label("Arbeit ohne Mac:")), view(&work_row)]),
-        NSArray::from_retained_slice(&[
-            empty(),
-            view(&caption(
-                "Mindestdauer beim Eintragen; kürzere Abschnitte werden abgelehnt. Nie weniger als \
-                 die Mindestpause – wird sie erhöht, steigt dieser Wert mit.",
-            )),
-        ]),
-        NSArray::from_retained_slice(&[view(&label("Menüleiste:")), view(&bar_row)]),
-        NSArray::from_retained_slice(&[empty(), view(&preview_row)]),
-        NSArray::from_retained_slice(&[
-            empty(),
-            view(&caption("Von links: läuft, Pause, außerhalb des Arbeitszeitrahmens, Feierabend.")),
-        ]),
-        NSArray::from_retained_slice(&[view(&label("Kurzbefehle:")), view(&hotkeys)]),
-        NSArray::from_retained_slice(&[empty(), view(&caption(&hotkey::summary()))]),
-        NSArray::from_retained_slice(&[empty(), view(&error)]),
-        NSArray::from_retained_slice(&[empty(), view(&reset)]),
-    ];
-    let grid = NSGridView::gridViewWithViews(&NSArray::from_retained_slice(&rows), mtm);
-    grid.setRowAlignment(NSGridRowAlignment::FirstBaseline);
-    grid.setColumnSpacing(8.0);
-    grid.setRowSpacing(4.0);
-    grid.columnAtIndex(0).setXPlacement(NSGridCellPlacement::Trailing);
-    for r in [1, 3, 5, 7, 9, 11, 14, 17] {
-        grid.rowAtIndex(r).setTopPadding(14.0);
-    }
-    // Bilder haben keine Grundlinie
-    grid.rowAtIndex(12).setRowAlignment(NSGridRowAlignment::None);
-    grid.rowAtIndex(12).setTopPadding(6.0);
-    grid.rowAtIndex(12).setBottomPadding(2.0);
-    grid.setTranslatesAutoresizingMaskIntoConstraints(false);
+    let day_views: Vec<&NSView> = workdays.iter().map(|c| &***c as &NSView).collect();
+    let days_row = hstack(&day_views);
+    days_row.setSpacing(12.0);
+    let account_row = hstack(&[&account_check, &account_date]);
+    let carry_row = hstack(&[&carry, &label("Std.")]);
+    let idle_row = hstack(&[&idle_check, &idle, &idle_stepper, &label("Minuten ohne Eingabe")]);
 
-    let size = grid.fittingSize();
+    let empty = || NSGridCell::emptyContentView(mtm);
+    // Eine Zeile: Beschriftung links (oder leer), Inhalt rechts.
+    let row = |left: Option<&str>, right: &NSView| -> Retained<NSArray<NSView>> {
+        let left = match left {
+            Some(text) => view(&label(text)),
+            None => empty(),
+        };
+        NSArray::from_retained_slice(&[left, right.retain()])
+    };
+    // Reiter: Titel, Zeilen, Zeilen mit Abstand davor (neuer Abschnitt), Zeile mit Bildern.
+    type Page = (&'static str, Vec<Retained<NSArray<NSView>>>, Vec<isize>, Option<isize>);
+    let pages: Vec<Page> = vec![
+        (
+            "Allgemein",
+            vec![
+                row(Some("Anmeldung:"), &login),
+                row(Some("Menüleiste:"), &bar_row),
+                row(None, &preview_row),
+                row(None, &caption("Von links: läuft, Pause, außerhalb des Arbeitszeitrahmens, Feierabend.")),
+                row(Some("Kurzbefehle:"), &hotkeys),
+                row(None, &caption(&hotkey::summary())),
+            ],
+            vec![1, 4],
+            Some(2),
+        ),
+        (
+            "Arbeitszeit",
+            vec![
+                row(Some("Arbeitszeitrahmen:"), &frame_row),
+                row(
+                    None,
+                    &caption(
+                        "Gilt an jedem Tag. Außerhalb dieses Zeitraums wird weder Arbeitszeit noch eine Pause \
+                         gezählt; Arbeit am Wochenende zählt als Mehrarbeit.",
+                    ),
+                ),
+                row(Some("Regelarbeitszeit:"), &weekly_row),
+                row(Some("Arbeitstage:"), &days_row),
+                row(None, &daily_note),
+                row(
+                    None,
+                    &caption(
+                        "Die Regelarbeitszeit verteilt sich gleichmäßig auf die Arbeitstage. An den \
+                         übrigen Tagen gibt es kein Soll – Arbeit dort zählt als Mehrarbeit.",
+                    ),
+                ),
+                row(Some("Zeitkonto:"), &account_row),
+                row(Some("Übertrag:"), &carry_row),
+                row(
+                    None,
+                    &caption(
+                        "Das Zeitkonto ist der Saldo aller erfassten Tage – oder erst ab dem Datum – plus \
+                         Übertrag: der Saldo aus der Zeit davor, z. B. +12:30 oder −3:15.",
+                    ),
+                ),
+            ],
+            vec![2, 3, 6],
+            None,
+        ),
+        (
+            "Erfassung",
+            vec![
+                row(Some("Mindestpause:"), &pause_row),
+                row(
+                    None,
+                    &caption(
+                        "Ist der Mac kürzer gesperrt, zählt die Zeit weiter zur Arbeitszeit. \
+                         Nach dem Arbeitszeitgesetz zählen Pausen erst ab 15 Minuten.",
+                    ),
+                ),
+                row(Some("Arbeit ohne Mac:"), &work_row),
+                row(
+                    None,
+                    &caption(
+                        "Mindestdauer beim Eintragen; kürzere Abschnitte werden abgelehnt. Nie weniger als \
+                         die Mindestpause – wird sie erhöht, steigt dieser Wert mit.",
+                    ),
+                ),
+                row(Some("Inaktivität:"), &idle_row),
+                row(
+                    None,
+                    &caption(
+                        "Der entsperrte Mac gilt dann als verlassen: Die Erfassung endet rückwirkend mit \
+                         der letzten Eingabe, wie bei einer Sperre. Solange eine App den Bildschirm wach \
+                         hält (Videokonferenz, Präsentation), zählt die Zeit weiter.",
+                    ),
+                ),
+                row(Some("Lange Sperre:"), &ask),
+                row(
+                    None,
+                    &caption(&format!(
+                        "Ab {} Min. Sperre fragt eine Mitteilung, ob es Arbeit ohne Mac oder schon \
+                         Feierabend war. Ohne Antwort bleibt es eine Pause. Braucht Mitteilungen.",
+                        rules::ASK_AFTER_LOCK / 60
+                    )),
+                ),
+            ],
+            vec![2, 4, 6],
+            None,
+        ),
+        (
+            "Mitteilungen",
+            vec![
+                row(Some("Mitteilungen:"), &notify_row),
+                row(None, &notify_note),
+                row(Some("Erinnern an:"), &notify_limit),
+                row(None, &notify_break),
+                row(
+                    None,
+                    &caption(
+                        "Jede Schwelle wird einmal gemeldet, solange gearbeitet wird. Die Hinweise im Menü \
+                         und im Fenster „Aufzeichnungen“ bleiben davon unberührt.",
+                    ),
+                ),
+            ],
+            vec![2],
+            None,
+        ),
+    ];
+
+    // Jeder Reiter ist ein Raster; alle Reiter sind so groß wie der größte.
+    let (pad_x, pad_y) = (18.0, 16.0);
+    let tabs = NSTabView::new(mtm);
+    let mut content = NSSize::new(0.0, 0.0);
+    for (title, rows, padded, images) in pages {
+        let grid = NSGridView::gridViewWithViews(&NSArray::from_retained_slice(&rows), mtm);
+        grid.setRowAlignment(NSGridRowAlignment::FirstBaseline);
+        grid.setColumnSpacing(8.0);
+        grid.setRowSpacing(4.0);
+        grid.columnAtIndex(0).setXPlacement(NSGridCellPlacement::Trailing);
+        for r in padded {
+            grid.rowAtIndex(r).setTopPadding(14.0);
+        }
+        if let Some(r) = images {
+            // Bilder haben keine Grundlinie
+            grid.rowAtIndex(r).setRowAlignment(NSGridRowAlignment::None);
+            grid.rowAtIndex(r).setTopPadding(6.0);
+            grid.rowAtIndex(r).setBottomPadding(2.0);
+        }
+        grid.setTranslatesAutoresizingMaskIntoConstraints(false);
+        let size = grid.fittingSize();
+        content = NSSize::new(content.width.max(size.width), content.height.max(size.height));
+        let page = NSView::new(mtm);
+        page.addSubview(&grid);
+        grid.leadingAnchor().constraintEqualToAnchor_constant(&page.leadingAnchor(), pad_x).setActive(true);
+        grid.topAnchor().constraintEqualToAnchor_constant(&page.topAnchor(), pad_y).setActive(true);
+        let item = NSTabViewItem::new();
+        item.setLabel(&ns(title));
+        item.setView(Some(&page));
+        tabs.addTabViewItem(&item);
+    }
+    // Rahmen und Reiterleiste kommen zur Größe des Inhalts dazu.
+    tabs.setFrameSize(NSSize::new(600.0, 600.0));
+    let inner = tabs.contentRect().size;
+    let tabs_size = NSSize::new(
+        content.width + 2.0 * pad_x + (600.0 - inner.width),
+        content.height + 2.0 * pad_y + (600.0 - inner.height),
+    );
+    tabs.setTranslatesAutoresizingMaskIntoConstraints(false);
+    tabs.widthAnchor().constraintEqualToConstant(tabs_size.width).setActive(true);
+    tabs.heightAnchor().constraintEqualToConstant(tabs_size.height).setActive(true);
+
+    // Unter den Reitern: Fehler (meist ausgeblendet) und „Standardwerte“.
+    let column = NSStackView::new(mtm);
+    column.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
+    column.setAlignment(NSLayoutAttribute::Leading);
+    column.setSpacing(10.0);
+    for v in [&*tabs as &NSView, &error, &reset] {
+        column.addArrangedSubview(v);
+    }
+    column.setTranslatesAutoresizingMaskIntoConstraints(false);
+
+    let size = column.fittingSize();
     let (w, h) = (size.width + 40.0, size.height + 40.0);
     let window = unsafe {
         NSWindow::initWithContentRect_styleMask_backing_defer(
@@ -703,11 +1008,11 @@ fn build(on_change: fn()) -> State {
     toolbar.setAllowsUserCustomization(false);
     window.setToolbar(Some(&toolbar));
     let root = window.contentView().expect("contentView");
-    root.addSubview(&grid);
-    grid.leadingAnchor().constraintEqualToAnchor_constant(&root.leadingAnchor(), 20.0).setActive(true);
-    grid.trailingAnchor().constraintEqualToAnchor_constant(&root.trailingAnchor(), -20.0).setActive(true);
-    grid.topAnchor().constraintEqualToAnchor_constant(&root.topAnchor(), 20.0).setActive(true);
-    grid.bottomAnchor().constraintEqualToAnchor_constant(&root.bottomAnchor(), -20.0).setActive(true);
+    root.addSubview(&column);
+    column.leadingAnchor().constraintEqualToAnchor_constant(&root.leadingAnchor(), 20.0).setActive(true);
+    column.trailingAnchor().constraintEqualToAnchor_constant(&root.trailingAnchor(), -20.0).setActive(true);
+    column.topAnchor().constraintEqualToAnchor_constant(&root.topAnchor(), 20.0).setActive(true);
+    column.bottomAnchor().constraintEqualToAnchor_constant(&root.bottomAnchor(), -20.0).setActive(true);
     // Die Symbolleiste verändert die Fenstergröße; Inhalt wieder passend machen.
     window.setContentSize(NSSize::new(w, h));
     window.center();
@@ -742,6 +1047,17 @@ fn build(on_change: fn()) -> State {
         icon_preview,
         show_time,
         hotkeys,
+        workdays,
+        account_check,
+        account_date,
+        carry,
+        idle_check,
+        idle,
+        idle_stepper,
+        ask,
+        notify_limit,
+        notify_break,
+        tabs,
         error,
         on_change,
     };
@@ -782,7 +1098,8 @@ pub fn show(on_change: fn()) {
 }
 
 /// Zum Testen: Fenster „Einstellungen“ mit dem Stand der Datenbank öffnen, ein Bild
-/// speichern und beenden (`Tagwerk --settings-screenshot <png>`; Symbolsatz zur Ansicht
+/// speichern und beenden (`Tagwerk --settings-screenshot <png>`; Reiter über
+/// `TAGWERK_SETTINGS_TAB=0|1|2|3`, Symbolsatz zur Ansicht
 /// über `TAGWERK_ICON_SET=0|1|2`, Erscheinungsbild über `TAGWERK_APPEARANCE=dark`, Stand der
 /// Mitteilungen über `TAGWERK_NOTIFICATIONS=allowed|denied|hidden|undetermined`).
 /// Es wird nichts gespeichert.
@@ -809,6 +1126,11 @@ pub fn screenshot(path: &std::path::Path) -> Result<(), String> {
             _ => Permission::Unavailable,
         };
         s.set_permission(permission);
+        if let Some(tab) = std::env::var("TAGWERK_SETTINGS_TAB").ok().and_then(|v| v.parse::<isize>().ok()) {
+            if (0..s.tabs.numberOfTabViewItems()).contains(&tab) {
+                s.tabs.selectTabViewItemAtIndex(tab);
+            }
+        }
         s.window.orderFront(None);
     });
     let window = with_state(|s| s.window.clone()).ok_or("kein Fenster")?;

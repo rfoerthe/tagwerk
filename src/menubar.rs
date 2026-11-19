@@ -5,18 +5,18 @@
 //! eingestellten Mindestdauer).
 
 use crate::about;
-use crate::day::{self, fmt_clock, Activity, Mode, Span};
+use crate::day::{self, fmt_clock, Activity, Mode, Span, WorkBlock};
 use crate::glyphs;
 use crate::hotkey;
 use crate::login_item;
 use crate::notify;
 use crate::records;
-use crate::rules::{self, IconSet, LimitWatch};
+use crate::rules::{self, BreakWatch, IconSet, LimitWatch};
 use crate::settings_window;
 use crate::store;
 use crate::tracker::{PauseReason, Tracker};
 use crate::week_view;
-use chrono::{DateTime, Duration, Local, NaiveDateTime, TimeZone};
+use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, TimeZone};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly, Message};
@@ -60,6 +60,8 @@ struct MenuItems {
     pauses: InfoLine,
     first: InfoLine,
     balance: InfoLine,
+    /// Stand des Zeitkontos.
+    account: InfoLine,
     /// Hinweise zu Regelverstößen (so viele, wie es Arten von Hinweisen gibt).
     hints: Vec<InfoLine>,
     /// Fehler beim Speichern oder Lesen der Datenbank (sonst ausgeblendet).
@@ -108,6 +110,10 @@ struct AppState {
     hotkeys: Option<bool>,
     /// Mitteilungen bei 9:45 und 10 Std. Arbeit.
     limit: LimitWatch,
+    /// Erinnerungen an die Pause bei 5:45 und 6 Std. Arbeit am Stück.
+    breaks: BreakWatch,
+    /// Sperre, zu der gerade nachgefragt wird (Tag, von, bis) – darauf bezieht sich die Antwort.
+    asked_lock: Option<(NaiveDate, i64, i64)>,
     db: store::Db,
     /// Die Datenbank ließ sich zuletzt nicht schreiben bzw. nicht lesen (mit dem Text für das
     /// Menü). Solange das Schreiben scheitert, ist die Zeit seit dem letzten Speichern nur im
@@ -196,7 +202,9 @@ define_class!(
         fn set_start(&self, sender: Option<&NSMenuItem>) {
             let tag = sender.map(|s| s.tag()).unwrap_or(0);
             if tag == TAG_RESET {
-                act(|s, t| s.tracker.set_start(t, None));
+                act(|s, t| {
+                    s.tracker.set_start(t, None);
+                });
                 return;
             }
             let initial = with_state(|s| s.tracker.today(now()).first_start).flatten();
@@ -208,7 +216,10 @@ define_class!(
             ) else {
                 return;
             };
-            act(|s, t| s.tracker.set_start(t, Some(secs(at))));
+            act(|s, t| {
+                let cut = s.tracker.set_start(t, Some(secs(at)));
+                notify_cut_work(&cut, "vor dem Arbeitsbeginn");
+            });
         }
 
         #[unsafe(method(closeDay:))]
@@ -222,7 +233,10 @@ define_class!(
             ) else {
                 return;
             };
-            act(|s, t| s.tracker.close_day(t, secs(at)));
+            act(|s, t| {
+                let cut = s.tracker.close_day(t, secs(at));
+                notify_cut_work(&cut, "nach dem Feierabend");
+            });
         }
 
         #[unsafe(method(reopenDay:))]
@@ -264,16 +278,26 @@ define_class!(
                 let mut dirty = s.sync_from_db(t);
                 dirty |= s.tracker.roll_over(t);
                 let locked = screen_locked();
+                // Inaktivität (wenn eingeschaltet): so lange keine Eingabe, dass der Mac als
+                // verlassen gilt – außer etwas hält den Bildschirm wach (Videokonferenz, Film).
+                let limit = s.tracker.settings.idle_secs;
+                let idle = if limit > 0 && !locked && !display_kept_awake() { idle_secs() } else { 0 };
+                let left_alone = limit > 0 && idle >= limit;
                 if s.tracker.is_running() && locked {
                     // Sicherheitsnetz: falls ein Sperr-Ereignis verpasst wurde.
                     dirty |= s.tracker.stop(t, PauseReason::Locked);
+                } else if s.tracker.is_running() && left_alone {
+                    // Rückwirkend ab der letzten Eingabe, wie eine Sperre.
+                    dirty |= s.tracker.go_idle(t - Duration::seconds(idle));
                 } else if !s.tracker.is_running()
                     && !locked
                     && !s.tracker.on_break()
                     && !s.tracker.on_away()
+                    && !(s.tracker.on_idle() && left_alone)
                     && s.tracker.paused_since.is_some_and(|p| p.date() == t.date())
                 {
-                    // Entsperrt, aber nicht erfasst (z. B. Feierabend im Fenster zurückgenommen).
+                    // Entsperrt, aber nicht erfasst (z. B. Feierabend im Fenster zurückgenommen
+                    // oder zurück nach Inaktivität).
                     dirty |= s.tracker.start(t);
                 }
                 if dirty || (s.tracker.is_running() && s.last_save.elapsed().as_secs() >= 60) {
@@ -362,11 +386,47 @@ fn resume_auto() {
         let t = now();
         s.sync_from_db(t);
         s.tracker.roll_over(t);
+        let locked_since = s.tracker.locked_since();
         if s.tracker.start(t) {
             s.persist(t);
+            if let Some(from) = locked_since {
+                s.ask_about_lock(from, t);
+            }
         }
         s.refresh();
     });
+}
+
+/// Arbeitsbeginn oder Feierabend aus dem Menü hat Arbeit ohne Mac gekürzt (die letzte Angabe
+/// gilt): Das meldet eine Mitteilung, denn das Menü ist dann schon zu. `where_` sagt, wo die
+/// Arbeit lag („vor dem Arbeitsbeginn“).
+fn notify_cut_work(cut: &[WorkBlock], where_: &str) {
+    if cut.is_empty() {
+        return;
+    }
+    let what: Vec<String> = cut.iter().map(WorkBlock::describe).collect();
+    notify::post_text(
+        "work-cut",
+        "Arbeit ohne Mac entfällt",
+        &format!("{} lag {where_} und zählt nicht mehr – die letzte Angabe gilt.", what.join(", ")),
+    );
+}
+
+/// Antwort auf die Nachfrage nach langer Sperre: Die Zeit war Arbeit ohne Mac – oder schon
+/// Feierabend (dann endet der Tag mit dem Sperren, und die Erfassung hält an).
+fn lock_answered(answer: notify::LockAnswer) {
+    act(|s, t| {
+        let Some((date, from, to)) = s.asked_lock.take() else { return };
+        match answer {
+            notify::LockAnswer::Work(activity) => s.tracker.add_work(date, from, to, activity.note()),
+            notify::LockAnswer::CloseDay if date == t.date() => {
+                let cut = s.tracker.close_day(t, from);
+                notify_cut_work(&cut, "nach dem Feierabend");
+            }
+            notify::LockAnswer::CloseDay => {}
+        }
+    });
+    records::reload_if_open();
 }
 
 /// Stand für die Wochenansicht in „Aufzeichnungen“ (inklusive laufender Periode).
@@ -503,6 +563,23 @@ fn chosen_time(tag: isize, message: &str, info: &str, initial: Option<i64>) -> O
 }
 
 impl AppState {
+    /// Nach dem Entsperren: Bei langer Sperre nachfragen, was die Zeit war (wenn in den
+    /// Einstellungen an). Nur für Sperren von heute, die im Arbeitszeitrahmen begonnen haben –
+    /// nicht für die Nacht davor.
+    fn ask_about_lock(&mut self, from: NaiveDateTime, to: NaiveDateTime) {
+        let settings = &self.tracker.settings;
+        let long = (to - from).num_seconds() >= settings.ask_after();
+        if !settings.ask_after_lock || !long || from.date() != to.date() || !settings.in_frame(secs(from)) {
+            return;
+        }
+        let span = Span::new(secs(from), secs(to));
+        let asked = notify::ask_lock(
+            &format!("Gesperrt von {}", pause_title(span)),
+            "Das zählt als Pause. War es Arbeit ohne Mac oder schon Feierabend?",
+        );
+        self.asked_lock = asked.then_some((from.date(), span.from, span.to));
+    }
+
     /// Übernimmt Änderungen, die das Fenster „Aufzeichnungen“ (oder `--import`) in die
     /// Datenbank geschrieben hat. Gibt `true` zurück, wenn neu eingelesen wurde.
     fn sync_from_db(&mut self, t: NaiveDateTime) -> bool {
@@ -581,6 +658,9 @@ impl AppState {
         let balance = rules::fmt_balance(info.week_balance);
         let tone = if info.week_balance < -59 { Tone::Bad } else { Tone::Good };
         self.items.balance.set(&rich(&[("Saldo diese Woche:  ", Tone::Label), (&balance, tone)]));
+        let account = rules::fmt_balance(info.account);
+        let tone = if info.account < -59 { Tone::Bad } else { Tone::Good };
+        self.items.account.set(&rich(&[("Zeitkonto:  ", Tone::Label), (&account, tone)]));
         let pauses = store::fmt_hm(info.pause_secs);
         self.items.pauses.set(&rich(&[("Pausen heute:  ", Tone::Label), (&pauses, Tone::Value)]));
         let first = info.first_start.map(|f| format!("{} Uhr", fmt_clock(f)));
@@ -592,7 +672,7 @@ impl AppState {
         // Fehler und Hinweise brechen um, statt das Menü zu verbreitern: höchstens so breit wie
         // die breiteste Zeile mit Status und Kennzahlen.
         let items = &self.items;
-        let wrap = [&items.status, &items.worked, &items.pauses, &items.first, &items.balance]
+        let wrap = [&items.status, &items.worked, &items.pauses, &items.first, &items.balance, &items.account]
             .iter()
             .map(|line| line.text_width())
             .fold(InfoLine::MIN_WRAP, f64::max);
@@ -632,8 +712,13 @@ impl AppState {
 
         let closed = matches!(info.mode, Mode::Closed(_));
         let away = self.tracker.on_away();
-        if let Some(alert) = self.limit.update(t.date(), info.work_secs, running || away) {
+        // Die Stände laufen immer mit; gemeldet wird nur, was in den Einstellungen an ist.
+        let (notify_limit, notify_break) = (self.tracker.settings.notify_limit, self.tracker.settings.notify_break);
+        if let Some(alert) = self.limit.update(t.date(), info.work_secs, running || away).filter(|_| notify_limit) {
             notify::post(alert);
+        }
+        if let Some(alert) = self.breaks.update(t.date(), info.stretch_secs, running || away).filter(|_| notify_break) {
+            notify::post_text(alert.id(), &alert.title(), &alert.body());
         }
         self.items.pause.setHidden(closed);
         let (title, symbol) = if running {
@@ -765,6 +850,9 @@ fn status_line(tracker: &Tracker, t: NaiveDateTime) -> (String, IconKind) {
         (store::Status::Running, _) => ("Zeiterfassung läuft".to_string(), IconKind::Running),
         _ => (
             match tracker.paused_since {
+                Some(p) if p.date() == t.date() && tracker.on_idle() => {
+                    format!("Keine Eingabe seit {} Uhr – pausiert", p.format("%H:%M"))
+                }
                 Some(p) if p.date() == t.date() => format!("Zeiterfassung pausiert seit {} Uhr", p.format("%H:%M")),
                 _ => "Zeiterfassung pausiert".to_string(),
             },
@@ -1102,6 +1190,45 @@ pub fn screen_locked() -> bool {
     }
 }
 
+// ---------- Inaktivität ----------
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGEventSourceSecondsSinceLastEventType(state: i32, event_type: u32) -> f64;
+}
+
+#[link(name = "IOKit", kind = "framework")]
+extern "C" {
+    fn IOPMCopyAssertionsStatus(status: *mut *mut AnyObject) -> i32;
+}
+
+/// Sekunden seit der letzten Eingabe (Tastatur, Maus, Trackpad) in dieser Sitzung. Braucht
+/// keine Freigabe: Abgefragt wird nur die Zeit, keine Eingabe selbst.
+fn idle_secs() -> i64 {
+    // kCGEventSourceStateCombinedSessionState, kCGAnyInputEventType
+    let secs = unsafe { CGEventSourceSecondsSinceLastEventType(0, u32::MAX) };
+    if secs.is_finite() { secs.max(0.0) as i64 } else { 0 }
+}
+
+/// Hält gerade eine App den Bildschirm wach (Videokonferenz, Präsentation, Film)? Dann sitzt
+/// vermutlich jemand davor, auch ohne Eingabe – der Mac gilt nicht als verlassen.
+fn display_kept_awake() -> bool {
+    unsafe {
+        let mut raw: *mut AnyObject = std::ptr::null_mut();
+        if IOPMCopyAssertionsStatus(&mut raw) != 0 {
+            return false;
+        }
+        let Some(status) = Retained::from_raw(raw) else { return false };
+        ["PreventUserIdleDisplaySleep", "NoDisplaySleepAssertion"].iter().any(|name| {
+            let level: Option<Retained<AnyObject>> = msg_send![&*status, objectForKey: &*ns(name)];
+            level.is_some_and(|v| -> bool {
+                let n: i32 = msg_send![&*v, intValue];
+                n > 0
+            })
+        })
+    }
+}
+
 fn running_from_bundle() -> bool {
     std::env::current_exe()
         .map(|p| p.to_string_lossy().contains(".app/Contents/MacOS/"))
@@ -1327,6 +1454,7 @@ pub fn run() {
         pauses: InfoLine::new(mtm),
         first: InfoLine::new(mtm),
         balance: InfoLine::new(mtm),
+        account: InfoLine::new(mtm),
         hints: (0..6).map(|_| InfoLine::wrapping(mtm)).collect(),
         error: InfoLine::wrapping(mtm),
         pause: menu_item(mtm, "", Some(sel!(togglePause:)), "p", &controller),
@@ -1359,9 +1487,10 @@ pub fn run() {
         set_item_symbol(item, symbol, desc);
     }
     // Ein Fehler der Datenbank steht direkt unter dem Status, vor den Kennzahlen.
-    for line in [&items.status, &items.error, &items.worked, &items.pauses, &items.first, &items.balance]
-        .into_iter()
-        .chain(&items.hints)
+    for line in
+        [&items.status, &items.error, &items.worked, &items.pauses, &items.first, &items.balance, &items.account]
+            .into_iter()
+            .chain(&items.hints)
     {
         menu.addItem(&line.item);
     }
@@ -1432,11 +1561,16 @@ pub fn run() {
         tracker.paused_since = Some(t);
     }
 
-    // Bereits erreichte Schwellen der Höchstarbeitszeit nicht noch einmal melden.
-    let limit = LimitWatch::init(t.date(), tracker.today(t).work_secs);
+    // Bereits erreichte Schwellen (Höchstarbeitszeit, Pause) nicht noch einmal melden.
+    let today = tracker.today(t);
+    let limit = LimitWatch::init(t.date(), today.work_secs);
+    let breaks = BreakWatch::init(t.date(), today.stretch_secs);
     notify::init(mtm, running_from_bundle());
+    notify::on_lock_answer(lock_answered);
     let mut state = AppState {
         limit,
+        breaks,
+        asked_lock: None,
         tracker,
         status_item,
         items,
@@ -1525,6 +1659,37 @@ mod tests {
         let hms = |h: i64, m: i64, s: i64| h * 3600 + m * 60 + s;
         assert_eq!(pause_title(Span::new(hms(15, 25, 40), hms(15, 45, 10))), "15:25 – 15:45 Uhr  (20 Min.)");
         assert_eq!(pause_title(Span::new(hms(12, 0, 0), hms(13, 5, 0))), "12:00 – 13:05 Uhr  (1:05 h)");
+    }
+
+    #[test]
+    fn idle_queries_answer() {
+        // Nur dass die Abfragen an macOS antworten (die Werte hängen vom Rechner ab).
+        assert!(idle_secs() >= 0);
+        let _ = display_kept_awake();
+    }
+
+    /// Prüft die Abfrage an macOS mit einem Programm, das den Bildschirm wirklich wach hält:
+    /// `cargo test caffeinate_keeps_the_display_awake -- --ignored`
+    #[test]
+    #[ignore]
+    fn caffeinate_keeps_the_display_awake() {
+        let mut child = std::process::Command::new("caffeinate").args(["-d", "-t", "10"]).spawn().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let awake = display_kept_awake();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(awake);
+    }
+
+    #[test]
+    fn idle_status_names_the_last_input() {
+        let at = |h: u32, m: u32| chrono::NaiveDate::from_ymd_opt(2026, 11, 18).unwrap().and_hms_opt(h, m, 0).unwrap();
+        let mut t = Tracker::new(vec![], Default::default());
+        t.start(at(8, 0));
+        t.go_idle(at(10, 0));
+        let (text, icon) = status_line(&t, at(10, 12));
+        assert!(icon == IconKind::Paused);
+        assert_eq!(text, "Keine Eingabe seit 10:00 Uhr – pausiert");
     }
 
     #[test]

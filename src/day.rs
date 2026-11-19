@@ -6,8 +6,10 @@
 //!
 //! 1. Arbeit ohne Mac (Telefonat, Meeting …) zählt wie entsperrte Zeit; Lücken, die kürzer
 //!    als die Mindestpause sind, zählen als Arbeit.
-//! 2. Manueller Arbeitsbeginn und Feierabend verlängern bzw. kürzen den Tag; Arbeit ohne Mac
-//!    zählt auch davor bzw. danach.
+//! 2. Manueller Arbeitsbeginn und Feierabend verlängern bzw. kürzen den Tag. Für Arbeit ohne
+//!    Mac gilt dabei die letzte Angabe: Wer Beginn oder Feierabend festlegt, kürzt Arbeit ohne
+//!    Mac davor bzw. danach ([`Day::set_start`], [`Day::set_end`]); wer sie danach einträgt,
+//!    lässt sie auch vor dem Beginn bzw. nach dem Feierabend zählen.
 //! 3. Manuell eingetragene Pausen werden abgezogen.
 //! 4. Gezählt wird nur, was im Arbeitszeitrahmen liegt.
 //!
@@ -57,6 +59,12 @@ pub struct WorkBlock {
 impl WorkBlock {
     pub fn span(&self) -> Span {
         Span::new(self.from, self.to)
+    }
+
+    /// `Meeting 08:00–09:00` bzw. ohne Notiz `Arbeit ohne Mac 08:00–09:00`.
+    pub fn describe(&self) -> String {
+        let what = if self.note.is_empty() { "Arbeit ohne Mac" } else { &self.note };
+        format!("{what} {}–{}", fmt_clock(self.from), fmt_clock(self.to))
     }
 }
 
@@ -173,6 +181,106 @@ impl Activity {
     }
 }
 
+/// Art einer Abwesenheit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AbsenceKind {
+    Vacation,
+    Sick,
+    Holiday,
+    /// Freizeitausgleich für Mehrarbeit: Das Soll bleibt stehen, das Zeitkonto sinkt.
+    TimeOff,
+}
+
+impl AbsenceKind {
+    /// In der Reihenfolge der Auswahl.
+    pub const ALL: [AbsenceKind; 4] =
+        [AbsenceKind::Vacation, AbsenceKind::Sick, AbsenceKind::Holiday, AbsenceKind::TimeOff];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            AbsenceKind::Vacation => "Urlaub",
+            AbsenceKind::Sick => "Krank",
+            AbsenceKind::Holiday => "Feiertag",
+            AbsenceKind::TimeOff => "Zeitausgleich",
+        }
+    }
+
+    /// Wert für die Datenbank.
+    pub fn id(self) -> i64 {
+        match self {
+            AbsenceKind::Vacation => 1,
+            AbsenceKind::Sick => 2,
+            AbsenceKind::Holiday => 3,
+            AbsenceKind::TimeOff => 4,
+        }
+    }
+
+    pub fn from_id(id: i64) -> Option<Self> {
+        Self::ALL.into_iter().find(|k| k.id() == id)
+    }
+
+    /// Senkt die Abwesenheit das Soll? Zeitausgleich nicht – dort soll das Zeitkonto sinken.
+    pub fn reduces_target(self) -> bool {
+        self != AbsenceKind::TimeOff
+    }
+}
+
+/// Abwesenheit an einem Tag: Urlaub, Krankheit und Feiertag senken sein Soll – ganz oder
+/// (halber Tag) auf die Hälfte. Zeitausgleich lässt das Soll stehen, auch wenn an dem Tag
+/// gar nicht gearbeitet wird.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Absence {
+    pub kind: AbsenceKind,
+    /// Nur der halbe Tag (bei Zeitausgleich ohne Bedeutung und immer `false`).
+    pub half: bool,
+}
+
+impl Absence {
+    pub fn new(kind: AbsenceKind, half: bool) -> Self {
+        Self { kind, half: half && kind.reduces_target() }
+    }
+
+    /// `Urlaub` bzw. `Urlaub (halber Tag)` – so steht es auch im Export.
+    pub fn label(self) -> String {
+        if self.half {
+            format!("{} (halber Tag)", self.kind.label())
+        } else {
+            self.kind.label().to_string()
+        }
+    }
+
+    /// Kurz für Tabellen: `Urlaub` bzw. `½ Urlaub`.
+    pub fn short(self) -> String {
+        if self.half {
+            format!("½ {}", self.kind.label())
+        } else {
+            self.kind.label().to_string()
+        }
+    }
+
+    /// Kürzel für die Tabelle der Tage: `U`, `K`, `F`, `ZA`, halbe Tage mit `½`.
+    pub fn code(self) -> String {
+        let code = match self.kind {
+            AbsenceKind::Vacation => "U",
+            AbsenceKind::Sick => "K",
+            AbsenceKind::Holiday => "F",
+            AbsenceKind::TimeOff => "ZA",
+        };
+        if self.half {
+            format!("½ {code}")
+        } else {
+            code.to_string()
+        }
+    }
+
+    /// Liest [`Absence::label`] wieder ein (Groß- und Kleinschreibung egal).
+    pub fn parse(text: &str) -> Option<Self> {
+        let text = text.trim().to_lowercase();
+        let kind = AbsenceKind::ALL.into_iter().find(|k| text.starts_with(&k.label().to_lowercase()))?;
+        Some(Self::new(kind, text.contains("halb") || text.contains('½')))
+    }
+}
+
 /// Ein Arbeitstag mit Rohdaten und Korrekturen.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Day {
@@ -188,6 +296,8 @@ pub struct Day {
     /// Arbeit ohne Mac (nachgetragen oder über „Ohne Mac weiterarbeiten“), sortiert und
     /// überschneidungsfrei.
     pub work: Vec<WorkBlock>,
+    /// Abwesenheit (Urlaub, krank, Feiertag, Zeitausgleich) – ändert nur das Soll.
+    pub absence: Option<Absence>,
 }
 
 /// Zustand eines Tages aus Sicht der manuellen Entscheidungen.
@@ -234,11 +344,15 @@ impl DayRecord {
 
 impl Day {
     pub fn new(date: NaiveDate) -> Self {
-        Self { date, periods: Vec::new(), start: None, end: None, breaks: Vec::new(), work: Vec::new() }
+        Self { date, periods: Vec::new(), start: None, end: None, breaks: Vec::new(), work: Vec::new(), absence: None }
     }
 
     pub fn has_corrections(&self) -> bool {
-        self.start.is_some() || self.end.is_some() || !self.breaks.is_empty() || !self.work.is_empty()
+        self.start.is_some()
+            || self.end.is_some()
+            || !self.breaks.is_empty()
+            || !self.work.is_empty()
+            || self.absence.is_some()
     }
 
     pub fn is_empty(&self) -> bool {
@@ -259,6 +373,35 @@ impl Day {
             Some(e) => Mode::Closed(e),
             None => Mode::Auto,
         }
+    }
+
+    /// Arbeitsbeginn festlegen (`None`: wieder das erste Entsperren). Arbeit ohne Mac davor
+    /// entfällt bzw. beginnt erst dort – die letzte Angabe gilt, wie bei Pausen. Gibt zurück,
+    /// was entfallen ist.
+    pub fn set_start(&mut self, at: Option<i64>) -> Vec<WorkBlock> {
+        self.start = at;
+        at.map(|at| self.take_work(0, at)).unwrap_or_default()
+    }
+
+    /// Feierabend festlegen (`None`: wieder das letzte Sperren). Arbeit ohne Mac danach
+    /// entfällt bzw. endet dort. Gibt zurück, was entfallen ist.
+    pub fn set_end(&mut self, at: Option<i64>) -> Vec<WorkBlock> {
+        self.end = at;
+        at.map(|at| self.take_work(at, DAY_END)).unwrap_or_default()
+    }
+
+    /// Arbeit ohne Mac zwischen `from` und `to` entfernen; gibt die entfernten Teile zurück.
+    fn take_work(&mut self, from: i64, to: i64) -> Vec<WorkBlock> {
+        let taken = self
+            .work
+            .iter()
+            .filter_map(|w| {
+                let (from, to) = (w.from.max(from), w.to.min(to));
+                (to > from).then(|| WorkBlock { from, to, note: w.note.clone() })
+            })
+            .collect();
+        self.cut_work(from, to);
+        taken
     }
 
     pub fn sort_breaks(&mut self) {
@@ -478,6 +621,19 @@ impl Day {
             .sum()
     }
 
+    /// Arbeitszeit am Stück bis zum Ende des letzten Abschnitts: seit der letzten Pause von
+    /// mindestens 15 Minuten (wie [`Day::longest_stretch_secs`], aber nur der letzte Teil).
+    pub fn current_stretch_secs(spans: &[Span]) -> i64 {
+        let mut current = 0;
+        for (i, sp) in spans.iter().enumerate() {
+            if i > 0 && sp.from - spans[i - 1].to >= LEGAL_BREAK_SEGMENT {
+                current = 0;
+            }
+            current += sp.len();
+        }
+        current
+    }
+
     /// Längste Arbeitszeit am Stück: Arbeitsabschnitte, zwischen denen keine Pause von
     /// mindestens 15 Minuten liegt, zählen zusammen (kürzere Unterbrechungen sind nach dem
     /// Arbeitszeitgesetz keine Pause; mitgezählt wird nur die Arbeit, nicht die Unterbrechung).
@@ -627,6 +783,37 @@ mod tests {
         let r = d.record(&st()).unwrap();
         assert_eq!((r.first_start, r.last_end), (h(8, 12), h(17, 30)));
         assert_eq!(r.pause_secs(), h(0, 43));
+    }
+
+    #[test]
+    fn later_start_and_earlier_end_cut_work_without_mac() {
+        // Entsperrt ab 09:10; davor ein Termin 08:00–09:00, abends einer 17:00–18:00.
+        let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 16).unwrap());
+        d.add_period(h(9, 10), h(16, 0));
+        d.add_work(h(8, 0), h(9, 0), "Meeting");
+        d.add_work(h(17, 0), h(18, 0), "Telefonat");
+        assert_eq!(d.record(&st()).unwrap().first_start, h(8, 0));
+        // Beginn 09:20: Der Termin davor entfällt, der Tag beginnt um 09:20.
+        let cut = d.set_start(Some(h(9, 20)));
+        assert_eq!(cut.iter().map(WorkBlock::describe).collect::<Vec<_>>(), ["Meeting 08:00–09:00"]);
+        assert_eq!(d.work.len(), 1);
+        let r = d.record(&st()).unwrap();
+        assert_eq!((r.first_start, r.last_end), (h(9, 20), h(18, 0)));
+        // Feierabend 17:30: Der Termin danach endet dort.
+        let cut = d.set_end(Some(h(17, 30)));
+        assert_eq!(cut, vec![WorkBlock { from: h(17, 30), to: h(18, 0), note: "Telefonat".to_string() }]);
+        assert_eq!(d.record(&st()).unwrap().last_end, h(17, 30));
+        // Ein Termin, der über den Beginn reicht, beginnt erst dort.
+        let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 17).unwrap());
+        d.add_work(h(8, 0), h(10, 0), "");
+        assert_eq!(d.set_start(Some(h(9, 20)))[0].describe(), "Arbeit ohne Mac 08:00–09:20");
+        assert_eq!(d.work[0].span(), Span::new(h(9, 20), h(10, 0)));
+        // Die letzte Angabe gilt: Danach eingetragene Arbeit zählt auch vor dem Beginn.
+        d.add_work(h(7, 30), h(8, 0), "Telefonat");
+        assert_eq!(d.record(&st()).unwrap().first_start, h(7, 30));
+        // Beginn oder Feierabend zurücknehmen kürzt nichts.
+        assert!(d.set_start(None).is_empty() && d.set_end(None).is_empty());
+        assert_eq!(d.work.len(), 2);
     }
 
     #[test]

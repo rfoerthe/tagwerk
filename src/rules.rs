@@ -16,7 +16,7 @@
 //! - **Höchstarbeitszeit** – mehr als 10 Std. am Tag gelten als Verstoß; bei 9:45 und 10 Std.
 //!   kommt eine Mitteilung (siehe [`LimitWatch`]).
 
-use crate::day::{fmt_clock, Day, Span, DAY_END};
+use crate::day::{fmt_clock, Absence, Day, Span, DAY_END};
 use chrono::{Datelike, NaiveDate, Weekday};
 
 /// Gesetzlich zählen nur Pausenabschnitte von mindestens 15 Minuten.
@@ -27,8 +27,15 @@ pub const MAX_STRETCH: i64 = 6 * 3600;
 pub const MAX_DAILY_WORK: i64 = 10 * 3600;
 /// Mindestruhezeit zwischen zwei Arbeitstagen.
 pub const MIN_REST: i64 = 11 * 3600;
-/// Arbeitstage pro Woche (Montag bis Freitag).
-pub const WORKDAYS_PER_WEEK: i64 = 5;
+/// Alle Arbeitstage: Montag bis Freitag (Bit 0 = Montag … Bit 4 = Freitag).
+pub const ALL_WORKDAYS: u8 = 0b1_1111;
+/// Grenzen der Inaktivität, ab der die Erfassung anhält (0 = aus).
+pub const IDLE_RANGE: (i64, i64) = (60, 120 * 60);
+/// Höchster Betrag des Übertrags im Zeitkonto.
+pub const CARRY_MAX: i64 = 10_000 * 3600;
+/// Ab dieser Sperrdauer fragt Tagwerk beim Entsperren nach, was die Zeit war (sofern
+/// eingeschaltet) – nie kürzer als die Mindestpause.
+pub const ASK_AFTER_LOCK: i64 = 30 * 60;
 
 /// Grenzen der Einstellungen.
 pub const MIN_PAUSE_RANGE: (i64, i64) = (60, 120 * 60);
@@ -127,6 +134,22 @@ pub struct Settings {
     pub show_time: bool,
     /// Globale Kurzbefehle (wirken in jeder App).
     pub hotkeys: bool,
+    /// Arbeitstage der Woche als Bits (Bit 0 = Montag … Bit 4 = Freitag); das Wochensoll
+    /// verteilt sich gleichmäßig auf sie.
+    pub workdays: u8,
+    /// Ohne Eingabe so lange (Sekunden) gilt der Mac als verlassen, die Erfassung hält an
+    /// (0 = aus).
+    pub idle_secs: i64,
+    /// Beim Entsperren nach langer Sperre nachfragen, ob es Pause, Arbeit oder Feierabend war.
+    pub ask_after_lock: bool,
+    /// Mitteilungen zur Höchstarbeitszeit (9:45 und 10 Std.).
+    pub notify_limit: bool,
+    /// Mitteilungen zur Pause (5:45 und 6 Std. Arbeit am Stück).
+    pub notify_break: bool,
+    /// Das Zeitkonto zählt ab diesem Tag (`None`: alle erfassten Tage).
+    pub account_from: Option<NaiveDate>,
+    /// Übertrag im Zeitkonto: Saldo aus der Zeit davor (Sekunden, auch negativ).
+    pub account_carry: i64,
 }
 
 impl Default for Settings {
@@ -140,6 +163,13 @@ impl Default for Settings {
             icon_set: IconSet::default(),
             show_time: false,
             hotkeys: false,
+            workdays: ALL_WORKDAYS,
+            idle_secs: 0,
+            ask_after_lock: false,
+            notify_limit: true,
+            notify_break: true,
+            account_from: None,
+            account_carry: 0,
         }
     }
 }
@@ -158,6 +188,14 @@ impl Settings {
             icon_set: self.icon_set,
             show_time: self.show_time,
             hotkeys: self.hotkeys,
+            // Ohne Arbeitstag gäbe es kein Soll: dann wieder Montag bis Freitag.
+            workdays: if self.workdays & ALL_WORKDAYS == 0 { ALL_WORKDAYS } else { self.workdays & ALL_WORKDAYS },
+            idle_secs: if self.idle_secs <= 0 { 0 } else { self.idle_secs.clamp(IDLE_RANGE.0, IDLE_RANGE.1) },
+            ask_after_lock: self.ask_after_lock,
+            notify_limit: self.notify_limit,
+            notify_break: self.notify_break,
+            account_from: self.account_from,
+            account_carry: self.account_carry.clamp(-CARRY_MAX, CARRY_MAX),
         };
         if s.frame_to <= s.frame_from {
             s.frame_from = d.frame_from;
@@ -166,23 +204,78 @@ impl Settings {
         s
     }
 
-    /// Montag bis Freitag.
-    pub fn is_workday(date: NaiveDate) -> bool {
-        !matches!(date.weekday(), Weekday::Sat | Weekday::Sun)
+    /// Samstag oder Sonntag?
+    pub fn is_weekend(date: NaiveDate) -> bool {
+        matches!(date.weekday(), Weekday::Sat | Weekday::Sun)
     }
 
-    /// Sollarbeitszeit eines Tages (am Wochenende 0).
+    /// Ist `date` einer der eingestellten Arbeitstage (für ihn gibt es ein Soll)?
+    pub fn is_workday(&self, date: NaiveDate) -> bool {
+        let day = date.weekday().num_days_from_monday();
+        day < 5 && self.workdays & (1 << day) != 0
+    }
+
+    /// Anzahl der Arbeitstage pro Woche (1 bis 5).
+    pub fn workday_count(&self) -> i64 {
+        ((self.workdays & ALL_WORKDAYS).count_ones() as i64).max(1)
+    }
+
+    /// Sollarbeitszeit eines Tages (an freien Tagen 0).
     pub fn daily_target(&self, date: NaiveDate) -> i64 {
-        if Self::is_workday(date) {
+        if self.is_workday(date) {
             self.daily_target_workday()
         } else {
             0
         }
     }
 
-    /// Sollarbeitszeit eines Arbeitstags (Wochenarbeitszeit / 5).
+    /// Sollarbeitszeit des Tages `date` mit der Abwesenheit `absence`: Urlaub, Krankheit und
+    /// Feiertag senken sie auf null bzw. (halber Tag) auf die Hälfte, Zeitausgleich nicht.
+    pub fn day_target(&self, date: NaiveDate, absence: Option<Absence>) -> i64 {
+        let full = self.daily_target(date);
+        match absence {
+            Some(a) if !a.kind.reduces_target() => full,
+            Some(a) if a.half => full / 2,
+            Some(_) => 0,
+            None => full,
+        }
+    }
+
+    /// Soll, das für `day` in den Saldo eingeht. Ohne eingetragene Abwesenheit nur, wenn
+    /// gearbeitet wurde (`work_secs` > 0) – nicht erfasste freie Tage drücken den Saldo nicht.
+    /// Mit Abwesenheit gilt, was sie besagt: halber Urlaubstag = halbes Soll, Zeitausgleich =
+    /// volles Soll, auch ganz ohne Arbeitszeit.
+    pub fn counted_target(&self, day: &Day, work_secs: i64) -> i64 {
+        if day.absence.is_none() && work_secs <= 0 {
+            0
+        } else {
+            self.day_target(day.date, day.absence)
+        }
+    }
+
+    /// Sollarbeitszeit eines Arbeitstags (Wochenarbeitszeit / Arbeitstage).
     pub fn daily_target_workday(&self) -> i64 {
-        self.weekly_target / WORKDAYS_PER_WEEK
+        self.weekly_target / self.workday_count()
+    }
+
+    /// `Mo–Fr` bzw. `Mo, Di, Do` – die eingestellten Arbeitstage.
+    pub fn workdays_text(&self) -> String {
+        const NAMES: [&str; 5] = ["Mo", "Di", "Mi", "Do", "Fr"];
+        if self.workdays & ALL_WORKDAYS == ALL_WORKDAYS {
+            return "Mo–Fr".to_string();
+        }
+        let days: Vec<&str> = NAMES.iter().enumerate().filter(|(i, _)| self.workdays & (1 << i) != 0).map(|(_, n)| *n).collect();
+        days.join(", ")
+    }
+
+    /// `5-Tage-Woche`
+    pub fn week_text(&self) -> String {
+        format!("{}-Tage-Woche", self.workday_count())
+    }
+
+    /// Ab so langer Sperre wird beim Entsperren nachgefragt (nie unter der Mindestpause).
+    pub fn ask_after(&self) -> i64 {
+        ASK_AFTER_LOCK.max(self.min_pause)
     }
 
     /// Liegt die Uhrzeit `secs` im Arbeitszeitrahmen?
@@ -198,9 +291,10 @@ impl Settings {
     /// Kurzfassung für Fußzeilen und Export.
     pub fn summary(&self) -> String {
         format!(
-            "Arbeitszeitrahmen {}  ·  Regelarbeitszeit {} Std./Woche (Mo–Fr)  ·  Pausen ab {} Min.",
+            "Arbeitszeitrahmen {}  ·  Regelarbeitszeit {} Std./Woche ({})  ·  Pausen ab {} Min.",
             self.frame_text(),
             fmt_hours(self.weekly_target),
+            self.workdays_text(),
             self.min_pause / 60
         )
     }
@@ -318,7 +412,7 @@ pub fn day_warnings(days: &[Day], date: NaiveDate, s: &Settings) -> Vec<Warning>
             out.push(Warning::Rest { rest });
         }
     }
-    if work > 0 && !Settings::is_workday(date) {
+    if work > 0 && Settings::is_weekend(date) {
         out.push(Warning::Weekend);
     }
     // Abschnitte unter einer Minute (z. B. kurz entsperrt in der Nacht) lohnen keinen Hinweis.
@@ -330,14 +424,21 @@ pub fn day_warnings(days: &[Day], date: NaiveDate, s: &Settings) -> Vec<Warning>
 }
 
 /// Arbeitszeit (wie angezeigt, in ganzen Minuten) und Soll der Tage von `from` bis `to`. Soll
-/// gibt es nur für Tage, an denen gearbeitet wurde – Urlaub, Feiertage oder Krankheit drücken
-/// den Saldo also nicht.
+/// gibt es für Tage, an denen gearbeitet wurde, und nach den eingetragenen Abwesenheiten
+/// (siehe [`Settings::counted_target`]) – freie Tage ohne Eintrag drücken den Saldo nicht.
 pub fn balance(days: &[Day], from: NaiveDate, to: NaiveDate, s: &Settings) -> (i64, i64) {
     days.iter()
         .filter(|d| d.date >= from && d.date <= to)
-        .filter_map(|d| d.record(s))
-        .filter(|r| r.work_secs > 0)
-        .fold((0, 0), |(w, t), r| (w + r.shown_work_secs, t + s.daily_target(r.date)))
+        .filter_map(|d| d.record(s).map(|r| (d, r)))
+        .fold((0, 0), |(w, t), (d, r)| (w + r.shown_work_secs, t + s.counted_target(d, r.work_secs)))
+}
+
+/// Stand des Zeitkontos am Tag `today`: Übertrag plus Saldo aller Tage seit dem eingestellten
+/// Beginn (ohne Beginn: aller erfassten Tage). Wie beim Saldo zählt das Soll nur an Tagen, an
+/// denen gearbeitet wurde.
+pub fn account(days: &[Day], today: NaiveDate, s: &Settings) -> i64 {
+    let (work, target) = balance(days, s.account_from.unwrap_or(NaiveDate::MIN), today, s);
+    s.account_carry + work - target
 }
 
 /// Vorwarnung vor der Höchstarbeitszeit: so lange vorher kommt eine Mitteilung.
@@ -392,18 +493,88 @@ impl LimitAlert {
     }
 }
 
-/// Merkt sich, welche Mitteilung zur Höchstarbeitszeit heute schon kam, damit jede Schwelle
-/// nur einmal gemeldet wird – beim Überschreiten, nicht schon beim Start der App.
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub struct LimitWatch {
-    date: Option<NaiveDate>,
-    level: Option<LimitAlert>,
+/// Vorwarnung vor 6 Std. Arbeit am Stück: so lange vorher kommt eine Mitteilung.
+pub const MAX_STRETCH_NOTICE: i64 = 15 * 60;
+
+/// Erinnerung an die Pause (in der Mitteilungszentrale von macOS).
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum BreakAlert {
+    /// Noch 15 Minuten bis 6 Stunden am Stück (ab 5:45 Std.).
+    Soon,
+    /// 6 Stunden am Stück erreicht.
+    Reached,
 }
+
+impl BreakAlert {
+    /// Höchste Stufe, die `stretch` Sekunden Arbeit am Stück erreicht haben.
+    pub fn level(stretch: i64) -> Option<Self> {
+        if stretch >= MAX_STRETCH {
+            Some(BreakAlert::Reached)
+        } else if stretch >= MAX_STRETCH - MAX_STRETCH_NOTICE {
+            Some(BreakAlert::Soon)
+        } else {
+            None
+        }
+    }
+
+    /// Kennung der Mitteilung (eine neue ersetzt eine ältere mit derselben Kennung).
+    pub fn id(self) -> &'static str {
+        match self {
+            BreakAlert::Soon => "break-soon",
+            BreakAlert::Reached => "break-reached",
+        }
+    }
+
+    pub fn title(self) -> String {
+        match self {
+            BreakAlert::Soon => format!("Noch {} Min. bis 6 Std. ohne Pause", MAX_STRETCH_NOTICE / 60),
+            BreakAlert::Reached => "6 Std. ohne Pause gearbeitet".to_string(),
+        }
+    }
+
+    pub fn body(self) -> String {
+        match self {
+            BreakAlert::Soon => format!(
+                "Seit {} ohne Pause – nach spätestens 6 Std. am Stück ist eine Pause von mindestens 15 Min. \
+                 vorgeschrieben (§ 4 ArbZG).",
+                fmt_hm(MAX_STRETCH - MAX_STRETCH_NOTICE)
+            ),
+            BreakAlert::Reached => {
+                "Jetzt ist eine Pause von mindestens 15 Min. vorgeschrieben (§ 4 ArbZG).".to_string()
+            }
+        }
+    }
+}
+
+/// Merkt sich je Tag die höchste schon erreichte Stufe, damit jede Schwelle nur einmal
+/// gemeldet wird – beim Überschreiten, nicht schon beim Start der App.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Watch<A> {
+    date: Option<NaiveDate>,
+    level: Option<A>,
+}
+
+impl<A: Copy + Ord> Watch<A> {
+    /// Neue Stufe von heute. Gibt sie zurück, wenn sie gerade erreicht wurde und gerade
+    /// gearbeitet wird (`working`). Sinkt der Wert wieder unter eine Schwelle, wird sie beim
+    /// nächsten Mal erneut gemeldet; springt er über zwei Schwellen, kommt nur die höhere.
+    fn update(&mut self, date: NaiveDate, level: Option<A>, working: bool) -> Option<A> {
+        if self.date != Some(date) {
+            *self = Self { date: Some(date), level: None };
+        }
+        let prev = std::mem::replace(&mut self.level, level);
+        (working && level > prev).then_some(level).flatten()
+    }
+}
+
+/// Mitteilungen zur Höchstarbeitszeit: welche heute schon kam.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct LimitWatch(Watch<LimitAlert>);
 
 impl LimitWatch {
     /// Stand ohne Mitteilung übernehmen (beim Start: bereits erreichte Schwellen nicht melden).
     pub fn init(date: NaiveDate, work: i64) -> Self {
-        Self { date: Some(date), level: LimitAlert::level(work) }
+        Self(Watch { date: Some(date), level: LimitAlert::level(work) })
     }
 
     /// Neue Arbeitszeit von heute. Gibt die fällige Mitteilung zurück, wenn eine Schwelle
@@ -412,13 +583,52 @@ impl LimitWatch {
     /// Arbeitszeit wieder unter eine Schwelle (Korrektur), wird sie erneut gemeldet.
     /// Springt die Zeit über beide Schwellen, kommt nur die Mitteilung „erreicht“.
     pub fn update(&mut self, date: NaiveDate, work: i64, working: bool) -> Option<LimitAlert> {
-        if self.date != Some(date) {
-            *self = Self { date: Some(date), level: None };
-        }
-        let level = LimitAlert::level(work);
-        let prev = std::mem::replace(&mut self.level, level);
-        (working && level > prev).then_some(level).flatten()
+        self.0.update(date, LimitAlert::level(work), working)
     }
+}
+
+/// Erinnerungen an die Pause: welche für die laufende Arbeit am Stück schon kam. Nach einer
+/// Pause beginnt die Arbeit am Stück neu, und die Erinnerungen kommen wieder.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct BreakWatch(Watch<BreakAlert>);
+
+impl BreakWatch {
+    /// Stand ohne Mitteilung übernehmen (beim Start: bereits erreichte Schwellen nicht melden).
+    pub fn init(date: NaiveDate, stretch: i64) -> Self {
+        Self(Watch { date: Some(date), level: BreakAlert::level(stretch) })
+    }
+
+    /// Neue Dauer der Arbeit am Stück (`stretch` Sekunden, siehe
+    /// [`Day::current_stretch_secs`]). Gibt die fällige Erinnerung zurück.
+    pub fn update(&mut self, date: NaiveDate, stretch: i64, working: bool) -> Option<BreakAlert> {
+        self.0.update(date, BreakAlert::level(stretch), working)
+    }
+}
+
+/// `+12:30` bzw. `−3:15` – ein Saldo ohne Einheit, für Eingabefelder.
+pub fn fmt_signed_hm(secs: i64) -> String {
+    fmt_balance(secs).trim_end_matches(" h").to_string()
+}
+
+/// Liest einen Saldo: `+12:30`, `-3:15`, `−3:15`, `12:30` oder in Stunden `12,5` bzw. `-0.25`.
+pub fn parse_balance(s: &str) -> Option<i64> {
+    let s = s.trim().trim_end_matches('h').trim();
+    let (negative, rest) = match s.strip_prefix(['-', '−', '–']) {
+        Some(rest) => (true, rest),
+        None => (false, s.strip_prefix('+').unwrap_or(s)),
+    };
+    let rest = rest.trim();
+    let secs = match rest.split_once(':') {
+        Some((h, m)) => {
+            let (h, m): (i64, i64) = (h.trim().parse().ok()?, m.trim().parse().ok()?);
+            if h < 0 || !(0..60).contains(&m) {
+                return None;
+            }
+            h.checked_mul(3600)? + m * 60
+        }
+        None => parse_hours(rest).filter(|v| *v >= 0)?,
+    };
+    (secs <= CARRY_MAX).then_some(if negative { -secs } else { secs })
 }
 
 /// `+1:05 h` bzw. `−0:30 h`
@@ -600,6 +810,134 @@ mod tests {
         let mut w = LimitWatch::init(date(18), h(9, 50));
         assert_eq!(w.update(date(18), h(9, 55), true), None);
         assert_eq!(w.update(date(18), h(10, 0), true), Some(LimitAlert::Reached));
+    }
+
+    #[test]
+    fn carry_input() {
+        assert_eq!(parse_balance("+12:30"), Some(h(12, 30)));
+        assert_eq!(parse_balance("-3:15"), Some(-h(3, 15)));
+        assert_eq!(parse_balance(" −3:15 h "), Some(-h(3, 15)));
+        assert_eq!(parse_balance("0:05"), Some(h(0, 5)));
+        assert_eq!(parse_balance("12,5"), Some(h(12, 30)));
+        assert_eq!(parse_balance("-0.25"), Some(-h(0, 15)));
+        assert_eq!(parse_balance("0"), Some(0));
+        for bad in ["", "abc", "1:60", "1:-5", "--2", "99999999:00"] {
+            assert_eq!(parse_balance(bad), None, "{bad}");
+        }
+        assert_eq!(fmt_signed_hm(h(12, 30)), "+12:30");
+        assert_eq!(fmt_signed_hm(-h(3, 15)), "−3:15");
+        assert_eq!(parse_balance(&fmt_signed_hm(-h(3, 15))), Some(-h(3, 15)));
+    }
+
+    #[test]
+    fn workdays_spread_the_weekly_target() {
+        let s = Settings::default();
+        assert_eq!((s.workday_count(), s.workdays_text(), s.week_text()), (5, "Mo–Fr".to_string(), "5-Tage-Woche".to_string()));
+        // 4-Tage-Woche ohne Freitag: 32 Std. sind 8 Std. an Mo–Do, freitags kein Soll.
+        let four = Settings { workdays: 0b0_1111, weekly_target: h(32, 0), ..s };
+        assert_eq!((four.workday_count(), four.workdays_text(), four.week_text()), (4, "Mo, Di, Mi, Do".to_string(), "4-Tage-Woche".to_string()));
+        assert_eq!(four.daily_target(date(16)), h(8, 0)); // Montag
+        assert_eq!(four.daily_target(date(20)), 0); // Freitag
+        assert!(four.is_workday(date(19)) && !four.is_workday(date(20)) && !four.is_workday(date(21)));
+        assert_eq!(four.summary(), "Arbeitszeitrahmen 07:00–22:00 Uhr  ·  Regelarbeitszeit 32 Std./Woche (Mo, Di, Mi, Do)  ·  Pausen ab 15 Min.");
+        // Arbeit am freien Freitag ist Mehrarbeit, aber kein Hinweis wie am Wochenende.
+        let mut fri = Day::new(date(20));
+        fri.add_period(h(9, 0), h(11, 0));
+        assert!(day_warnings(&[fri.clone()], date(20), &four).is_empty());
+        assert_eq!(balance(&[fri], date(16), date(22), &four), (h(2, 0), 0));
+        // Ungültige Angaben: ohne Arbeitstag wieder Mo–Fr, Samstag und Sonntag gibt es nicht.
+        assert_eq!(Settings { workdays: 0, ..s }.sanitized().workdays, ALL_WORKDAYS);
+        assert_eq!(Settings { workdays: 0b110_0001, ..s }.sanitized().workdays, 0b0_0001);
+        assert_eq!(Settings { workdays: 0b0_0100, weekly_target: h(8, 0), ..s }.daily_target(date(18)), h(8, 0));
+        // Inaktivität: aus oder in Grenzen.
+        assert_eq!(Settings { idle_secs: -5, ..s }.sanitized().idle_secs, 0);
+        assert_eq!(Settings { idle_secs: 10, ..s }.sanitized().idle_secs, IDLE_RANGE.0);
+        assert_eq!(Settings { min_pause: h(0, 45), ..s }.ask_after(), h(0, 45));
+        assert_eq!(s.ask_after(), ASK_AFTER_LOCK);
+    }
+
+    #[test]
+    fn absences_change_the_target() {
+        use crate::day::AbsenceKind::*;
+        let s = Settings::default();
+        let day = |d: u32, hours: i64, absence: Option<Absence>| {
+            let mut x = Day::new(date(d));
+            if hours > 0 {
+                x.add_period(h(8, 0), h(8 + hours, 0));
+            }
+            x.absence = absence;
+            x
+        };
+        let full = h(7, 48);
+        assert_eq!(s.day_target(date(16), None), full);
+        assert_eq!(s.day_target(date(16), Some(Absence::new(Vacation, true))), full / 2);
+        assert_eq!(s.day_target(date(16), Some(Absence::new(Sick, false))), 0);
+        assert_eq!(s.day_target(date(16), Some(Absence::new(TimeOff, false))), full);
+        assert_eq!(s.day_target(date(21), Some(Absence::new(TimeOff, false))), 0, "Samstag: kein Soll");
+        assert!(!Absence::new(TimeOff, true).half, "halber Zeitausgleich gibt es nicht");
+
+        // Halber Urlaubstag mit 4 Std. Arbeit: +0:06 statt −3:48.
+        let half = day(16, 4, Some(Absence::new(Vacation, true)));
+        assert_eq!(s.counted_target(&half, h(4, 0)), full / 2);
+        // Ganzer Urlaubstag, trotzdem 1 Std. gearbeitet: Mehrarbeit.
+        let vacation = day(17, 1, Some(Absence::new(Vacation, false)));
+        // Zeitausgleich ohne Arbeitszeit: das volle Soll zählt.
+        let off = day(18, 0, Some(Absence::new(TimeOff, false)));
+        // Feiertag ohne Arbeitszeit und ein freier Tag ohne Eintrag: kein Soll.
+        let holiday = day(19, 0, Some(Absence::new(Holiday, false)));
+        let days = vec![half, vacation, off, holiday];
+        let (work, target) = balance(&days, date(16), date(22), &s);
+        assert_eq!((work, target), (h(5, 0), full / 2 + full));
+        assert_eq!(fmt_balance(account(&days, date(22), &s)), "−6:42 h");
+        // Die Abwesenheit allein macht aus dem Tag einen Eintrag.
+        assert!(!days[2].is_empty() && days[2].has_corrections());
+        // Texte für Export und Tabelle – und zurück.
+        let a = Absence::new(Vacation, true);
+        assert_eq!((a.label(), a.short(), a.code()), ("Urlaub (halber Tag)".to_string(), "½ Urlaub".to_string(), "½ U".to_string()));
+        assert_eq!(Absence::new(TimeOff, false).code(), "ZA");
+        assert_eq!(Absence::parse("Urlaub (halber Tag)"), Some(a));
+        assert_eq!(Absence::parse(" zeitausgleich "), Some(Absence::new(TimeOff, false)));
+        assert_eq!(Absence::parse("Dienstreise"), None);
+    }
+
+    #[test]
+    fn account_adds_carry_and_counts_from_start() {
+        let s = Settings::default();
+        let day = |d: u32, from: i64, to: i64| {
+            let mut x = Day::new(date(d));
+            x.add_period(from, to);
+            x
+        };
+        // Mo 9 Std. (+1:12), Di 7 Std. (−0:48), Sa 1 Std. (+1:00)
+        let days = vec![day(16, h(8, 0), h(17, 0)), day(17, h(8, 0), h(15, 0)), day(21, h(10, 0), h(11, 0))];
+        assert_eq!(account(&days, date(22), &s), h(1, 24));
+        // Stand an einem früheren Tag: spätere Tage zählen noch nicht.
+        assert_eq!(account(&days, date(16), &s), h(1, 12));
+        // Ab Dienstag, mit 5 Std. Übertrag aus der Zeit davor.
+        let from_tue = Settings { account_from: Some(date(17)), account_carry: h(5, 0), ..s };
+        assert_eq!(account(&days, date(22), &from_tue), h(5, 0) - h(0, 48) + h(1, 0));
+        let minus = Settings { account_carry: -h(2, 0), ..s };
+        assert_eq!(fmt_balance(account(&days, date(22), &minus)), "−0:36 h");
+    }
+
+    #[test]
+    fn break_reminders_at_5_45_and_6_hours() {
+        assert_eq!(BreakAlert::level(h(5, 44)), None);
+        assert_eq!(BreakAlert::level(h(5, 45)), Some(BreakAlert::Soon));
+        assert_eq!(BreakAlert::level(h(6, 0)), Some(BreakAlert::Reached));
+        assert_eq!(BreakAlert::Soon.title(), "Noch 15 Min. bis 6 Std. ohne Pause");
+        assert!(BreakAlert::Soon.body().starts_with("Seit 5:45 Std. ohne Pause"), "{}", BreakAlert::Soon.body());
+
+        let mut w = BreakWatch::init(date(16), h(2, 0));
+        assert_eq!(w.update(date(16), h(5, 45), true), Some(BreakAlert::Soon));
+        assert_eq!(w.update(date(16), h(5, 50), true), None, "nur einmal");
+        assert_eq!(w.update(date(16), h(6, 0), true), Some(BreakAlert::Reached));
+        // Nach der Pause beginnt die Arbeit am Stück neu – und die Erinnerung kommt wieder.
+        assert_eq!(w.update(date(16), h(0, 10), true), None);
+        assert_eq!(w.update(date(16), h(5, 45), true), Some(BreakAlert::Soon));
+        // Beim Start schon über 6 Std. am Stück: keine Erinnerung mehr.
+        let mut w = BreakWatch::init(date(17), h(6, 30));
+        assert_eq!(w.update(date(17), h(6, 31), true), None);
     }
 
     #[test]

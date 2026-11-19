@@ -89,6 +89,8 @@ struct Column {
     manual: Vec<Manual>,
     /// Pausen zwischen den Abschnitten (anklickbar).
     gaps: Vec<Span>,
+    /// Abwesenheit: kurz für den Tageskopf (`½ Urlaub`) und ausgeschrieben.
+    absence: Option<(String, String)>,
 }
 
 /// Arbeit ohne Mac in einer Tagesspalte.
@@ -154,6 +156,7 @@ fn columns(snap: &Snapshot, monday: NaiveDate) -> Vec<Column> {
                     warnings: Vec::new(),
                     manual: Vec::new(),
                     gaps: Vec::new(),
+                    absence: None,
                 };
             };
             let spans = day.spans(s);
@@ -186,7 +189,8 @@ fn columns(snap: &Snapshot, monday: NaiveDate) -> Vec<Column> {
                 .map(|(span, w)| Manual { span, block: w.span(), note: w.note.clone() })
                 .collect();
             let gaps = day.pauses(s);
-            Column { date, blocks, work_secs, pause_secs, warnings, manual, gaps }
+            let absence = day.absence.map(|a| (a.short(), a.label()));
+            Column { date, blocks, work_secs, pause_secs, warnings, manual, gaps, absence }
         })
         .collect()
 }
@@ -1221,6 +1225,9 @@ fn ax_items(cols: &[Column]) -> Vec<(usize, AxPart, String)> {
         } else {
             format!("{day}: Arbeitszeit {}, Pausen {}", spoken_dur(c.work_secs), spoken_dur(c.pause_secs))
         };
+        if let Some((_, absence)) = &c.absence {
+            add_sentence(&mut head, absence);
+        }
         for w in &c.warnings {
             add_sentence(&mut head, &format!("Hinweis: {w}"));
         }
@@ -1543,11 +1550,14 @@ fn draw(bounds: NSRect, d: &Data, flash: Option<&Flash>, hover: Option<(NaiveDat
 
     fill(bounds, &NSColor::textBackgroundColor());
 
-    // Schattiert: das Wochenende (kein Arbeitstag) und die Zeit außerhalb des
-    // Arbeitszeitrahmens (wird nicht gezählt).
+    // Arbeitstage nach den Einstellungen (ohne Stand: Montag bis Freitag).
+    let is_workday =
+        |date: NaiveDate| d.snap.as_ref().map_or(!Settings::is_weekend(date), |s| s.settings.is_workday(date));
+    // Schattiert: freie Tage (kein Soll) und die Zeit außerhalb des Arbeitszeitrahmens
+    // (wird nicht gezählt).
     for (i, c) in d.cols.iter().enumerate() {
         let x = geo.x(i);
-        if !Settings::is_workday(c.date) {
+        if !is_workday(c.date) {
             fill(NSRect::new(NSPoint::new(x, HEADER_H), NSSize::new(geo.col_w, geo.h - HEADER_H)), &shade);
         } else if let Some(s) = &d.snap {
             for (a, b) in [(geo.h0 * 3600, s.settings.frame_from), (s.settings.frame_to, geo.h1 * 3600)] {
@@ -1592,7 +1602,7 @@ fn draw(bounds: NSRect, d: &Data, flash: Option<&Flash>, hover: Option<(NaiveDat
         let x = geo.x(i);
         let is_today = Some(c.date) == today;
         let warn = !c.warnings.is_empty();
-        let color = if is_today { &accent } else if Settings::is_workday(c.date) { &label } else { &secondary };
+        let color = if is_today { &accent } else if is_workday(c.date) { &label } else { &secondary };
         let title = format!("{} {}", WEEKDAYS_SHORT[i], c.date.format("%d.%m."));
         let a = attrs(&font(12.0, if is_today { semibold } else { medium }), color, NSTextAlignment::Left);
         let tw = text_width(&title, &a);
@@ -1607,7 +1617,12 @@ fn draw(bounds: NSRect, d: &Data, flash: Option<&Flash>, hover: Option<(NaiveDat
         }
         let title_rect = NSRect::new(NSPoint::new(x0 + icon_w, 7.0), NSSize::new(geo.x(i + 1) - 2.0 - x0 - icon_w, 16.0));
         text_in(&title, title_rect, &a);
-        let total = if c.work_secs > 0 { store::fmt_hm(c.work_secs) } else { "–".to_string() };
+        // Ohne Arbeitszeit steht dort die Abwesenheit (sonst ein Strich).
+        let total = match (&c.absence, c.work_secs > 0) {
+            (_, true) => store::fmt_hm(c.work_secs),
+            (Some((short, _)), false) => short.clone(),
+            (None, false) => "–".to_string(),
+        };
         let total_color = if warn { &orange } else { &secondary };
         let total_rect = NSRect::new(NSPoint::new(x + 2.0, 24.0), NSSize::new(geo.col_w - 4.0, 15.0));
         // Daneben die Pausen mit Tasse (wie „Pausen heute“ im Menü) – nur wenn es Platz hat.
@@ -1760,6 +1775,9 @@ fn update_tooltips(view: &WeekView) {
                     store::fmt_hm(c.work_secs),
                     store::fmt_hm(c.pause_secs)
                 );
+            }
+            if let Some((_, absence)) = &c.absence {
+                text.push_str(&if text.is_empty() { format!("{}\n{absence}", fmt_day(c.date)) } else { format!("\n{absence}") });
             }
             if !c.warnings.is_empty() {
                 text.push_str(&if text.is_empty() { format!("Hinweise für {}:", fmt_day(c.date)) } else { "\n\nHinweise:".to_string() });
@@ -2228,6 +2246,12 @@ mod tests {
         let texts: Vec<&str> = items.iter().filter(|(c, ..)| *c == 2).map(|(.., t)| t.as_str()).collect();
         assert!(texts[0].starts_with("Mittwoch, 18. November: Arbeitszeit 11 Std., Pausen 0 Min. Hinweis: Ab 9 Std."), "{}", texts[0]);
         assert_eq!(texts[1], "Arbeit 07:30 bis 18:30 Uhr, 11 Std. Arbeitsbeginn manuell festgelegt");
+        // Abwesenheit im Tageskopf.
+        let mut off = Day::new(date(2026, 11, 19));
+        off.absence = Some(crate::day::Absence::new(crate::day::AbsenceKind::Vacation, true));
+        let cols = columns(&snap(vec![off], date(2026, 11, 22).and_hms_opt(9, 0, 0).unwrap(), false), date(2026, 11, 16));
+        assert_eq!(cols[3].absence, Some(("½ Urlaub".to_string(), "Urlaub (halber Tag)".to_string())));
+        assert_eq!(ax_items(&cols)[3].2, "Donnerstag, 19. November: keine Arbeitszeit. Urlaub (halber Tag)");
         assert_eq!(spoken_dur(h(0, 5)), "5 Min.");
         assert_eq!(spoken("KW 47  ·  16. – 22. November 2026"), "KW 47, 16. – 22. November 2026");
     }

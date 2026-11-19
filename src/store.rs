@@ -12,7 +12,7 @@
 //! Die Markdown-Datei früherer Versionen (`tagwerk.md`) wird beim ersten Öffnen der
 //! Datenbank einmalig übernommen und danach in `tagwerk.md.importiert` umbenannt.
 
-use crate::day::{self, fmt_clock_s, parse_clock, Activity, Break, Day, Span, DAY_END};
+use crate::day::{self, fmt_clock, fmt_clock_s, parse_clock, Absence, AbsenceKind, Activity, Break, Day, Span, DAY_END};
 use crate::rules::{self, Settings};
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Weekday};
 use rusqlite::{params, Connection, TransactionBehavior};
@@ -69,6 +69,16 @@ const SCHEMA_WORK: &str = "
         PRIMARY KEY (date, idx)
     ) WITHOUT ROWID;
 ";
+/// Abwesenheiten je Tag. Die Tabelle kommt ohne neue Schema-Version dazu: Ältere Versionen
+/// öffnen die Datenbank weiter und lassen die Tabelle unberührt – sie kennen die
+/// Abwesenheiten nur nicht und rechnen das Soll ohne sie.
+const SCHEMA_ABSENCES: &str = "
+    CREATE TABLE IF NOT EXISTS absences (
+        date TEXT PRIMARY KEY,
+        kind INTEGER NOT NULL,
+        half INTEGER NOT NULL DEFAULT 0
+    ) WITHOUT ROWID;
+";
 const KEY_MIN_PAUSE: &str = "min_pause_s";
 const KEY_MIN_WORK: &str = "min_work_s";
 const KEY_WEEKLY: &str = "weekly_target_s";
@@ -77,6 +87,14 @@ const KEY_FRAME_TO: &str = "frame_to_s";
 const KEY_ICON_SET: &str = "icon_set";
 const KEY_SHOW_TIME: &str = "menubar_time";
 const KEY_HOTKEYS: &str = "global_hotkeys";
+const KEY_WORKDAYS: &str = "workdays";
+const KEY_IDLE: &str = "idle_s";
+const KEY_ASK_AFTER_LOCK: &str = "ask_after_lock";
+const KEY_NOTIFY_LIMIT: &str = "notify_limit";
+const KEY_NOTIFY_BREAK: &str = "notify_break";
+/// Beginn des Zeitkontos als Tage seit dem 01.01.0001 (0 = alle erfassten Tage).
+const KEY_ACCOUNT_FROM: &str = "account_from_day";
+const KEY_ACCOUNT_CARRY: &str = "account_carry_s";
 
 const HEAD_CORRECTIONS: &str = "## Korrekturen";
 const HEAD_PERIODS: &str = "## Erfasste Perioden";
@@ -85,6 +103,7 @@ const KIND_START: &str = "Arbeitsbeginn";
 const KIND_BREAK: &str = "Pause";
 const KIND_END: &str = "Feierabend";
 const KIND_WORK: &str = "Arbeit ohne Mac";
+const KIND_ABSENCE: &str = "Abwesenheit";
 
 /// `$HOME/Library/Application Support/Tagwerk` (zum Testen per `TAGWERK_DIR` änderbar).
 pub fn data_dir() -> PathBuf {
@@ -211,6 +230,15 @@ impl Db {
                 KEY_ICON_SET => s.icon_set = rules::IconSet::from_id(value),
                 KEY_SHOW_TIME => s.show_time = value != 0,
                 KEY_HOTKEYS => s.hotkeys = value != 0,
+                KEY_WORKDAYS => s.workdays = value.clamp(0, 255) as u8,
+                KEY_IDLE => s.idle_secs = value,
+                KEY_ASK_AFTER_LOCK => s.ask_after_lock = value != 0,
+                KEY_NOTIFY_LIMIT => s.notify_limit = value != 0,
+                KEY_NOTIFY_BREAK => s.notify_break = value != 0,
+                KEY_ACCOUNT_FROM => {
+                    s.account_from = i32::try_from(value).ok().filter(|v| *v > 0).and_then(NaiveDate::from_num_days_from_ce_opt)
+                }
+                KEY_ACCOUNT_CARRY => s.account_carry = value,
                 _ => {}
             }
         }
@@ -229,6 +257,13 @@ impl Db {
             (KEY_ICON_SET, s.icon_set.id()),
             (KEY_SHOW_TIME, s.show_time as i64),
             (KEY_HOTKEYS, s.hotkeys as i64),
+            (KEY_WORKDAYS, s.workdays as i64),
+            (KEY_IDLE, s.idle_secs),
+            (KEY_ASK_AFTER_LOCK, s.ask_after_lock as i64),
+            (KEY_NOTIFY_LIMIT, s.notify_limit as i64),
+            (KEY_NOTIFY_BREAK, s.notify_break as i64),
+            (KEY_ACCOUNT_FROM, s.account_from.map_or(0, |d| d.num_days_from_ce() as i64)),
+            (KEY_ACCOUNT_CARRY, s.account_carry),
         ] {
             tx.execute(
                 "INSERT INTO settings (key, value) VALUES (?1, ?2)
@@ -266,7 +301,8 @@ impl Db {
         let result = (|| -> Result<()> {
             let rows: i64 = self.conn.query_row(
                 "SELECT (SELECT count(*) FROM periods) + (SELECT count(*) FROM breaks)
-                      + (SELECT count(*) FROM day_marks) + (SELECT count(*) FROM work_blocks)",
+                      + (SELECT count(*) FROM day_marks) + (SELECT count(*) FROM work_blocks)
+                      + (SELECT count(*) FROM absences)",
                 [],
                 |r| r.get(0),
             )?;
@@ -297,6 +333,8 @@ fn init_schema(conn: &mut Connection, dir: &Path) -> Result<()> {
         )
         .into());
     }
+    // Kommt ohne neue Version dazu (siehe `SCHEMA_ABSENCES`).
+    tx.execute_batch(SCHEMA_ABSENCES)?;
     let mut imported_file = None;
     if version < SCHEMA_VERSION {
         tx.execute_batch(SCHEMA_SETTINGS)?;
@@ -373,12 +411,24 @@ fn load_between(conn: &Connection, from: &str, to: &str) -> Result<Vec<Day>> {
         }
     }
 
+    let mut stmt =
+        conn.prepare("SELECT date, kind, half FROM absences WHERE date BETWEEN ?1 AND ?2 ORDER BY date")?;
+    let rows = stmt.query_map([from, to], |r| Ok((r.get::<_, String>(0)?, r.get(1)?, r.get(2)?)))?;
+    for row in rows {
+        let (date, kind, half): (String, i64, i64) = row?;
+        // Unbekannte Art (aus einer neueren Version): ohne Abwesenheit weiter.
+        if let (Some(date), Some(kind)) = (parse(date), AbsenceKind::from_id(kind)) {
+            day::day_mut(&mut days, date).absence = Some(Absence::new(kind, half != 0));
+        }
+    }
+
     days.retain(|d| !d.is_empty());
     Ok(days)
 }
 
 fn delete_day(conn: &Connection, date: NaiveDate) -> Result<()> {
     let key = date_key(date);
+    conn.execute("DELETE FROM absences WHERE date = ?1", [&key])?;
     conn.execute("DELETE FROM periods WHERE date = ?1", [&key])?;
     conn.execute("DELETE FROM breaks WHERE date = ?1", [&key])?;
     conn.execute("DELETE FROM day_marks WHERE date = ?1", [&key])?;
@@ -415,6 +465,12 @@ fn write_day(conn: &Connection, d: &Day) -> Result<()> {
         conn.execute(
             "INSERT INTO day_marks (date, start_s, end_s) VALUES (?1, ?2, ?3)",
             params![key, d.start, d.end],
+        )?;
+    }
+    if let Some(a) = d.absence {
+        conn.execute(
+            "INSERT INTO absences (date, kind, half) VALUES (?1, ?2, ?3)",
+            params![key, a.kind.id(), a.half as i64],
         )?;
     }
     Ok(())
@@ -543,6 +599,13 @@ pub fn parse_file(text: &str) -> Vec<Day> {
             }
             Section::Corrections if cells.len() >= 3 => {
                 let kind = cells[1].to_lowercase();
+                if kind.contains("abwesen") {
+                    // Ohne Uhrzeiten; die Art steht in der Notiz.
+                    if let Some(a) = cells.get(4).and_then(|c| Absence::parse(c)) {
+                        day::day_mut(&mut days, date).absence = Some(a);
+                    }
+                    continue;
+                }
                 let Some(from) = parse_clock(cells[2]) else { continue };
                 let to = cells.get(3).and_then(|c| parse_clock(c));
                 let d = day::day_mut(&mut days, date);
@@ -602,8 +665,181 @@ pub fn default_export_range(today: NaiveDate) -> (NaiveDate, NaiveDate) {
 }
 
 /// Vorschlag für den Dateinamen: `tagwerk-2026-10-21_2026-11-17.md`.
-pub fn export_file_name(from: NaiveDate, to: NaiveDate) -> String {
-    format!("tagwerk-{}_{}.md", date_key(from), date_key(to))
+pub fn export_file_name(from: NaiveDate, to: NaiveDate, format: ExportFormat) -> String {
+    format!("tagwerk-{}_{}.{}", date_key(from), date_key(to), format.extension())
+}
+
+/// Format eines Exports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ExportFormat {
+    /// Vollständig: Übersicht, Hinweise, Korrekturen und erfasste Perioden – lässt sich wieder
+    /// einlesen.
+    Markdown,
+    /// Die Übersicht als Tabelle für Excel oder Numbers.
+    Csv,
+    /// Die Übersicht mit Wochensummen und Hinweisen zum Drucken.
+    Pdf,
+}
+
+impl ExportFormat {
+    pub const ALL: [ExportFormat; 3] = [ExportFormat::Markdown, ExportFormat::Csv, ExportFormat::Pdf];
+
+    /// Bezeichnung in der Auswahl.
+    pub fn label(self) -> &'static str {
+        match self {
+            ExportFormat::Markdown => "Markdown (vollständig, wieder einlesbar)",
+            ExportFormat::Csv => "CSV (Tabelle für Excel)",
+            ExportFormat::Pdf => "PDF (zum Drucken)",
+        }
+    }
+
+    pub fn extension(self) -> &'static str {
+        match self {
+            ExportFormat::Markdown => "md",
+            ExportFormat::Csv => "csv",
+            ExportFormat::Pdf => "pdf",
+        }
+    }
+
+    /// Format nach Namen (`md`, `markdown`, `csv`, `pdf`) oder Dateiendung.
+    pub fn from_name(name: &str) -> Option<Self> {
+        match name.trim().trim_start_matches('.').to_lowercase().as_str() {
+            "md" | "markdown" => Some(ExportFormat::Markdown),
+            "csv" => Some(ExportFormat::Csv),
+            "pdf" => Some(ExportFormat::Pdf),
+            _ => None,
+        }
+    }
+
+    /// Format nach der Endung des Dateinamens `path`.
+    pub fn from_path(path: &str) -> Option<Self> {
+        Path::new(path).extension().and_then(|e| e.to_str()).and_then(Self::from_name)
+    }
+}
+
+/// Schreibt den Export für die Tage von `from` bis `to` im Format `format` nach `path`.
+/// `days` darf auch den Tag vor `from` enthalten (für die Ruhezeit).
+pub fn write_export(
+    days: &[Day],
+    from: NaiveDate,
+    to: NaiveDate,
+    now: NaiveDateTime,
+    settings: &Settings,
+    format: ExportFormat,
+    path: &Path,
+) -> Result<()> {
+    match format {
+        ExportFormat::Markdown => fs::write(path, export_markdown(days, from, to, now, settings))?,
+        ExportFormat::Csv => fs::write(path, export_csv(&Report::new(days, from, to, settings)))?,
+        #[cfg(target_os = "macos")]
+        ExportFormat::Pdf => crate::pdf::write(&Report::new(days, from, to, settings), settings, now, path)?,
+        #[cfg(not(target_os = "macos"))]
+        ExportFormat::Pdf => return Err("PDF gibt es nur unter macOS.".into()),
+    }
+    Ok(())
+}
+
+/// Ein Tag in der Übersicht ([`Report`]), mit den Werten wie im Fenster „Aufzeichnungen“
+/// (Arbeitszeit und Pausen nach den angezeigten Uhrzeiten).
+#[derive(Clone, Debug, PartialEq)]
+pub struct ReportDay {
+    pub date: NaiveDate,
+    pub first_start: i64,
+    pub last_end: i64,
+    pub work: i64,
+    pub pause: i64,
+    /// Soll, das in den Saldo eingeht (siehe [`Settings::counted_target`]).
+    pub target: i64,
+    /// Abwesenheit, z. B. `Urlaub (halber Tag)` (leer = keine).
+    pub absence: String,
+    /// Manuell korrigiert?
+    pub corrected: bool,
+    pub warnings: Vec<String>,
+}
+
+/// Übersicht eines Zeitraums: Grundlage für CSV und PDF.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Report {
+    pub from: NaiveDate,
+    pub to: NaiveDate,
+    pub days: Vec<ReportDay>,
+}
+
+impl Report {
+    /// `days` darf auch den Tag vor `from` enthalten (für die Ruhezeit).
+    pub fn new(days: &[Day], from: NaiveDate, to: NaiveDate, settings: &Settings) -> Self {
+        let rows = days
+            .iter()
+            .filter(|d| d.date >= from && d.date <= to)
+            .filter_map(|d| {
+                let r = d.record(settings)?;
+                Some(ReportDay {
+                    date: r.date,
+                    first_start: r.first_start,
+                    last_end: r.last_end,
+                    work: r.shown_work_secs,
+                    pause: r.shown_pause_secs,
+                    target: settings.counted_target(d, r.work_secs),
+                    absence: d.absence.map(Absence::label).unwrap_or_default(),
+                    corrected: d.has_corrections(),
+                    warnings: rules::day_warnings(days, d.date, settings).iter().map(rules::Warning::text).collect(),
+                })
+            })
+            .collect();
+        Self { from, to, days: rows }
+    }
+
+    /// Summen: Arbeitszeit, Pausen, Soll und Zahl der Tage mit Arbeitszeit.
+    pub fn totals(&self) -> (i64, i64, i64, usize) {
+        self.days.iter().fold((0, 0, 0, 0), |(w, p, t, n), d| {
+            (w + d.work, p + d.pause, t + d.target, n + (d.work > 0) as usize)
+        })
+    }
+}
+
+/// `7:48` (ohne Einheit, für Tabellen).
+fn fmt_h_m(secs: i64) -> String {
+    let m = secs.max(0) / 60;
+    format!("{}:{:02}", m / 60, m % 60)
+}
+
+/// Die Übersicht als CSV für Tabellenprogramme: je Tag eine Zeile, Felder mit Semikolon
+/// getrennt, Dezimalkomma, Zeilenende CRLF und BOM – so öffnet ein deutsches Excel die Datei
+/// ohne Umweg. Salden haben ein einfaches Minuszeichen, damit sie sich weiterverrechnen lassen.
+pub fn export_csv(report: &Report) -> String {
+    let field = |s: &str| {
+        if s.contains([';', '"', '\n']) {
+            format!("\"{}\"", s.replace('"', "\"\""))
+        } else {
+            s.to_string()
+        }
+    };
+    let mut out = String::from("\u{feff}");
+    out.push_str(
+        "Datum;Wochentag;Beginn;Ende;Arbeitszeit;Arbeitszeit (Std.);Pausen;Soll;Saldo;Abwesenheit;Korrigiert;Hinweise\r\n",
+    );
+    for d in &report.days {
+        let balance = d.work - d.target;
+        // Ohne Arbeitszeit (z. B. ein Urlaubstag) gibt es weder Beginn noch Ende.
+        let clock = |t: i64| if d.work > 0 { fmt_clock(t) } else { String::new() };
+        let cells = [
+            fmt_date_short(d.date),
+            weekday_short(d.date).to_string(),
+            clock(d.first_start),
+            clock(d.last_end),
+            fmt_h_m(d.work),
+            format!("{:.2}", d.work as f64 / 3600.0).replace('.', ","),
+            fmt_h_m(d.pause),
+            fmt_h_m(d.target),
+            format!("{}{}", if balance < 0 { "-" } else { "+" }, fmt_h_m(balance.abs())),
+            d.absence.clone(),
+            if d.corrected { "ja" } else { "nein" }.to_string(),
+            d.warnings.join(" | "),
+        ];
+        out.push_str(&cells.iter().map(|c| field(c)).collect::<Vec<_>>().join(";"));
+        out.push_str("\r\n");
+    }
+    out
 }
 
 /// Markdown mit Übersicht (samt Summe und Saldo), Hinweisen, Korrekturen und erfassten
@@ -639,7 +875,7 @@ pub fn export_markdown(
     let (mut work, mut pause, mut target, mut count) = (0, 0, 0, 0);
     for d in &days {
         let Some(r) = d.record(settings) else { continue };
-        let day_target = if r.work_secs > 0 { settings.daily_target(r.date) } else { 0 };
+        let day_target = settings.counted_target(d, r.work_secs);
         work += r.work_secs;
         pause += r.pause_secs();
         target += day_target;
@@ -664,9 +900,10 @@ pub fn export_markdown(
         rules::fmt_balance(work - target)
     ));
     s.push_str(&format!(
-        "\nSoll: {} ({} Std./Woche, nur Tage mit Arbeitszeit, Mo–Fr).\n",
+        "\nSoll: {} ({} Std./Woche, nur Tage mit Arbeitszeit, {}).\n",
         fmt_hm(target),
-        rules::fmt_hours(settings.weekly_target)
+        rules::fmt_hours(settings.weekly_target),
+        settings.workdays_text()
     ));
 
     s.push_str(&format!("\n{HEAD_WARNINGS}\n\n"));
@@ -685,7 +922,7 @@ pub fn export_markdown(
     }
 
     s.push_str(&format!("\n{HEAD_CORRECTIONS}\n\n"));
-    s.push_str("Manuell festgelegt. Art: Arbeitsbeginn, Pause, Arbeit ohne Mac (z. B. Telefonat oder Meeting) oder Feierabend.\n\n");
+    s.push_str("Manuell festgelegt. Art: Arbeitsbeginn, Pause, Arbeit ohne Mac (z. B. Telefonat oder Meeting), Feierabend oder Abwesenheit (Urlaub, Krank, Feiertag, Zeitausgleich).\n\n");
     s.push_str("| Datum | Art | Von | Bis | Notiz |\n");
     s.push_str("|:------|:----|:---:|:---:|:------|\n");
     for d in &days {
@@ -710,6 +947,9 @@ pub fn export_markdown(
         }
         if let Some(e) = d.end {
             s.push_str(&format!("| {date} | {KIND_END} | {} | – | |\n", fmt_clock_s(e)));
+        }
+        if let Some(a) = d.absence {
+            s.push_str(&format!("| {date} | {KIND_ABSENCE} | – | – | {} |\n", a.label()));
         }
     }
 
@@ -947,6 +1187,13 @@ mod tests {
             icon_set: rules::IconSet::Schlossuhr,
             show_time: true,
             hotkeys: true,
+            workdays: 0b0_1111,
+            idle_secs: 10 * 60,
+            ask_after_lock: true,
+            notify_limit: false,
+            notify_break: false,
+            account_from: Some(date(2)),
+            account_carry: -h(3, 30),
         };
         let mut other = Db::open_in(&dir).unwrap();
         other.save_settings(&custom).unwrap();
@@ -956,10 +1203,84 @@ mod tests {
     }
 
     #[test]
+    fn absences_survive_database_and_export() {
+        let dir = temp_dir("absences");
+        let mut half = Day::new(date(16));
+        half.add_period(h(8, 0), h(12, 0));
+        half.absence = Some(Absence::new(AbsenceKind::Vacation, true));
+        // Ein Tag nur mit Abwesenheit, ohne jede erfasste Zeit.
+        let mut off = Day::new(date(18));
+        off.absence = Some(Absence::new(AbsenceKind::TimeOff, false));
+        let days = vec![half, off];
+        let mut db = Db::open_in(&dir).unwrap();
+        db.save_days(&days, &[], now()).unwrap();
+        assert_eq!(db.load().unwrap(), days);
+        // Abwesenheit wieder entfernen: Der Tag ohne Zeiten verschwindet ganz.
+        db.edit_day(date(18), now(), |d| d.absence = None).unwrap();
+        assert_eq!(db.load().unwrap(), days[..1]);
+        // Die Schema-Version bleibt – ältere Versionen öffnen die Datenbank weiter.
+        let version: i32 = db.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+
+        // Markdown: Die Abwesenheit steht bei den Korrekturen und kommt beim Einlesen zurück.
+        let md = export_markdown(&days, date(16), date(22), now(), &st());
+        assert!(md.contains("| Mo, 16.11.2026 | Abwesenheit | – | – | Urlaub (halber Tag) |"), "{md}");
+        assert!(md.contains("| Mi, 18.11.2026 | Abwesenheit | – | – | Zeitausgleich |"), "{md}");
+        assert_eq!(parse_file(&md), days);
+        // Halbes Soll am Montag, volles am Mittwoch: 4:00 − (3:54 + 7:48).
+        assert!(md.contains("| **Summe: 1 Arbeitstag** | | | **04:00:00** | **00:00:00** | **−7:42 h** |"), "{md}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn csv_has_one_row_per_day() {
+        // Mo 16.11.: 08:00–12:00 und 12:45–17:30 mit manueller Pause; Sa 21.11.: 1 Std.
+        let mut mon = Day::new(date(16));
+        mon.add_period(h(8, 0), h(12, 0));
+        mon.add_period(h(12, 45), h(17, 30));
+        mon.add_break(h(15, 0), h(15, 15));
+        let mut sat = Day::new(date(21));
+        sat.add_period(h(10, 0), h(11, 0));
+        let days = vec![mon, sat];
+        let report = Report::new(&days, date(16), date(22), &st());
+        assert_eq!(report.totals(), (h(8, 30) + h(1, 0), h(1, 0), h(7, 48), 2));
+        let csv = export_csv(&report);
+        let lines: Vec<&str> = csv.trim_start_matches('\u{feff}').split("\r\n").collect();
+        assert!(csv.starts_with('\u{feff}'), "BOM für Excel");
+        assert_eq!(
+            lines[0],
+            "Datum;Wochentag;Beginn;Ende;Arbeitszeit;Arbeitszeit (Std.);Pausen;Soll;Saldo;Abwesenheit;Korrigiert;Hinweise"
+        );
+        assert_eq!(lines[1], "16.11.2026;Mo;08:00;17:30;8:30;8,50;1:00;7:48;+0:42;;ja;");
+        assert_eq!(lines[2], "21.11.2026;Sa;10:00;11:00;1:00;1,00;0:00;0:00;+1:00;;nein;Arbeit am Wochenende – zählt ohne Soll als Mehrarbeit");
+        assert_eq!(lines.len(), 4, "Zeilenende nach der letzten Zeile");
+        // Zeitausgleich ohne Arbeitszeit: keine Uhrzeiten, das volle Soll als Minus.
+        let mut off = Day::new(date(18));
+        off.absence = Some(Absence::new(AbsenceKind::TimeOff, false));
+        let csv = export_csv(&Report::new(&[off], date(16), date(22), &st()));
+        assert!(csv.contains("18.11.2026;Mi;;;0:00;0,00;0:00;7:48;-7:48;Zeitausgleich;ja;\r\n"), "{csv}");
+        // Ein Hinweis mit Semikolon wird in Anführungszeichen gesetzt.
+        let quoted = Report { days: vec![ReportDay { warnings: vec!["a; b \"c\"".to_string()], ..report.days[0].clone() }], ..report };
+        assert!(export_csv(&quoted).contains(";ja;\"a; b \"\"c\"\"\"\r\n"), "{}", export_csv(&quoted));
+    }
+
+    #[test]
+    fn export_formats_by_name() {
+        assert_eq!(ExportFormat::from_name("CSV"), Some(ExportFormat::Csv));
+        assert_eq!(ExportFormat::from_name("markdown"), Some(ExportFormat::Markdown));
+        assert_eq!(ExportFormat::from_path("/tmp/zeiten.PDF"), Some(ExportFormat::Pdf));
+        assert_eq!(ExportFormat::from_path("zeiten"), None);
+        assert_eq!(export_file_name(date(1), date(30), ExportFormat::Csv), "tagwerk-2026-11-01_2026-11-30.csv");
+        for f in ExportFormat::ALL {
+            assert_eq!(ExportFormat::from_name(f.extension()), Some(f));
+        }
+    }
+
+    #[test]
     fn default_range_is_28_days() {
         let (from, to) = default_export_range(date(17));
         assert_eq!((from, to), (NaiveDate::from_ymd_opt(2026, 10, 21).unwrap(), date(17)));
-        assert_eq!(export_file_name(from, to), "tagwerk-2026-10-21_2026-11-17.md");
+        assert_eq!(export_file_name(from, to, ExportFormat::Markdown), "tagwerk-2026-10-21_2026-11-17.md");
     }
 
     #[test]
