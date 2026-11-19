@@ -6,6 +6,13 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Geändert
+- Testdaten (`testdata/testdb.sh`): Der Zeitraum umfasst 18 volle Kalendermonate plus den
+  laufenden Monat bis gestern (bisher sechs Wochen plus die laufende Woche). Die
+  eingebauten Regelverstöße – zu kurze Ruhezeit, Arbeit vor 7 und nach 22 Uhr, zu wenig
+  Pause – wiederholen sich alle sechs Wochen, von der laufenden Woche aus rückwärts
+  gezählt.
+
 ## [1.4.0] - 2026-11-19
 
 ### Zusammenfassung

@@ -1,13 +1,13 @@
 #!/usr/bin/env python3
 """Erzeugt Testdaten für Tagwerk als Markdown (Format von „Tagwerk --export“).
 
-Der Zeitraum hängt vom heutigen Tag ab: Er endet gestern und beginnt am Montag sechs
-Wochen vor der aktuellen Woche – also sechs volle Kalenderwochen plus die Tage der
-laufenden Woche bis gestern. Heute selbst bleibt frei.
+Der Zeitraum hängt vom heutigen Tag ab: Er endet gestern und beginnt am Ersten des
+Monats 18 Monate vor dem aktuellen – also 18 volle Kalendermonate plus die Tage des
+laufenden Monats bis gestern. Heute selbst bleibt frei.
 
 - An jedem Werktag (Mo–Fr), der kein bundesweiter Feiertag ist, werden zwischen 5 und
   10 Stunden gearbeitet; die Wochensumme liegt zwischen 35,1 und 42,9 Stunden
-  (39 Std. ± 10 %, bei Feiertagen und in der laufenden Woche anteilig).
+  (39 Std. ± 10 %, bei Feiertagen sowie in der ersten und der laufenden Woche anteilig).
 - Mittagspausen und weitere Pausen ab 15 Min. sind Sperrzeiten; dazu kommen kurze
   Sperren unter 15 Min., die als Arbeitszeit zählen.
 - Arbeit ohne Mac (Datenbankschema 3, Tabelle work_blocks) an rund 25 % der Werktage,
@@ -22,8 +22,11 @@ laufenden Woche bis gestern. Heute selbst bleibt frei.
     nach Ende      Telefonat oder Meeting nach dem letzten Sperren
   Nachgetragene Abschnitte (Dialog bzw. Inspektor) beginnen und enden auf volle Minuten;
   nur die als Telefonat gezählte Pause übernimmt die Sekunden der erfassten Sperre.
-- Eingebaute Regelverstöße (Woche 1 = erste Woche des Zeitraums; liegt der Wunschtag auf
-  einem Feiertag, rückt der Verstoß auf einen anderen Tag derselben Woche):
+- Eingebaute Regelverstöße, alle sechs Wochen wiederholt. Die Sechs-Wochen-Abschnitte
+  zählen von der laufenden Woche aus rückwärts: Sie ist Woche 1 eines neuen Abschnitts,
+  davor liegen die Wochen 6, 5, … 1 des vorigen und so weiter bis zum Beginn des Zeitraums.
+  Liegt der Wunschtag auf einem Feiertag, rückt der Verstoß auf einen anderen Tag derselben
+  Woche; die angebrochene erste Woche des Zeitraums bleibt ohne eingebauten Verstoß:
     Woche 2  Di bis 21:2x, Mi ab 07:0x       -> Ruhezeit unter 11 Std.
     Woche 3  Do bis 22:5x                     -> nach 22 Uhr gearbeitet
     Woche 4  Mo ab 06:1x                      -> vor 7 Uhr gearbeitet
@@ -47,7 +50,8 @@ import random
 import sys
 
 SEED = 20261117
-WEEKS = 6
+MONTHS = 18  # volle Kalendermonate vor dem laufenden Monat
+CYCLE = 6  # Wochen, nach denen sich die Regelverstöße wiederholen
 FRAME = (7 * 3600, 22 * 3600)
 MIN_PAUSE = 15 * 60
 MIN_REST = 11 * 3600
@@ -67,7 +71,8 @@ NO_BREAK = "no_break"
 WEEKDAYS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
 KIND_WORK = "Arbeit ohne Mac"
 
-# Regelverstöße: (Woche, Arten an aufeinanderfolgenden Tagen, Wunsch-Wochentage 0=Mo)
+# Regelverstöße: (Woche im Sechs-Wochen-Abschnitt ab 0, Arten an aufeinanderfolgenden
+# Tagen, Wunsch-Wochentage 0=Mo)
 SPECIALS = [
     (1, ("late_end", "early_start"), [1, 0, 2, 3]),
     (2, ("after_22",), [3, 2, 1, 0, 4]),
@@ -138,9 +143,9 @@ def holidays(year):
 
 
 def period_for(today):
-    """(erster Tag, letzter Tag): Montag sechs Wochen vor der aktuellen Woche bis gestern."""
-    monday = today - dt.timedelta(days=today.weekday())
-    return monday - dt.timedelta(weeks=WEEKS), today - dt.timedelta(days=1)
+    """(erster Tag, letzter Tag): Erster des Monats 18 Monate vor dem aktuellen bis gestern."""
+    months = today.year * 12 + today.month - 1 - MONTHS
+    return dt.date(months // 12, months % 12 + 1, 1), today - dt.timedelta(days=1)
 
 
 # ---------- Tagwerk nachgebildet (src/day.rs, src/rules.rs) -----------------------
@@ -366,17 +371,26 @@ def special_day(rng, kind):
 # ---------- Zeitraum planen -----------------------------------------------------
 
 
-def place_specials(mondays, workdays):
-    """Datum → Art des Regelverstoßes (Wunschtag, sonst ein anderer Tag der Woche)."""
+class NoFit(Exception):
+    """Ein Tag lässt sich mit diesem Startwert nicht regelkonform bauen."""
+
+
+def place_specials(mondays, workdays, current):
+    """Datum → Art des Regelverstoßes (Wunschtag, sonst ein anderer Tag der Woche).
+
+    `current` ist der Montag der laufenden Woche; von ihm aus zählen die
+    Sechs-Wochen-Abschnitte rückwärts, in denen sich die Verstöße wiederholen."""
     out = {}
-    for week, kinds, candidates in SPECIALS:
-        if week >= len(mondays):
-            continue
-        for wd in candidates:
-            dates = [mondays[week] + dt.timedelta(days=wd + i) for i in range(len(kinds))]
-            if all(d in workdays and d not in out and d.weekday() < 5 for d in dates):
-                out.update(zip(dates, kinds))
-                break
+    for monday in mondays:
+        position = (monday - current).days // 7 % CYCLE
+        for week, kinds, candidates in SPECIALS:
+            if week != position:
+                continue
+            for wd in candidates:
+                dates = [monday + dt.timedelta(days=wd + i) for i in range(len(kinds))]
+                if all(d in workdays and d not in out and d.weekday() < 5 for d in dates):
+                    out.update(zip(dates, kinds))
+                    break
     return out
 
 
@@ -386,7 +400,12 @@ def generate(first, last, seed):
     all_days = [first + dt.timedelta(days=i) for i in range((last - first).days + 1)]
     workdays = [d for d in all_days if d.weekday() < 5 and d not in hol]
     mondays = sorted({d - dt.timedelta(days=d.weekday()) for d in all_days})
-    specials = place_specials(mondays, set(workdays))
+    today = last + dt.timedelta(days=1)
+    # ohne die angebrochene erste Woche: Ein einzelner Tag mit fester Arbeitszeit könnte
+    # dort die Wochensumme aus dem Rahmen bringen
+    specials = place_specials(
+        [m for m in mondays if m >= first], set(workdays), today - dt.timedelta(days=today.weekday())
+    )
 
     # Arbeit ohne Mac: rund 25 % der Werktage, jede Art etwa gleich oft
     free = [d for d in workdays if d not in specials]
@@ -440,7 +459,7 @@ def generate(first, last, seed):
                     break
                 day = normal_day(rng, plan[d], fallback, min_start)
             if day is None:
-                raise RuntimeError(f"{d}: kein passender Tagesablauf")
+                raise NoFit(f"{d}: kein passender Tagesablauf")
         days[d] = day
         prev = (d, min(day.last(), FRAME[1]))
     return days, hol
@@ -533,9 +552,13 @@ def main():
     args = ap.parse_args()
     first, last = period_for(args.today)
 
-    # Sollte ein Tag ungewollt gegen eine Regel verstoßen, mit dem nächsten Startwert neu würfeln.
+    # Sollte ein Tag ungewollt gegen eine Regel verstoßen oder sich nicht bauen lassen (etwa
+    # ein langer Tag nach spätem Ende am Vortag), mit dem nächsten Startwert neu würfeln.
     for seed in range(args.seed, args.seed + 100):
-        days, hol = generate(first, last, seed)
+        try:
+            days, hol = generate(first, last, seed)
+        except NoFit:
+            continue
         found = warnings(days)
         if found == expected_warnings(days) and no_break_ok(days):
             break
