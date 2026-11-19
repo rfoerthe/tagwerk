@@ -20,6 +20,152 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   Fenster aktiv wird – auch nach der Rückkehr aus den Systemeinstellungen.
 - `--settings-screenshot`: Stand der Mitteilungen zur Ansicht über
   `TAGWERK_NOTIFICATIONS=allowed|denied|hidden|undetermined`.
+- Neuer Hinweis bei mehr als 6 Std. Arbeit am Stück ohne Pause (§ 4 ArbZG), z. B.
+  „7:00 Std. ohne Pause – erlaubt sind höchstens 6 Std. am Stück“. Bisher wurde nur die
+  Summe der Pausen geprüft: Wer sieben Stunden durcharbeitete und danach 30 Min. Pause
+  machte, bekam keinen Hinweis. Unterbrechungen unter 15 Min. gelten dabei nicht als Pause.
+  Fehlt die Pause ganz, bleibt es beim bisherigen Hinweis auf die vorgeschriebene Pause.
+- Fehler der Datenbank bleiben nicht mehr unbemerkt: Schlägt das Speichern oder das
+  Einlesen in der Menüleisten-App fehl, steht das rot unter dem Status im Menü und im
+  Tooltip des Symbols, bis es wieder gelingt; beim ersten Mal kommt zusätzlich eine
+  Mitteilung. Bisher stand der Fehler nur in der Standardfehlerausgabe. Ein gescheitertes
+  Einlesen wird jetzt beim nächsten Takt wiederholt.
+- Abwesenheiten: Im Inspektor lässt sich für einen Tag Urlaub, Krank, Feiertag oder
+  Zeitausgleich eintragen, als ganzer oder halber Tag. Urlaub, Krankheit und Feiertag
+  senken das Soll des Tages (halber Tag: auf die Hälfte) – ein halber Urlaubstag ergibt
+  kein Minus mehr. Zeitausgleich lässt das Soll stehen, auch ohne Arbeitszeit, sodass das
+  Zeitkonto um den freien Tag sinkt. Die Abwesenheit steht in der Tabelle als Kürzel hinter
+  dem Datum (U, K, F, ZA), im Tageskopf der Wochenansicht, im Export (Markdown, CSV, PDF)
+  und lässt sich widerrufen. Gespeichert wird in einer eigenen Tabelle ohne neue
+  Schema-Version; ältere Versionen öffnen die Datenbank weiter.
+- Zeitkonto: der fortlaufende Saldo aller erfassten Tage, im Menü der Menüleiste („Zeitkonto:
+  +1:39 h“) und als fünfte Kennzahl im Fenster „Aufzeichnungen“. In den Einstellungen lässt
+  es sich auf einen Beginn („Zählt erst ab“) und einen Übertrag aus der Zeit davor (z. B.
+  `+12:30`) einstellen.
+- Arbeitstage einstellbar: Mo bis Fr als einzelne Schalter, das Wochensoll verteilt sich
+  gleichmäßig auf die gewählten Tage (z. B. „4-Tage-Woche · 8:00 h pro Arbeitstag“). An
+  abgewählten Tagen gibt es kein Soll, Arbeit dort zählt als Mehrarbeit; die Wochenansicht
+  schattiert sie wie das Wochenende. Bisher war das Soll fest Wochenstunden / 5 an Mo–Fr.
+- Inaktivitätserkennung (einschaltbar, Standard 10 Min.): Bleibt der entsperrte Mac so
+  lange ohne Eingabe, endet die Erfassung rückwirkend mit der letzten Eingabe – wie bei
+  einer Sperre, also erst ab der Mindestpause eine Pause – und läuft mit der nächsten
+  Eingabe weiter. Solange eine App den Bildschirm wach hält (Videokonferenz, Präsentation),
+  zählt die Zeit weiter. Der Status im Menü zeigt „Keine Eingabe seit … – pausiert“.
+- Nachfrage nach langer Sperre (einschaltbar): Nach mindestens 30 Min. Sperre fragt beim
+  Entsperren eine Mitteilung mit Knöpfen, ob die Zeit Arbeit ohne Mac war (Meeting,
+  Telefonat, Networking, Sonstige Arbeit) oder schon Feierabend – dann endet der Tag mit
+  dem Sperren. Ohne Antwort bleibt es eine Pause. Nur in der installierten App.
+- Erinnerung an die Pause über die Mitteilungszentrale: bei 5:45 Std. Arbeit am Stück
+  „Noch 15 Min. bis 6 Std. ohne Pause“, bei 6 Std. „6 Std. ohne Pause gearbeitet“. Nach
+  einer Pause von mindestens 15 Min. beginnt die Zählung neu.
+- Export als CSV (Tabelle für Excel oder Numbers) und als PDF (Übersicht zum Drucken mit
+  Wochensummen und Hinweisen) – im Sichern-Dialog über „Format“ und auf der Kommandozeile
+  mit `--format md|csv|pdf` bzw. über die Endung von `-o`.
+- Import im Fenster „Aufzeichnungen“: Ablage › „Importieren …“ (⇧⌘I) liest einen
+  Markdown-Export ein. Vorher nennt ein Dialog Zeitraum und Zahl der Tage, die ersetzt
+  werden.
+- Widerrufen und Wiederholen (⌘Z, ⇧⌘Z) im Fenster „Aufzeichnungen“: Jede Korrektur aus dem
+  Inspektor und der Wochenansicht lässt sich zurücknehmen, bis zu 50 Schritte, solange das
+  Fenster offen ist. Das Menü „Bearbeiten“ nennt den Schritt („Widerrufen: Pause
+  entfernen“), danach wird der betroffene Tag gezeigt. Mehrere Schritte im Uhrzeit-Feld
+  zählen als eine Eingabe. Wiederhergestellt werden nur die Korrekturen des Tages –
+  inzwischen erfasste Zeit bleibt. In Dialogen und im Fenster „Einstellungen“ gilt ⌘Z wie
+  bisher dem Textfeld.
+- Filter für die Tabelle der Tage (Symbolleiste und Menü „Darstellung“): Zeitraum (dieser
+  oder letzter Monat, dieses oder letztes Jahr), „Nur Tage mit Hinweisen“ und „Nur
+  korrigierte Tage“, beliebig kombinierbar. Bei aktivem Filter ist das Symbol gefüllt, und
+  die Fußzeile zeigt „Filter: 5 von 33 Tagen“. Kennzahlen und Wochensummen zählen weiter
+  alle Tage. Wird ein ausgeblendeter Tag geöffnet, hebt das den Filter auf.
+- Wochenansicht: Ein Doppelklick auf einen Tageskopf oder Abschnitt öffnet den Tag in der
+  Ansicht „Tage“ mit dem Inspektor. Ein Rechtsklick zeigt ein Kontextmenü mit allem, was an
+  der Stelle geht (Tag bearbeiten, Uhrzeit kopieren, Arbeit ohne Mac eintragen oder
+  löschen). Die Klicks mit der linken Taste bleiben, wie sie waren.
+- Die Wochenansicht ist für VoiceOver zugänglich: eine Gruppe mit der Woche und ihren
+  Summen, darin je Tag ein Element mit Arbeitszeit, Pausen und Hinweisen sowie je Abschnitt,
+  Pause und Arbeit ohne Mac eines mit den Uhrzeiten. Bisher war das selbst gezeichnete
+  Raster für Bedienungshilfen leer.
+- Einstellung „Arbeitszeit von heute zeigen“: Die Arbeitszeit steht dann rechts neben dem
+  Symbol in der Menüleiste (z. B. `6:12`), mit gleich breiten Ziffern. Standard: aus.
+- Einstellung „Kurzbefehle“: ⌃⌥⌘P („Arbeit unterbrechen“ bzw. „Weiter arbeiten“) und ⌃⌥⌘A
+  („Aufzeichnungen“) wirken dann in jeder App, auch bei geschlossenem Menü. Standard: aus.
+  Die Kurzbefehle brauchen keine Freigabe unter „Bedienungshilfen“; ist eine
+  Tastenkombination schon vergeben, meldet Tagwerk das.
+- Die Wochenansicht nutzt den Platz: Das Raster zeigt nur die Stunden, in denen in der
+  Woche gearbeitet wurde, mit einer Stunde Luft davor und danach (mindestens neun Stunden,
+  in der laufenden Woche bis zur aktuellen Uhrzeit), und freie Tage ohne Eintrag als
+  schmale Spalten. Bisher standen immer der ganze Arbeitszeitrahmen (07–22 Uhr) und volle
+  Wochenendspalten da. Der Knopf mit dem Doppelpfeil neben „Heute“ schaltet auf den ganzen
+  Rahmen um; die Wahl bleibt gespeichert.
+- Info-Knöpfe (ⓘ) im Inspektor: Was Abwesenheit, Arbeitsbeginn, Pausen, Arbeit ohne Mac und
+  Feierabend bewirken, steht als Tooltip am Knopf neben der Überschrift und erscheint auf
+  Klick als kleines Fenster.
+- `--menu-screenshot <png>`: öffnet das Menü der Menüleiste und speichert es als Bild; den
+  Zustand setzt `TAGWERK_MENU_STATE=break|away|closed`. Der Reiter für
+  `--settings-screenshot` lässt sich mit `TAGWERK_SETTINGS_TAB=0…3` wählen.
+
+### Geändert
+- Salden sind überall farbig, grün im Plus und rot im Minus – nicht mehr nur im Menü: in
+  der Spalte „Saldo“ der Tabelle, in den Wochensummen, in den Kennzahlen (Woche, Monat,
+  Zeitkonto) und im Kopf der Wochenansicht. In der ausgewählten Zeile bleibt die Schrift
+  weiß.
+- Der Inspektor ist kürzer: Unter dem Datum stehen Arbeitszeit, Pausen und Saldo als drei
+  Zahlen nebeneinander statt in einer Zeile, die mitten in „Saldo +1:32 h“ umbrach. Die
+  erklärenden Absätze zu Pausen, Arbeit ohne Mac und automatisch Erfasstem sind in die
+  Info-Knöpfe gewandert; zur Abwesenheit steht nur noch dann ein Satz, wenn eine
+  eingetragen ist.
+- Einstellungen › Erfassung: „Arbeit ohne Mac: mindestens 15 Minuten“ sagt jetzt selbst,
+  dass es um die Mindestdauer geht; der Text darunter ist kürzer.
+- Die Mindestdauer für Arbeit ohne Mac hängt nicht mehr an der Mindestpause. Bisher durfte
+  sie nie darunter liegen und stieg mit ihr – ein Telefonat von zehn Minuten in einer
+  langen Mittagspause oder vor dem Arbeitsbeginn ließ sich so nicht eintragen, obwohl es
+  mit der Frage, ab wann eine Sperre eine Pause ist, nichts zu tun hat. Jetzt sind 1 bis
+  240 Minuten möglich, der Standard bleibt 15; die Pfeile gehen in Fünferschritten. Für
+  gespeicherte Werte und Tage ändert sich nichts.
+- Die Bilder im README sind neu und zeigen den aktuellen Stand: das Menü mit Zeitkonto,
+  die Ansicht „Woche“ im Fenster „Aufzeichnungen“ und alle vier Reiter der Einstellungen,
+  die jetzt auch einzeln beschrieben sind.
+- `--screenshot`, `--week-screenshot` und `--settings-screenshot` holen das Bild jetzt vom
+  Fensterserver, statt die Ansicht selbst zu zeichnen. Bisher fehlte, was macOS erst beim
+  Zusammensetzen ergänzt: Das gewählte Segment von „Tage | Woche“ und die Reiterleiste der
+  Einstellungen blieben leer. Bei gesperrtem Bildschirm gibt es kein solches Bild; dann
+  wird wie bisher gezeichnet.
+- Das Fenster „Einstellungen“ hat vier Reiter – Allgemein, Arbeitszeit, Erfassung und
+  Mitteilungen – statt einer langen Liste.
+- Die Mitteilungen zur Höchstarbeitszeit und zur Pause lassen sich in den Einstellungen
+  einzeln abschalten; die Hinweise im Menü und im Fenster bleiben davon unberührt.
+- Das Fenster „Aufzeichnungen“ ist mindestens 940 Punkte breit (bisher 780), damit die fünf
+  Kennzahlen nebeneinander passen.
+- „Pause als Arbeitszeit zählen“ in der Menüleiste fragt den Grund ab: Jede Pause hat ein
+  Untermenü mit Meeting, Telefonat, Networking und Sonstiges – wie „Ohne Mac
+  weiterarbeiten“ und die Dialoge im Fenster „Aufzeichnungen“. Bisher wurde die Pause ohne
+  Grund eingetragen.
+- Hinweise zu einer abgelehnten Eingabe im Inspektor (z. B. „Eine Pause dauert mindestens
+  15 Min.“) stehen jetzt direkt über den Feldern der Pause bzw. der Arbeit ohne Mac statt
+  ganz am Ende des Inspektors, wo sie meist außerhalb des sichtbaren Bereichs lagen. Ein
+  Fehler beim Speichern erscheint als Dialog am Fenster.
+- Der Dialog „Arbeit ohne Mac eintragen“ in der Wochenansicht zeigt den Hinweis zu einer
+  abgelehnten Eingabe ebenfalls rot direkt über den Feldern; der erklärende Text darüber
+  bleibt stehen. Bisher ersetzte der Hinweis den erklärenden Text in normaler Schrift.
+- Arbeitsbeginn und Feierabend: Für Arbeit ohne Mac gilt jetzt die letzte Angabe, wie schon
+  bei Pausen. Wer den Arbeitsbeginn später oder den Feierabend früher festlegt, kürzt Arbeit
+  ohne Mac davor bzw. danach – ein Termin um 8:00 steht einem Beginn um 9:20 nicht mehr im
+  Weg. Der Inspektor weist darauf hin (⌘Z nimmt es zurück), aus dem Menü kommt eine
+  Mitteilung mit dem entfallenen Termin. Wird die Arbeit ohne Mac erst nach Beginn bzw.
+  Feierabend eingetragen, zählt sie wie bisher auch davor bzw. danach. Bisher gewann immer
+  die Arbeit ohne Mac, egal in welcher Reihenfolge.
+- Hinweise auf Regelverstöße und Fehlermeldungen im Menü der Menüleiste brechen um, statt
+  das Menü zu verbreitern: Sie sind höchstens so breit wie die breiteste Zeile mit Status
+  und Kennzahlen (mindestens 280 Punkte), Folgezeilen stehen eingerückt unter dem Text.
+- Die Tabelle der Tage zeigt Warnschild und Stift nebeneinander, wenn ein Tag sowohl
+  Hinweise hat als auch manuell korrigiert ist; bisher verdrängte das Warnschild den
+  Stift. Beide Symbole haben feste Plätze und einen eigenen Tooltip. Dafür ist die
+  Symbolspalte breiter; gespeicherte Spaltenbreiten der Tabelle werden einmalig
+  zurückgesetzt.
+- Texte zum Wochenende richtiggestellt: Der Arbeitszeitrahmen gilt an jedem Tag, und
+  Arbeit am Wochenende zählt ohne Soll als Mehrarbeit. Die Einstellungen, der Hinweis
+  („Arbeit am Wochenende – zählt ohne Soll als Mehrarbeit“) und die Fußzeile im Fenster
+  „Aufzeichnungen“ behaupteten bisher, außerhalb von Mo–Fr werde nichts gezählt. An der
+  Berechnung ändert sich nichts.
 
 ## [1.3.0] - 2026-11-18
 

@@ -5,31 +5,35 @@
 //! eingestellten Mindestdauer).
 
 use crate::about;
-use crate::day::{self, fmt_clock, Activity, Mode, Span};
+use crate::day::{self, fmt_clock, Activity, Mode, Span, WorkBlock};
 use crate::glyphs;
+use crate::hotkey;
 use crate::login_item;
 use crate::notify;
+use crate::palette::{self, green, indigo, orange, red};
 use crate::records;
-use crate::rules::{self, IconSet, LimitWatch};
+use crate::rules::{self, BreakWatch, IconSet, LimitWatch};
 use crate::settings_window;
+use crate::snapshot;
 use crate::store;
 use crate::tracker::{PauseReason, Tracker};
 use crate::week_view;
-use chrono::{DateTime, Duration, Local, NaiveDateTime, TimeZone};
+use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, TimeZone};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication,
     NSApplicationActivationPolicy, NSAttributedStringAttachmentConveniences, NSColor, NSDatePicker,
     NSDatePickerElementFlags, NSDatePickerStyle, NSFont, NSFontAttributeName, NSFontWeightRegular,
-    NSFontWeightSemibold, NSForegroundColorAttributeName, NSImage, NSImageSymbolConfiguration, NSMenu, NSMenuDelegate, NSMenuItem,
-    NSStatusBar, NSStatusItem, NSTextAttachment, NSTextField, NSVariableStatusItemLength, NSView,
+    NSFontWeightSemibold, NSForegroundColorAttributeName, NSImage, NSImageSymbolConfiguration, NSLineBreakMode, NSMenu,
+    NSMenuDelegate, NSMenuItem, NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSStatusBar, NSStatusItem,
+    NSTextAttachment, NSTextField, NSVariableStatusItemLength, NSView,
     NSWorkspace,
 };
 use objc2_foundation::{
     NSArray, NSAttributedString, NSDate, NSDictionary, NSDistributedNotificationCenter, NSMutableAttributedString,
-    NSNotification, NSNotificationCenter, NSPoint, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
+    NSNotification, NSNotificationCenter, NSPoint, NSRange, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
     NSTimer,
 };
 use std::cell::RefCell;
@@ -58,13 +62,18 @@ struct MenuItems {
     pauses: InfoLine,
     first: InfoLine,
     balance: InfoLine,
+    /// Stand des Zeitkontos.
+    account: InfoLine,
     /// Hinweise zu Regelverstößen (so viele, wie es Arten von Hinweisen gibt).
     hints: Vec<InfoLine>,
+    /// Fehler beim Speichern oder Lesen der Datenbank (sonst ausgeblendet).
+    error: InfoLine,
     /// „Arbeit unterbrechen“, „Weiter arbeiten“ bzw. „Zurück am Mac“.
     pause: Retained<NSMenuItem>,
     /// „Ohne Mac weiterarbeiten“ (mit Untermenü Meeting, Telefonat, Sonstiges).
     away: Retained<NSMenuItem>,
-    /// „Pause als Arbeitszeit zählen“ mit den Pausen von heute im Untermenü.
+    /// „Pause als Arbeitszeit zählen“ mit den Pausen von heute im Untermenü; jede Pause
+    /// bietet die Gründe an (Meeting, Telefonat …).
     count_pause: Retained<NSMenuItem>,
     count_pause_menu: Retained<NSMenu>,
     /// Pausen, die das Untermenü gerade zeigt.
@@ -97,9 +106,28 @@ struct AppState {
     last_icon: Option<IconKind>,
     /// Zuletzt gezeigtes Symbol in der Menüleiste (Zustand, Symbolsatz, Höhe).
     button_icon: Option<(IconKind, IconSet, u32)>,
+    /// Zuletzt gezeigter Text neben dem Symbol (leer = keiner).
+    button_title: Option<String>,
+    /// Zuletzt übernommener Stand der Einstellung „Globale Kurzbefehle“.
+    hotkeys: Option<bool>,
     /// Mitteilungen bei 9:45 und 10 Std. Arbeit.
     limit: LimitWatch,
+    /// Erinnerungen an die Pause bei 5:45 und 6 Std. Arbeit am Stück.
+    breaks: BreakWatch,
+    /// Sperre, zu der gerade nachgefragt wird (Tag, von, bis) – darauf bezieht sich die Antwort.
+    asked_lock: Option<(NaiveDate, i64, i64)>,
     db: store::Db,
+    /// Die Datenbank ließ sich zuletzt nicht schreiben bzw. nicht lesen (mit dem Text für das
+    /// Menü). Solange das Schreiben scheitert, ist die Zeit seit dem letzten Speichern nur im
+    /// Speicher der App.
+    db_error: Option<(DbFault, String)>,
+}
+
+/// Wobei die Datenbank versagt hat – ein Fehler gilt, bis genau das wieder gelingt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DbFault {
+    Read,
+    Write,
 }
 
 thread_local! {
@@ -148,13 +176,7 @@ define_class!(
         /// „Arbeit unterbrechen“ ↔ „Weiter arbeiten“; bei Arbeit ohne Mac „Zurück am Mac“.
         #[unsafe(method(togglePause:))]
         fn toggle_pause(&self, _sender: Option<&AnyObject>) {
-            act(|s, t| {
-                if s.tracker.is_running() {
-                    s.tracker.take_break(t);
-                } else {
-                    s.tracker.start(t);
-                }
-            });
+            toggle_pause();
         }
 
         /// „Ohne Mac weiterarbeiten“ (Tag = Art der Arbeit).
@@ -166,13 +188,14 @@ define_class!(
             });
         }
 
-        /// Eine Pause von heute als Arbeitszeit zählen (Tag = Beginn der Pause).
+        /// Eine Pause von heute als Arbeitszeit zählen (Tag = Beginn der Pause und Grund,
+        /// siehe [`count_pause_tag`]).
         #[unsafe(method(countPause:))]
         fn count_pause(&self, sender: Option<&NSMenuItem>) {
-            let Some(from) = sender.map(|s| s.tag() as i64) else { return };
+            let Some((from, activity)) = sender.map(|s| count_pause_from_tag(s.tag())) else { return };
             act(|s, t| {
                 if let Some(p) = s.tracker.pauses_today(t).into_iter().find(|p| p.from == from) {
-                    s.tracker.add_work(t.date(), p.from, p.to, "");
+                    s.tracker.add_work(t.date(), p.from, p.to, activity.note());
                 }
             });
         }
@@ -181,7 +204,9 @@ define_class!(
         fn set_start(&self, sender: Option<&NSMenuItem>) {
             let tag = sender.map(|s| s.tag()).unwrap_or(0);
             if tag == TAG_RESET {
-                act(|s, t| s.tracker.set_start(t, None));
+                act(|s, t| {
+                    s.tracker.set_start(t, None);
+                });
                 return;
             }
             let initial = with_state(|s| s.tracker.today(now()).first_start).flatten();
@@ -193,7 +218,10 @@ define_class!(
             ) else {
                 return;
             };
-            act(|s, t| s.tracker.set_start(t, Some(secs(at))));
+            act(|s, t| {
+                let cut = s.tracker.set_start(t, Some(secs(at)));
+                notify_cut_work(&cut, "vor dem Arbeitsbeginn");
+            });
         }
 
         #[unsafe(method(closeDay:))]
@@ -207,7 +235,10 @@ define_class!(
             ) else {
                 return;
             };
-            act(|s, t| s.tracker.close_day(t, secs(at)));
+            act(|s, t| {
+                let cut = s.tracker.close_day(t, secs(at));
+                notify_cut_work(&cut, "nach dem Feierabend");
+            });
         }
 
         #[unsafe(method(reopenDay:))]
@@ -249,16 +280,26 @@ define_class!(
                 let mut dirty = s.sync_from_db(t);
                 dirty |= s.tracker.roll_over(t);
                 let locked = screen_locked();
+                // Inaktivität (wenn eingeschaltet): so lange keine Eingabe, dass der Mac als
+                // verlassen gilt – außer etwas hält den Bildschirm wach (Videokonferenz, Film).
+                let limit = s.tracker.settings.idle_secs;
+                let idle = if limit > 0 && !locked && !display_kept_awake() { idle_secs() } else { 0 };
+                let left_alone = limit > 0 && idle >= limit;
                 if s.tracker.is_running() && locked {
                     // Sicherheitsnetz: falls ein Sperr-Ereignis verpasst wurde.
                     dirty |= s.tracker.stop(t, PauseReason::Locked);
+                } else if s.tracker.is_running() && left_alone {
+                    // Rückwirkend ab der letzten Eingabe, wie eine Sperre.
+                    dirty |= s.tracker.go_idle(t - Duration::seconds(idle));
                 } else if !s.tracker.is_running()
                     && !locked
                     && !s.tracker.on_break()
                     && !s.tracker.on_away()
+                    && !(s.tracker.on_idle() && left_alone)
                     && s.tracker.paused_since.is_some_and(|p| p.date() == t.date())
                 {
-                    // Entsperrt, aber nicht erfasst (z. B. Feierabend im Fenster zurückgenommen).
+                    // Entsperrt, aber nicht erfasst (z. B. Feierabend im Fenster zurückgenommen
+                    // oder zurück nach Inaktivität).
                     dirty |= s.tracker.start(t);
                 }
                 if dirty || (s.tracker.is_running() && s.last_save.elapsed().as_secs() >= 60) {
@@ -347,11 +388,47 @@ fn resume_auto() {
         let t = now();
         s.sync_from_db(t);
         s.tracker.roll_over(t);
+        let locked_since = s.tracker.locked_since();
         if s.tracker.start(t) {
             s.persist(t);
+            if let Some(from) = locked_since {
+                s.ask_about_lock(from, t);
+            }
         }
         s.refresh();
     });
+}
+
+/// Arbeitsbeginn oder Feierabend aus dem Menü hat Arbeit ohne Mac gekürzt (die letzte Angabe
+/// gilt): Das meldet eine Mitteilung, denn das Menü ist dann schon zu. `where_` sagt, wo die
+/// Arbeit lag („vor dem Arbeitsbeginn“).
+fn notify_cut_work(cut: &[WorkBlock], where_: &str) {
+    if cut.is_empty() {
+        return;
+    }
+    let what: Vec<String> = cut.iter().map(WorkBlock::describe).collect();
+    notify::post_text(
+        "work-cut",
+        "Arbeit ohne Mac entfällt",
+        &format!("{} lag {where_} und zählt nicht mehr – die letzte Angabe gilt.", what.join(", ")),
+    );
+}
+
+/// Antwort auf die Nachfrage nach langer Sperre: Die Zeit war Arbeit ohne Mac – oder schon
+/// Feierabend (dann endet der Tag mit dem Sperren, und die Erfassung hält an).
+fn lock_answered(answer: notify::LockAnswer) {
+    act(|s, t| {
+        let Some((date, from, to)) = s.asked_lock.take() else { return };
+        match answer {
+            notify::LockAnswer::Work(activity) => s.tracker.add_work(date, from, to, activity.note()),
+            notify::LockAnswer::CloseDay if date == t.date() => {
+                let cut = s.tracker.close_day(t, from);
+                notify_cut_work(&cut, "nach dem Feierabend");
+            }
+            notify::LockAnswer::CloseDay => {}
+        }
+    });
+    records::reload_if_open();
 }
 
 /// Stand für die Wochenansicht in „Aufzeichnungen“ (inklusive laufender Periode).
@@ -488,6 +565,23 @@ fn chosen_time(tag: isize, message: &str, info: &str, initial: Option<i64>) -> O
 }
 
 impl AppState {
+    /// Nach dem Entsperren: Bei langer Sperre nachfragen, was die Zeit war (wenn in den
+    /// Einstellungen an). Nur für Sperren von heute, die im Arbeitszeitrahmen begonnen haben –
+    /// nicht für die Nacht davor.
+    fn ask_about_lock(&mut self, from: NaiveDateTime, to: NaiveDateTime) {
+        let settings = &self.tracker.settings;
+        let long = (to - from).num_seconds() >= settings.ask_after();
+        if !settings.ask_after_lock || !long || from.date() != to.date() || !settings.in_frame(secs(from)) {
+            return;
+        }
+        let span = Span::new(secs(from), secs(to));
+        let asked = notify::ask_lock(
+            &format!("Gesperrt von {}", pause_title(span)),
+            "Das zählt als Pause. War es Arbeit ohne Mac oder schon Feierabend?",
+        );
+        self.asked_lock = asked.then_some((from.date(), span.from, span.to));
+    }
+
     /// Übernimmt Änderungen, die das Fenster „Aufzeichnungen“ (oder `--import`) in die
     /// Datenbank geschrieben hat. Gibt `true` zurück, wenn neu eingelesen wurde.
     fn sync_from_db(&mut self, t: NaiveDateTime) -> bool {
@@ -497,21 +591,52 @@ impl AppState {
         match self.db.load().and_then(|days| Ok((days, self.db.load_settings()?))) {
             Ok((days, settings)) => {
                 self.tracker.replace_days(days, settings, t);
+                self.clear_db_error(DbFault::Read);
                 true
             }
             Err(e) => {
-                eprintln!("Tagwerk: Datenbank konnte nicht neu gelesen werden: {e}");
+                // Beim nächsten Mal noch einmal versuchen (z. B. war die Datenbank gesperrt).
+                self.db.recheck_external_change();
+                self.report_db_error(DbFault::Read, &e.to_string());
                 false
             }
         }
     }
 
     fn persist(&mut self, t: NaiveDateTime) {
-        if let Err(e) = self.tracker.save(&mut self.db, t) {
-            eprintln!("Tagwerk: Speichern fehlgeschlagen: {e}");
+        match self.tracker.save(&mut self.db, t) {
+            // Gespeichert wird immer der ganze Stand – damit ist nichts verloren gegangen.
+            Ok(()) => self.clear_db_error(DbFault::Write),
+            Err(e) => self.report_db_error(DbFault::Write, &e.to_string()),
         }
         store::write_status(self.tracker.status(t));
         self.last_save = Instant::now();
+    }
+
+    /// Fehler der Datenbank merken (für das Menü) und beim ersten Auftreten melden – sonst
+    /// bemerkt ihn niemand: Die App läuft ohne Fenster und ohne Terminal.
+    fn report_db_error(&mut self, fault: DbFault, detail: &str) {
+        let (what, consequence) = match fault {
+            DbFault::Write => (
+                "Speichern fehlgeschlagen",
+                "Die Arbeitszeit wird weiter gezählt, aber erst gesichert, wenn das Speichern wieder gelingt.",
+            ),
+            DbFault::Read => (
+                "Die Datenbank konnte nicht gelesen werden",
+                "Änderungen aus dem Fenster „Aufzeichnungen“ fehlen, bis das Lesen wieder gelingt.",
+            ),
+        };
+        eprintln!("Tagwerk: {what}: {detail}");
+        if self.db_error.is_none() {
+            notify::post_text("db-error", &format!("Tagwerk: {what}"), &format!("{detail}. {consequence}"));
+        }
+        self.db_error = Some((fault, db_error_text(what, detail)));
+    }
+
+    fn clear_db_error(&mut self, fault: DbFault) {
+        if self.db_error.as_ref().is_some_and(|(f, _)| *f == fault) {
+            self.db_error = None;
+        }
     }
 
     fn refresh(&mut self) {
@@ -533,8 +658,11 @@ impl AppState {
         }
         self.items.worked.set(&rich(&parts));
         let balance = rules::fmt_balance(info.week_balance);
-        let tone = if info.week_balance < -59 { Tone::Bad } else { Tone::Good };
+        let tone = if palette::is_minus(info.week_balance) { Tone::Bad } else { Tone::Good };
         self.items.balance.set(&rich(&[("Saldo diese Woche:  ", Tone::Label), (&balance, tone)]));
+        let account = rules::fmt_balance(info.account);
+        let tone = if palette::is_minus(info.account) { Tone::Bad } else { Tone::Good };
+        self.items.account.set(&rich(&[("Zeitkonto:  ", Tone::Label), (&account, tone)]));
         let pauses = store::fmt_hm(info.pause_secs);
         self.items.pauses.set(&rich(&[("Pausen heute:  ", Tone::Label), (&pauses, Tone::Value)]));
         let first = info.first_start.map(|f| format!("{} Uhr", fmt_clock(f)));
@@ -543,10 +671,24 @@ impl AppState {
             parts.push(("  (manuell)", Tone::Muted));
         }
         self.items.first.set(&rich(&parts));
+        // Fehler und Hinweise brechen um, statt das Menü zu verbreitern: höchstens so breit wie
+        // die breiteste Zeile mit Status und Kennzahlen.
+        let items = &self.items;
+        let wrap = [&items.status, &items.worked, &items.pauses, &items.first, &items.balance, &items.account]
+            .iter()
+            .map(|line| line.text_width())
+            .fold(InfoLine::MIN_WRAP, f64::max);
+        match &self.db_error {
+            Some((_, text)) => {
+                self.items.error.set_wrapped(&error_title(text), wrap);
+                self.items.error.item.setHidden(false);
+            }
+            None => self.items.error.item.setHidden(true),
+        }
         for (i, line) in self.items.hints.iter().enumerate() {
             match info.warnings.get(i) {
                 Some(w) => {
-                    line.set(&warning_title(&w.text()));
+                    line.set_wrapped(&warning_title(&w.text()), wrap);
                     line.item.setHidden(false);
                 }
                 None => line.item.setHidden(true),
@@ -572,8 +714,13 @@ impl AppState {
 
         let closed = matches!(info.mode, Mode::Closed(_));
         let away = self.tracker.on_away();
-        if let Some(alert) = self.limit.update(t.date(), info.work_secs, running || away) {
+        // Die Stände laufen immer mit; gemeldet wird nur, was in den Einstellungen an ist.
+        let (notify_limit, notify_break) = (self.tracker.settings.notify_limit, self.tracker.settings.notify_break);
+        if let Some(alert) = self.limit.update(t.date(), info.work_secs, running || away).filter(|_| notify_limit) {
             notify::post(alert);
+        }
+        if let Some(alert) = self.breaks.update(t.date(), info.stretch_secs, running || away).filter(|_| notify_break) {
+            notify::post_text(alert.id(), &alert.title(), &alert.body());
         }
         self.items.pause.setHidden(closed);
         let (title, symbol) = if running {
@@ -592,9 +739,19 @@ impl AppState {
         if pauses != self.items.count_pause_list {
             self.items.count_pause_menu.removeAllItems();
             for p in &pauses {
-                let title = pause_title(*p);
-                let item = menu_item(mtm, &title, Some(sel!(countPause:)), "", &self.items.controller);
-                item.setTag(p.from as isize);
+                // Je Pause ein Untermenü mit dem Grund – wie bei „Ohne Mac weiterarbeiten“.
+                let reasons = NSMenu::new(mtm);
+                reasons.setAutoenablesItems(false);
+                for activity in Activity::ALL {
+                    let title = activity.label();
+                    let it = menu_item(mtm, title, Some(sel!(countPause:)), "", &self.items.controller);
+                    it.setTag(count_pause_tag(p.from, activity));
+                    set_item_symbol(&it, activity_symbol(activity), title);
+                    reasons.addItem(&it);
+                }
+                let item = menu_item(mtm, &pause_title(*p), None, "", &self.items.controller);
+                item.setEnabled(true);
+                item.setSubmenu(Some(&reasons));
                 self.items.count_pause_menu.addItem(&item);
             }
             self.items.count_pause_list = pauses;
@@ -616,11 +773,14 @@ impl AppState {
                 IconKind::Outside => "außerhalb des Arbeitszeitrahmens",
                 IconKind::Closed => "Feierabend",
             };
-            let tip = format!(
+            let mut tip = format!(
                 "Tagwerk – {state}\nHeute gearbeitet: {}\nPausen: {}",
                 store::fmt_hm(info.work_secs),
                 store::fmt_hm(info.pause_secs)
             );
+            if let Some((_, text)) = &self.db_error {
+                tip.push_str(&format!("\n{text}"));
+            }
             button.setToolTip(Some(&ns(&tip)));
             let set = self.tracker.settings.icon_set;
             let height = icon_height(&self.status_item);
@@ -628,7 +788,23 @@ impl AppState {
                 set_icon(&button, icon, set, height);
                 self.button_icon = Some((icon, set, height));
             }
+            // Auf Wunsch die Arbeitszeit von heute neben dem Symbol.
+            let title = if self.tracker.settings.show_time { bar_time(info.work_secs) } else { String::new() };
+            if self.button_title.as_ref() != Some(&title) {
+                set_bar_title(&button, &title);
+                self.button_title = Some(title);
+            }
             self.last_icon = Some(icon);
+        }
+
+        // Globale Kurzbefehle nach den Einstellungen ein- oder ausschalten.
+        let want = self.tracker.settings.hotkeys;
+        if self.hotkeys != Some(want) {
+            self.hotkeys = Some(want);
+            if let Err(e) = hotkey::set_enabled(want, run_hotkey) {
+                eprintln!("Tagwerk: {e}");
+                notify::post_text("hotkeys", "Tagwerk: Kurzbefehle nicht verfügbar", &e);
+            }
         }
     }
 
@@ -676,6 +852,9 @@ fn status_line(tracker: &Tracker, t: NaiveDateTime) -> (String, IconKind) {
         (store::Status::Running, _) => ("Zeiterfassung läuft".to_string(), IconKind::Running),
         _ => (
             match tracker.paused_since {
+                Some(p) if p.date() == t.date() && tracker.on_idle() => {
+                    format!("Keine Eingabe seit {} Uhr – pausiert", p.format("%H:%M"))
+                }
                 Some(p) if p.date() == t.date() => format!("Zeiterfassung pausiert seit {} Uhr", p.format("%H:%M")),
                 _ => "Zeiterfassung pausiert".to_string(),
             },
@@ -702,6 +881,29 @@ fn away_text(since: NaiveDateTime, t: NaiveDateTime, activity: Activity) -> Stri
 fn pause_title(p: Span) -> String {
     let len = records::shown_len(p.from, p.to);
     format!("{} – {} Uhr  ({})", fmt_clock(p.from), fmt_clock(p.to), fmt_minutes(len))
+}
+
+/// Menü-Tag unter „Pause als Arbeitszeit zählen“: Beginn der Pause (Sekunden seit
+/// Mitternacht) und Grund in einer Zahl.
+fn count_pause_tag(from: i64, activity: Activity) -> isize {
+    from as isize * COUNT_PAUSE_REASONS + activity.id()
+}
+
+fn count_pause_from_tag(tag: isize) -> (i64, Activity) {
+    ((tag / COUNT_PAUSE_REASONS) as i64, Activity::from_id(tag % COUNT_PAUSE_REASONS))
+}
+
+/// Platz für den Grund im Menü-Tag (mehr als es Gründe gibt).
+const COUNT_PAUSE_REASONS: isize = 8;
+
+/// SF-Symbol für den Grund von Arbeit ohne Mac.
+fn activity_symbol(activity: Activity) -> &'static str {
+    match activity {
+        Activity::Meeting => "person.2",
+        Activity::Call => "phone",
+        Activity::Networking => "person.3",
+        Activity::Other => "ellipsis.circle",
+    }
 }
 
 /// `55 Min.` bzw. `1:20 h`
@@ -761,39 +963,6 @@ enum Tone {
     Status(fn() -> Retained<NSColor>),
 }
 
-/// Farbe, die im hellen Erscheinungsbild einen dunkleren, im dunklen den hellen
-/// Systemton nimmt – die Systemfarben allein sind auf hellem Grund zu kontrastarm.
-fn adaptive(light: (f64, f64, f64), dark: fn() -> Retained<NSColor>) -> Retained<NSColor> {
-    let light = NSColor::colorWithSRGBRed_green_blue_alpha(light.0, light.1, light.2, 1.0);
-    let dark = dark();
-    let provider = block2::RcBlock::new(move |appearance: std::ptr::NonNull<NSAppearance>| {
-        let names = NSArray::from_slice(&[unsafe { NSAppearanceNameAqua }, unsafe { NSAppearanceNameDarkAqua }]);
-        let best = unsafe { appearance.as_ref() }.bestMatchFromAppearancesWithNames(&names);
-        let is_dark = best.is_some_and(|n| &*n == unsafe { NSAppearanceNameDarkAqua });
-        // Beide Farben gehören dem Block und leben so lange wie die dynamische Farbe.
-        std::ptr::NonNull::from(if is_dark { &*dark } else { &*light })
-    });
-    unsafe { NSColor::colorWithName_dynamicProvider(None, &provider) }
-}
-
-fn green() -> Retained<NSColor> {
-    adaptive((0.09, 0.50, 0.20), NSColor::systemGreenColor)
-}
-
-fn orange() -> Retained<NSColor> {
-    adaptive((0.74, 0.36, 0.0), NSColor::systemOrangeColor)
-}
-
-/// Feierabend: Indigo statt Blau, damit der Text auf der (meist blauen) Markierung
-/// beim Überfahren mit der Maus lesbar bleibt.
-fn indigo() -> Retained<NSColor> {
-    adaptive((0.30, 0.24, 0.78), NSColor::systemIndigoColor)
-}
-
-fn red() -> Retained<NSColor> {
-    adaptive((0.78, 0.12, 0.12), NSColor::systemRedColor)
-}
-
 /// Menütitel aus mehreren Teilen mit eigener Farbe und Schrift.
 fn rich(parts: &[(&str, Tone)]) -> Retained<NSAttributedString> {
     let size = NSFont::menuFontOfSize(0.0).pointSize();
@@ -837,10 +1006,33 @@ fn warning_color() -> Retained<NSColor> {
     NSColor::systemOrangeColor()
 }
 
+/// Längste Fehlerzeile im Menü (die Zeile bestimmt dessen Breite).
+const DB_ERROR_MAX: usize = 90;
+
+/// `Speichern fehlgeschlagen: database is locked` – auf eine Zeile und eine Länge gebracht,
+/// die das Menü nicht sprengt.
+fn db_error_text(what: &str, detail: &str) -> String {
+    let text = format!("{what}: {}", detail.split_whitespace().collect::<Vec<_>>().join(" "));
+    if text.chars().count() <= DB_ERROR_MAX {
+        return text;
+    }
+    let cut: String = text.chars().take(DB_ERROR_MAX - 1).collect();
+    format!("{}…", cut.trim_end())
+}
+
+/// Fehlerzeile im Menü: rot mit Warnschild.
+fn error_title(text: &str) -> Retained<NSAttributedString> {
+    marked_title(text, &red())
+}
+
 /// Menütitel in Warnfarbe mit vorangestelltem Warnschild. Das Schild steckt im Text
 /// (nicht im Bild des Menüeintrags), weil macOS Bilder in Menüs nicht immer anzeigt.
 fn warning_title(text: &str) -> Retained<NSAttributedString> {
-    let color = warning_color();
+    marked_title(text, &warning_color())
+}
+
+/// Menütitel in der Farbe `color` mit vorangestelltem Warnschild in derselben Farbe.
+fn marked_title(text: &str, color: &Retained<NSColor>) -> Retained<NSAttributedString> {
     let font = NSFont::menuFontOfSize(0.0);
     let keys = unsafe { [NSForegroundColorAttributeName, NSFontAttributeName] };
     let values: [Retained<AnyObject>; 2] = [
@@ -849,7 +1041,8 @@ fn warning_title(text: &str) -> Retained<NSAttributedString> {
     ];
     let attrs = NSDictionary::from_retained_objects(&keys, &values);
     let title = NSMutableAttributedString::new();
-    if let Some(img) = warning_symbol(&color, font.pointSize()) {
+    let mut indent = 0.0;
+    if let Some(img) = warning_symbol(color, font.pointSize()) {
         let attachment = NSTextAttachment::new();
         let size = img.size();
         // Auf die Grundlinie setzen und mittig zu den Großbuchstaben ausrichten.
@@ -858,8 +1051,17 @@ fn warning_title(text: &str) -> Retained<NSAttributedString> {
         attachment.setImage(Some(&img));
         title.appendAttributedString(&NSAttributedString::attributedStringWithAttachment(&attachment));
         text_with(&title, "\u{2002}", &attrs);
+        // Warnschild und Halbgeviert (halbe Schriftgröße) davor.
+        indent = size.width + font.pointSize() / 2.0;
     }
     text_with(&title, text, &attrs);
+    // Bricht die Zeile um, stehen die Folgezeilen unter dem Text, nicht unter dem Warnschild.
+    let style = NSMutableParagraphStyle::new();
+    style.setHeadIndent(indent);
+    style.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+    unsafe {
+        title.addAttribute_value_range(NSParagraphStyleAttributeName, &style, NSRange::new(0, title.length()));
+    }
     Retained::into_super(title)
 }
 
@@ -897,7 +1099,40 @@ fn icon_height(item: &NSStatusItem) -> u32 {
 fn set_icon(button: &objc2_app_kit::NSStatusBarButton, kind: IconKind, set: IconSet, height: u32) {
     let img = glyphs::image(set, kind.glyph(), height as f64, 0.0, kind.symbol().1);
     button.setImage(Some(&img));
-    button.setTitle(&ns(""));
+}
+
+/// Arbeitszeit für die Menüleiste: `6:12` (ohne Einheit, damit sie wenig Platz braucht).
+fn bar_time(work_secs: i64) -> String {
+    let m = work_secs.max(0) / 60;
+    format!("{}:{:02}", m / 60, m % 60)
+}
+
+/// Text rechts neben dem Symbol (leer = nur das Symbol). Gleich breite Ziffern, damit die
+/// Nachbarn in der Menüleiste nicht jede Minute wandern.
+fn set_bar_title(button: &objc2_app_kit::NSStatusBarButton, title: &str) {
+    let size = NSFont::menuBarFontOfSize(0.0).pointSize();
+    button.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(size, unsafe { NSFontWeightRegular })));
+    button.setImagePosition(if title.is_empty() { objc2_app_kit::NSCellImagePosition::ImageOnly } else { objc2_app_kit::NSCellImagePosition::ImageLeading });
+    button.setTitle(&ns(title));
+}
+
+/// Ein globaler Kurzbefehl wurde gedrückt.
+fn run_hotkey(action: hotkey::Action) {
+    match action {
+        hotkey::Action::TogglePause => toggle_pause(),
+        hotkey::Action::ShowRecords => open_records(),
+    }
+}
+
+/// „Arbeit unterbrechen“ ↔ „Weiter arbeiten“; bei Arbeit ohne Mac „Zurück am Mac“.
+fn toggle_pause() {
+    act(|s, t| {
+        if s.tracker.is_running() {
+            s.tracker.take_break(t);
+        } else {
+            s.tracker.start(t);
+        }
+    });
 }
 
 // ---------- Bildschirm gesperrt? ----------
@@ -921,6 +1156,45 @@ pub fn screen_locked() -> bool {
         let on_console: Option<Retained<AnyObject>> = msg_send![&*dict, objectForKey: &*console_key];
         let off_console = on_console.map(|v| -> bool { !msg_send![&*v, boolValue] }).unwrap_or(false);
         is_locked || off_console
+    }
+}
+
+// ---------- Inaktivität ----------
+
+#[link(name = "CoreGraphics", kind = "framework")]
+extern "C" {
+    fn CGEventSourceSecondsSinceLastEventType(state: i32, event_type: u32) -> f64;
+}
+
+#[link(name = "IOKit", kind = "framework")]
+extern "C" {
+    fn IOPMCopyAssertionsStatus(status: *mut *mut AnyObject) -> i32;
+}
+
+/// Sekunden seit der letzten Eingabe (Tastatur, Maus, Trackpad) in dieser Sitzung. Braucht
+/// keine Freigabe: Abgefragt wird nur die Zeit, keine Eingabe selbst.
+fn idle_secs() -> i64 {
+    // kCGEventSourceStateCombinedSessionState, kCGAnyInputEventType
+    let secs = unsafe { CGEventSourceSecondsSinceLastEventType(0, u32::MAX) };
+    if secs.is_finite() { secs.max(0.0) as i64 } else { 0 }
+}
+
+/// Hält gerade eine App den Bildschirm wach (Videokonferenz, Präsentation, Film)? Dann sitzt
+/// vermutlich jemand davor, auch ohne Eingabe – der Mac gilt nicht als verlassen.
+fn display_kept_awake() -> bool {
+    unsafe {
+        let mut raw: *mut AnyObject = std::ptr::null_mut();
+        if IOPMCopyAssertionsStatus(&mut raw) != 0 {
+            return false;
+        }
+        let Some(status) = Retained::from_raw(raw) else { return false };
+        ["PreventUserIdleDisplaySleep", "NoDisplaySleepAssertion"].iter().any(|name| {
+            let level: Option<Retained<AnyObject>> = msg_send![&*status, objectForKey: &*ns(name)];
+            level.is_some_and(|v| -> bool {
+                let n: i32 = msg_send![&*v, intValue];
+                n > 0
+            })
+        })
     }
 }
 
@@ -959,14 +1233,59 @@ impl InfoLine {
         Self { item, label }
     }
 
+    /// Schmaler als so bricht keine Zeile um (Punkte) – auch wenn Status und Kennzahlen
+    /// einmal kürzer sind. So breit ist das Menü ohnehin durch seine übrigen Einträge.
+    const MIN_WRAP: f64 = 280.0;
+
+    /// Zeile, die bei Bedarf umbricht (Hinweise und Fehler, siehe [`InfoLine::set_wrapped`]).
+    fn wrapping(mtm: MainThreadMarker) -> Self {
+        let line = Self::new(mtm);
+        line.label.setLineBreakMode(NSLineBreakMode::ByWordWrapping);
+        line.label.setMaximumNumberOfLines(0);
+        if let Some(cell) = line.label.cell() {
+            cell.setWraps(true);
+        }
+        line
+    }
+
     fn set(&self, title: &NSAttributedString) {
         self.label.setAttributedStringValue(title);
-        let size = self.label.fittingSize();
-        let y = ((Self::HEIGHT - size.height) / 2.0).round();
+        self.place(self.label.fittingSize());
+    }
+
+    /// Wie [`InfoLine::set`], aber der Text ist höchstens `max_width` breit und bricht sonst
+    /// um; die Zeile wird entsprechend höher.
+    fn set_wrapped(&self, title: &NSAttributedString, max_width: f64) {
+        self.label.setAttributedStringValue(title);
+        self.label.setPreferredMaxLayoutWidth(max_width);
+        let bounds = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(max_width, 10_000.0));
+        let size = match self.label.cell() {
+            Some(cell) => cell.cellSizeForBounds(bounds),
+            None => self.label.fittingSize(),
+        };
+        self.place(NSSize::new(size.width.ceil().min(max_width), size.height.ceil()));
+    }
+
+    /// Text mit der Größe `size` einsetzen; die Zeile hat oben und unten den Abstand
+    /// einer einzeiligen.
+    fn place(&self, size: NSSize) {
+        let height = Self::HEIGHT.max(size.height + Self::HEIGHT - Self::line_height());
+        let y = ((height - size.height) / 2.0).round();
         self.label.setFrame(NSRect::new(NSPoint::new(Self::LEFT, y), size));
         if let Some(view) = self.item.view() {
-            view.setFrameSize(NSSize::new(Self::LEFT + size.width + Self::RIGHT, Self::HEIGHT));
+            view.setFrameSize(NSSize::new(Self::LEFT + size.width + Self::RIGHT, height));
         }
+    }
+
+    /// Höhe einer Textzeile in der Schrift des Menüs.
+    fn line_height() -> f64 {
+        let font = NSFont::menuFontOfSize(0.0);
+        (font.ascender() - font.descender() + font.leading()).ceil()
+    }
+
+    /// Breite des Texts, wie er zuletzt gesetzt wurde.
+    fn text_width(&self) -> f64 {
+        self.label.frame().size.width
     }
 }
 
@@ -1031,6 +1350,60 @@ fn show_fatal(mtm: MainThreadMarker, message: &str, info: &str) {
     alert.runModal();
 }
 
+/// Bild des geöffneten Menüs für `--menu-screenshot`: Zustand setzen, das Menü öffnen, das
+/// Menüfenster vom Fensterserver holen, speichern und beenden. Solange das Menü offen ist,
+/// wartet der Hauptthread in dessen Schleife – deshalb laufen beide Schritte über Zeitgeber,
+/// die auch dann feuern.
+fn schedule_menu_screenshot(path: std::path::PathBuf) {
+    match std::env::var("TAGWERK_MENU_STATE").as_deref() {
+        Ok("break") => act(|s, t| {
+            s.tracker.take_break(t);
+        }),
+        Ok("away") => act(|s, t| {
+            s.tracker.go_away(t, Activity::Meeting);
+        }),
+        Ok("closed") => act(|s, t| {
+            s.tracker.close_day(t, secs(t));
+        }),
+        _ => {}
+    }
+    let after = |seconds: f64, block: &block2::DynBlock<dyn Fn(std::ptr::NonNull<NSTimer>)>| unsafe {
+        let timer = NSTimer::timerWithTimeInterval_repeats_block(seconds, false, block);
+        NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes);
+    };
+    // Erst das Bild (während das Menü offen ist), dann schließen und beenden.
+    let shoot = block2::RcBlock::new(move |_timer: std::ptr::NonNull<NSTimer>| {
+        // Das Menü liegt über allen normalen Fenstern; das größte Fenster dort ist es.
+        let menu = snapshot::own_windows()
+            .into_iter()
+            .filter(|(_, layer, _)| *layer > 20)
+            .max_by(|a, b| (a.2.width * a.2.height).total_cmp(&(b.2.width * b.2.height)));
+        let result = match menu.and_then(|(id, ..)| snapshot::window_png(id, true)) {
+            Some(png) => std::fs::write(&path, png).map_err(|e| e.to_string()),
+            None => Err("Das geöffnete Menü ließ sich nicht aufnehmen (Bildschirm gesperrt?).".to_string()),
+        };
+        let menu = MainThreadMarker::new().and_then(|mtm| with_state(|s| s.status_item.menu(mtm)).flatten());
+        if let Some(menu) = menu {
+            menu.cancelTracking();
+        }
+        shutdown();
+        if let Err(e) = result {
+            eprintln!("Fehler: {e}");
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    });
+    after(2.0, &shoot);
+    let open = block2::RcBlock::new(|_timer: std::ptr::NonNull<NSTimer>| {
+        // Außerhalb von `with_state`: Beim Öffnen fragt das Menü den Zustand selbst ab.
+        let button = MainThreadMarker::new().and_then(|mtm| with_state(|s| s.status_item.button(mtm)).flatten());
+        if let Some(button) = button {
+            unsafe { button.performClick(None) };
+        }
+    });
+    after(0.8, &open);
+}
+
 /// Hält eine Sperrdatei, damit nur eine Instanz läuft.
 fn single_instance() -> Option<std::fs::File> {
     let _ = std::fs::create_dir_all(store::data_dir());
@@ -1046,7 +1419,11 @@ fn single_instance() -> Option<std::fs::File> {
     }
 }
 
-pub fn run() {
+/// Startet die Menüleisten-App. Mit `screenshot` (zum Testen und für die Bilder im README:
+/// `Tagwerk --menu-screenshot <png>`) öffnet sie ihr Menü, speichert ein Bild davon und endet
+/// wieder; den Zustand dafür setzt `TAGWERK_MENU_STATE=break|away|closed` (sonst läuft die
+/// Erfassung).
+pub fn run(screenshot: Option<std::path::PathBuf>) {
     let mtm = MainThreadMarker::new().expect("Tagwerk muss im Hauptthread starten");
     let Some(_lock) = single_instance() else {
         eprintln!("Tagwerk läuft bereits.");
@@ -1077,15 +1454,9 @@ pub fn run() {
     away_sub.setAutoenablesItems(false);
     for activity in Activity::ALL {
         let title = activity.label();
-        let symbol = match activity {
-            Activity::Meeting => "person.2",
-            Activity::Call => "phone",
-            Activity::Networking => "person.3",
-            Activity::Other => "ellipsis.circle",
-        };
         let it = menu_item(mtm, title, Some(sel!(goAway:)), "", &controller);
         it.setTag(activity.id());
-        set_item_symbol(&it, symbol, title);
+        set_item_symbol(&it, activity_symbol(activity), title);
         away_sub.addItem(&it);
     }
     let away_note = menu_item(mtm, "Zählt als Arbeitszeit, auch bei gesperrtem Mac – bis zum Entsperren.", None, "", &controller);
@@ -1110,7 +1481,9 @@ pub fn run() {
         pauses: InfoLine::new(mtm),
         first: InfoLine::new(mtm),
         balance: InfoLine::new(mtm),
-        hints: (0..5).map(|_| InfoLine::new(mtm)).collect(),
+        account: InfoLine::new(mtm),
+        hints: (0..6).map(|_| InfoLine::wrapping(mtm)).collect(),
+        error: InfoLine::wrapping(mtm),
         pause: menu_item(mtm, "", Some(sel!(togglePause:)), "p", &controller),
         start_reset,
         close,
@@ -1140,9 +1513,11 @@ pub fn run() {
     ] {
         set_item_symbol(item, symbol, desc);
     }
-    for line in [&items.status, &items.worked, &items.pauses, &items.first, &items.balance]
-        .into_iter()
-        .chain(&items.hints)
+    // Ein Fehler der Datenbank steht direkt unter dem Status, vor den Kennzahlen.
+    for line in
+        [&items.status, &items.error, &items.worked, &items.pauses, &items.first, &items.balance, &items.account]
+            .into_iter()
+            .chain(&items.hints)
     {
         menu.addItem(&line.item);
     }
@@ -1173,12 +1548,20 @@ pub fn run() {
             return;
         }
     };
+    // Lässt sich die Datenbank öffnen, aber nicht lesen, läuft Tagwerk mit leerem Stand weiter –
+    // das steht dann im Menü, statt unbemerkt zu bleiben.
+    let mut db_error = None;
     let days = db.load().unwrap_or_else(|e| {
         eprintln!("Tagwerk: Datenbank konnte nicht gelesen werden: {e}");
+        db_error = Some((DbFault::Read, db_error_text("Die Datenbank konnte nicht gelesen werden", &e.to_string())));
         Vec::new()
     });
     let settings = db.load_settings().unwrap_or_else(|e| {
         eprintln!("Tagwerk: Einstellungen konnten nicht gelesen werden: {e}");
+        db_error.get_or_insert((
+            DbFault::Read,
+            db_error_text("Die Einstellungen konnten nicht gelesen werden", &e.to_string()),
+        ));
         Default::default()
     });
     let mut tracker = Tracker::new(days, settings);
@@ -1205,18 +1588,26 @@ pub fn run() {
         tracker.paused_since = Some(t);
     }
 
-    // Bereits erreichte Schwellen der Höchstarbeitszeit nicht noch einmal melden.
-    let limit = LimitWatch::init(t.date(), tracker.today(t).work_secs);
+    // Bereits erreichte Schwellen (Höchstarbeitszeit, Pause) nicht noch einmal melden.
+    let today = tracker.today(t);
+    let limit = LimitWatch::init(t.date(), today.work_secs);
+    let breaks = BreakWatch::init(t.date(), today.stretch_secs);
     notify::init(mtm, running_from_bundle());
+    notify::on_lock_answer(lock_answered);
     let mut state = AppState {
         limit,
+        breaks,
+        asked_lock: None,
         tracker,
         status_item,
         items,
         last_save: Instant::now(),
         last_icon: None,
         button_icon: None,
+        button_title: None,
+        hotkeys: None,
         db,
+        db_error,
     };
     state.persist(t);
     state.refresh();
@@ -1277,6 +1668,9 @@ pub fn run() {
         NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes);
     }
 
+    if let Some(path) = screenshot {
+        schedule_menu_screenshot(path);
+    }
     app.run();
 }
 
@@ -1285,7 +1679,7 @@ mod tests {
     use super::*;
     use objc2::AnyThread;
     use objc2_app_kit::{
-        NSAttributedStringNSStringDrawing, NSBezierPath, NSBitmapImageFileType, NSBitmapImageRep, NSDeviceRGBColorSpace, NSGraphicsContext,
+        NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSAttributedStringNSStringDrawing, NSBezierPath, NSBitmapImageFileType, NSBitmapImageRep, NSDeviceRGBColorSpace, NSGraphicsContext,
     };
     use objc2_foundation::NSSize;
 
@@ -1295,6 +1689,61 @@ mod tests {
         let hms = |h: i64, m: i64, s: i64| h * 3600 + m * 60 + s;
         assert_eq!(pause_title(Span::new(hms(15, 25, 40), hms(15, 45, 10))), "15:25 – 15:45 Uhr  (20 Min.)");
         assert_eq!(pause_title(Span::new(hms(12, 0, 0), hms(13, 5, 0))), "12:00 – 13:05 Uhr  (1:05 h)");
+    }
+
+    #[test]
+    fn idle_queries_answer() {
+        // Nur dass die Abfragen an macOS antworten (die Werte hängen vom Rechner ab).
+        assert!(idle_secs() >= 0);
+        let _ = display_kept_awake();
+    }
+
+    /// Prüft die Abfrage an macOS mit einem Programm, das den Bildschirm wirklich wach hält:
+    /// `cargo test caffeinate_keeps_the_display_awake -- --ignored`
+    #[test]
+    #[ignore]
+    fn caffeinate_keeps_the_display_awake() {
+        let mut child = std::process::Command::new("caffeinate").args(["-d", "-t", "10"]).spawn().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(800));
+        let awake = display_kept_awake();
+        let _ = child.kill();
+        let _ = child.wait();
+        assert!(awake);
+    }
+
+    #[test]
+    fn idle_status_names_the_last_input() {
+        let at = |h: u32, m: u32| chrono::NaiveDate::from_ymd_opt(2026, 11, 18).unwrap().and_hms_opt(h, m, 0).unwrap();
+        let mut t = Tracker::new(vec![], Default::default());
+        t.start(at(8, 0));
+        t.go_idle(at(10, 0));
+        let (text, icon) = status_line(&t, at(10, 12));
+        assert!(icon == IconKind::Paused);
+        assert_eq!(text, "Keine Eingabe seit 10:00 Uhr – pausiert");
+    }
+
+    #[test]
+    fn bar_time_is_compact() {
+        assert_eq!(bar_time(0), "0:00");
+        assert_eq!(bar_time(6 * 3600 + 12 * 60 + 59), "6:12");
+        assert_eq!(bar_time(10 * 3600 + 5 * 60), "10:05");
+    }
+
+    #[test]
+    fn count_pause_tags_round_trip() {
+        for activity in Activity::ALL {
+            for from in [0, 12 * 3600 + 3 * 60 + 17, day::DAY_END - 1] {
+                assert!(count_pause_from_tag(count_pause_tag(from, activity)) == (from, activity));
+            }
+        }
+    }
+
+    #[test]
+    fn db_error_text_fits_one_menu_line() {
+        assert_eq!(db_error_text("Speichern fehlgeschlagen", "database is locked"), "Speichern fehlgeschlagen: database is locked");
+        let long = db_error_text("Speichern fehlgeschlagen", &"disk I/O error\n ".repeat(20));
+        assert_eq!(long.chars().count(), DB_ERROR_MAX);
+        assert!(long.ends_with('…') && !long.contains('\n'), "{long}");
     }
 
     #[test]
@@ -1333,6 +1782,8 @@ mod tests {
                 status_title("Ohne Mac seit 14:00 Uhr – Meeting", IconKind::Away),
                 status_title("Außerhalb des Arbeitszeitrahmens (07:00–22:00 Uhr)", IconKind::Outside),
                 status_title("Feierabend um 17:30 Uhr", IconKind::Closed),
+                error_title(&db_error_text("Speichern fehlgeschlagen", "database is locked")),
+                warning_title(&rules::Warning::LongStretch { work: 7 * 3600 }.text()),
                 rich(&[("Heute gearbeitet:  ", Tone::Label), ("3:57 h", Tone::Value), ("  von 7:48 h", Tone::Muted)]),
                 rich(&[("Pausen heute:  ", Tone::Label), ("0:35 h", Tone::Value)]),
                 rich(&[("Beginn heute:  ", Tone::Label), ("12:42 Uhr", Tone::Value), ("  (manuell)", Tone::Muted)]),

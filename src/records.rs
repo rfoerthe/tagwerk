@@ -16,16 +16,18 @@
 //! `Tagwerk --records` öffnet das Fenster ohne Menüleisten-App ([`run`]).
 
 use crate::about;
-use crate::day::{fmt_clock, secs_of, Activity, Day, DayRecord, Span, DAY_END};
+use crate::palette;
+use crate::day::{fmt_clock, secs_of, Absence, AbsenceKind, Activity, Break, Day, DayRecord, Span, WorkBlock, DAY_END};
 use crate::rules::{self, Settings, Warning};
 use crate::settings_window;
+use crate::snapshot;
 use crate::store::{self, Status};
 use crate::week_view;
 use block2::RcBlock;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, TimeZone};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
-use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly};
+use objc2::{define_class, msg_send, sel, DefinedClass, MainThreadMarker, MainThreadOnly};
 use objc2_app_kit::*;
 use objc2_foundation::{
     NSArray, NSCopying, NSDate, NSDictionary, NSEdgeInsets, NSRectEdge, NSIndexSet, NSInteger, NSLocale, NSNotification, NSPoint,
@@ -249,14 +251,15 @@ fn pin_width(view: &NSView, to: &NSView, inset: f64) {
 
 /// Eine Tabellenzeile: Wochenüberschrift oder Arbeitstag.
 enum Row {
-    Week { title: String, total: String },
+    /// Wochenzeile: Titel, Summe (endet vor dem Saldo) und Saldo der Woche.
+    Week { title: String, total: String, balance: i64 },
     Day { day: Day, rec: DayRecord, warnings: Vec<Warning> },
 }
 
 /// Steuerelemente des Inspektors, die Aktionen auslesen müssen.
 struct Inspector {
     date: NaiveDate,
-    subtitle: Retained<NSTextField>,
+    stats: StatsView,
     start_picker: Retained<NSDatePicker>,
     end_picker: Retained<NSDatePicker>,
     break_from: Retained<NSDatePicker>,
@@ -264,7 +267,76 @@ struct Inspector {
     work_from: Retained<NSDatePicker>,
     work_to: Retained<NSDatePicker>,
     work_reason: Retained<NSPopUpButton>,
-    error: Retained<NSTextField>,
+    /// Liste der Arbeit ohne Mac (wird auch ohne Neuaufbau des Inspektors aufgefrischt).
+    work_list: Retained<NSStackView>,
+    /// Hinweise, dass Arbeitsbeginn bzw. Feierabend Arbeit ohne Mac gekürzt haben.
+    start_cut: Retained<NSTextField>,
+    end_cut: Retained<NSTextField>,
+    /// Abwesenheit: Art (erster Eintrag = keine) und ganzer bzw. halber Tag.
+    absence_kind: Retained<NSPopUpButton>,
+    absence_part: Retained<NSPopUpButton>,
+    /// Hinweise zu einer abgelehnten Eingabe, jeweils direkt über den Feldern.
+    break_error: Retained<NSTextField>,
+    work_error: Retained<NSTextField>,
+}
+
+/// Kennzahlen des Tages im Kopf des Inspektors: drei Werte nebeneinander (Arbeitszeit,
+/// Pausen, Saldo) – oder, wenn es keine gibt, ein Satz.
+#[derive(Clone)]
+struct StatsView {
+    row: Retained<NSStackView>,
+    values: [Retained<NSTextField>; 3],
+    note: Retained<NSTextField>,
+}
+
+/// Was im Kopf des Inspektors steht.
+#[derive(Clone, Debug, PartialEq)]
+enum DayStats {
+    /// Arbeitszeit, Pausen und Saldo (Sekunden).
+    Numbers { work: i64, pause: i64, balance: i64 },
+    Note(&'static str),
+}
+
+impl StatsView {
+    fn new() -> Self {
+        let row = hstack(22.0);
+        row.setAlignment(NSLayoutAttribute::Top);
+        let values = ["Arbeitszeit", "Pausen", "Saldo"].map(|title| {
+            let value = label("");
+            value.setFont(Some(&font_digits(15.0, unsafe { NSFontWeightSemibold })));
+            let caption = label(title);
+            caption.setFont(Some(&NSFont::systemFontOfSize(small_size())));
+            caption.setTextColor(Some(&NSColor::secondaryLabelColor()));
+            let column = vstack(1.0);
+            column.addArrangedSubview(&value);
+            column.addArrangedSubview(&caption);
+            row.addArrangedSubview(&column);
+            value
+        });
+        Self { row, values, note: caption("") }
+    }
+
+    fn show(&self, stats: &DayStats) {
+        match stats {
+            DayStats::Numbers { work, pause, balance } => {
+                self.values[0].setStringValue(&ns(&store::fmt_hm(*work)));
+                self.values[1].setStringValue(&ns(&store::fmt_hm(*pause)));
+                self.values[2].setStringValue(&ns(&rules::fmt_balance(*balance)));
+                self.values[2].setTextColor(Some(&palette::balance(*balance)));
+            }
+            DayStats::Note(text) => self.note.setStringValue(&ns(text)),
+        }
+        let numbers = matches!(stats, DayStats::Numbers { .. });
+        self.row.setHidden(!numbers);
+        self.note.setHidden(numbers);
+    }
+}
+
+/// Eingabe im Inspektor, zu der ein Hinweis gehört.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Input {
+    Break,
+    Work,
 }
 
 /// Steuerelemente der Zusatzansicht im Sichern-Dialog.
@@ -274,6 +346,8 @@ struct Export {
     from: Retained<NSDatePicker>,
     to: Retained<NSDatePicker>,
     summary: Retained<NSTextField>,
+    /// Format (Stelle in [`store::ExportFormat::ALL`]).
+    format: Retained<NSPopUpButton>,
 }
 
 #[derive(Default)]
@@ -289,6 +363,138 @@ struct Model {
     inspector: Option<Inspector>,
     export: Option<Export>,
     error: Option<String>,
+    /// Zuletzt gemachte Korrekturen zum Widerrufen und Wiederholen.
+    history: History,
+    /// Welche Tage die Tabelle zeigt.
+    filter: Filter,
+}
+
+/// Zeitraum, auf den die Tabelle eingeschränkt ist.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+enum Period {
+    #[default]
+    All,
+    ThisMonth,
+    LastMonth,
+    ThisYear,
+    LastYear,
+}
+
+impl Period {
+    const ALL: [Period; 5] = [Period::All, Period::ThisMonth, Period::LastMonth, Period::ThisYear, Period::LastYear];
+
+    fn label(self) -> &'static str {
+        match self {
+            Period::All => "Alle Tage",
+            Period::ThisMonth => "Dieser Monat",
+            Period::LastMonth => "Letzter Monat",
+            Period::ThisYear => "Dieses Jahr",
+            Period::LastYear => "Letztes Jahr",
+        }
+    }
+
+    /// Liegt `date` im Zeitraum (von `today` aus gesehen)?
+    fn contains(self, date: NaiveDate, today: NaiveDate) -> bool {
+        let month = |d: NaiveDate| (d.year(), d.month());
+        match self {
+            Period::All => true,
+            Period::ThisMonth => month(date) == month(today),
+            Period::LastMonth => month(date) == month(month_start(today) - Duration::days(1)),
+            Period::ThisYear => date.year() == today.year(),
+            Period::LastYear => date.year() == today.year() - 1,
+        }
+    }
+}
+
+/// Filter der Tabelle: Zeitraum und Merkmale der Tage. Er gilt nur für die Zeilen – die
+/// Kennzahlen darüber und die Wochensummen zählen immer alles.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct Filter {
+    period: Period,
+    /// Nur Tage mit Hinweisen auf Regelverstöße.
+    warnings: bool,
+    /// Nur Tage mit manuellen Korrekturen.
+    corrected: bool,
+}
+
+impl Filter {
+    fn is_active(&self) -> bool {
+        *self != Self::default()
+    }
+
+    fn shows(&self, day: &Day, warnings: &[Warning], today: NaiveDate) -> bool {
+        self.period.contains(day.date, today)
+            && (!self.warnings || !warnings.is_empty())
+            && (!self.corrected || day.has_corrections())
+    }
+}
+
+/// Die manuellen Korrekturen eines Tages – alles, was sich im Fenster ändern lässt. Die
+/// automatisch erfassten Perioden gehören nicht dazu: Widerrufen stellt nur Korrekturen
+/// wieder her und lässt inzwischen erfasste Zeit stehen.
+#[derive(Clone, Debug, Default, PartialEq)]
+struct Corrections {
+    start: Option<i64>,
+    end: Option<i64>,
+    breaks: Vec<Break>,
+    work: Vec<WorkBlock>,
+    absence: Option<Absence>,
+}
+
+impl Corrections {
+    fn of(day: &Day) -> Self {
+        Self {
+            start: day.start,
+            end: day.end,
+            breaks: day.breaks.clone(),
+            work: day.work.clone(),
+            absence: day.absence,
+        }
+    }
+
+    fn apply(&self, day: &mut Day) {
+        day.start = self.start;
+        day.end = self.end;
+        day.breaks = self.breaks.clone();
+        day.work = self.work.clone();
+        day.absence = self.absence;
+    }
+}
+
+/// Ein Schritt zum Widerrufen bzw. Wiederholen: die Korrekturen des Tages davor.
+#[derive(Clone, Debug, PartialEq)]
+struct Step {
+    /// Was geändert wurde, für das Menü („Widerrufen: Pause entfernen“).
+    name: &'static str,
+    date: NaiveDate,
+    before: Corrections,
+}
+
+/// Verlauf der Korrekturen (jeweils der jüngste Schritt zuletzt).
+#[derive(Default)]
+struct History {
+    undo: Vec<Step>,
+    redo: Vec<Step>,
+}
+
+impl History {
+    /// So viele Schritte lassen sich höchstens widerrufen.
+    const MAX: usize = 50;
+
+    /// Eine neue Änderung merken. `follow_up`: Die Eingabe läuft weiter (Pfeiltasten im
+    /// Uhrzeit-Feld) – gehört sie zur selben Angabe wie der letzte Schritt, bleibt es bei
+    /// diesem, damit einmal Widerrufen die ganze Eingabe zurücknimmt.
+    fn record(&mut self, step: Step, follow_up: bool) {
+        self.redo.clear();
+        let same = self.undo.last().is_some_and(|last| last.date == step.date && last.name == step.name);
+        if follow_up && same {
+            return;
+        }
+        self.undo.push(step);
+        if self.undo.len() > Self::MAX {
+            self.undo.remove(0);
+        }
+    }
 }
 
 impl Model {
@@ -328,6 +534,7 @@ impl Model {
 
     fn build_rows(&mut self) {
         let s = &self.settings;
+        let today = now().date();
         let mut recs: Vec<(Day, DayRecord)> =
             self.days.iter().filter_map(|d| d.record(s).map(|r| (d.clone(), r))).collect();
         recs.reverse();
@@ -340,23 +547,29 @@ impl Model {
             let sunday = monday + Duration::days(6);
             let total: i64 = recs[i..j].iter().map(|(_, r)| r.shown_work_secs).sum();
             let (_, target) = rules::balance(&self.days, monday, sunday, s);
-            rows.push(Row::Week {
+            // Die Wochenzeile zählt die ganze Woche, auch wenn der Filter Tage ausblendet;
+            // Wochen ohne sichtbaren Tag entfallen.
+            let week_row = Row::Week {
                 title: format!(
                     "KW {}  ·  {} – {}",
                     week.week(),
                     monday.format("%d.%m."),
                     sunday.format("%d.%m.%Y")
                 ),
-                total: format!(
-                    "{}  ·  {}  ·  Saldo {}",
-                    plural(j - i, "Tag", "Tage"),
-                    store::fmt_hm(total),
-                    rules::fmt_balance(total - target)
-                ),
-            });
-            for (day, rec) in recs[i..j].iter().cloned() {
-                let warnings = rules::day_warnings(&self.days, day.date, s);
-                rows.push(Row::Day { day, rec, warnings });
+                total: format!("{}  ·  {}  ·  Saldo ", plural(j - i, "Tag", "Tage"), store::fmt_hm(total)),
+                balance: total - target,
+            };
+            let days: Vec<Row> = recs[i..j]
+                .iter()
+                .cloned()
+                .filter_map(|(day, rec)| {
+                    let warnings = rules::day_warnings(&self.days, day.date, s);
+                    self.filter.shows(&day, &warnings, today).then_some(Row::Day { day, rec, warnings })
+                })
+                .collect();
+            if !days.is_empty() {
+                rows.push(week_row);
+                rows.extend(days);
             }
             i = j;
         }
@@ -418,6 +631,10 @@ thread_local! {
     static TIMER: RefCell<Option<Retained<NSTimer>>> = const { RefCell::new(None) };
     /// Umschalter „Tage | Woche“, bevor die Symbolleiste ihn abholt.
     static SWITCHER: RefCell<Option<Retained<NSSegmentedControl>>> = const { RefCell::new(None) };
+    /// Zuletzt gezeigte Erklärung aus dem Inspektor.
+    static HELP: RefCell<Option<Retained<NSPopover>>> = const { RefCell::new(None) };
+    /// Filter in der Symbolleiste (sein Symbol zeigt, ob gefiltert wird).
+    static FILTER_ITEM: RefCell<Option<Retained<NSMenuToolbarItem>>> = const { RefCell::new(None) };
 }
 
 fn embedded() -> bool {
@@ -449,7 +666,8 @@ fn model<R>(f: impl FnOnce(&mut Model) -> R) -> R {
 
 const COLUMNS: [(&str, &str, f64, f64, f64); 7] = [
     // Kennung, Titel, Breite, Mindest- und Höchstbreite (zusätzlicher Platz geht an „Datum“)
-    ("mark", "", 22.0, 22.0, 22.0),
+    // Platz für zwei Symbole nebeneinander: Hinweis und Stift.
+    ("mark", "", MARK_WIDTH, MARK_WIDTH, MARK_WIDTH),
     ("date", "Datum", 140.0, 110.0, 10_000.0),
     ("start", "Beginn", 64.0, 56.0, 120.0),
     ("end", "Ende", 64.0, 56.0, 120.0),
@@ -458,11 +676,20 @@ const COLUMNS: [(&str, &str, f64, f64, f64); 7] = [
     ("balance", "Saldo", 76.0, 66.0, 130.0),
 ];
 
+/// Breite der Spalte mit den Symbolen und Platz je Symbol.
+const MARK_WIDTH: f64 = 42.0;
+const MARK_SLOT: f64 = 18.0;
+
 const TB_RELOAD: &str = "reload";
 const TB_ADD: &str = "add";
 const TB_EXPORT: &str = "export";
 const TB_INSPECTOR: &str = "inspector";
 const TB_VIEW: &str = "view";
+const TB_FILTER: &str = "filter";
+
+/// Menü-Tags der Merkmale im Filter.
+const FILTER_WARNINGS: isize = 0;
+const FILTER_CORRECTED: isize = 1;
 
 /// Vorgaben im Export-Dialog (Tag des Menüpunkts).
 const PRESET_4W: isize = 0;
@@ -581,6 +808,50 @@ define_class!(
             ui().window.performClose(None);
         }
 
+        /// „Widerrufen“: im Fenster „Aufzeichnungen“ die letzte Korrektur, sonst (Dialog,
+        /// Einstellungen) wie gewohnt die Eingabe im Textfeld.
+        #[unsafe(method(undoEdit:))]
+        fn undo_edit(&self, sender: Option<&AnyObject>) {
+            if records_is_key() {
+                step_history(false);
+            } else {
+                unsafe { NSApplication::sharedApplication(mtm()).sendAction_to_from(sel!(undo:), None, sender) };
+            }
+        }
+
+        #[unsafe(method(redoEdit:))]
+        fn redo_edit(&self, sender: Option<&AnyObject>) {
+            if records_is_key() {
+                step_history(true);
+            } else {
+                unsafe { NSApplication::sharedApplication(mtm()).sendAction_to_from(sel!(redo:), None, sender) };
+            }
+        }
+
+        /// Filter: Zeitraum (Tag = Stelle in [`Period::ALL`]).
+        #[unsafe(method(filterPeriod:))]
+        fn filter_period(&self, sender: Option<&NSMenuItem>) {
+            let period = sender.and_then(|s| usize::try_from(s.tag()).ok()).and_then(|i| Period::ALL.get(i).copied());
+            if let Some(period) = period {
+                set_filter(|f| f.period = period);
+            }
+        }
+
+        /// Filter: Merkmal ein- oder ausschalten.
+        #[unsafe(method(filterToggle:))]
+        fn filter_toggle(&self, sender: Option<&NSMenuItem>) {
+            match sender.map(|s| s.tag()) {
+                Some(FILTER_WARNINGS) => set_filter(|f| f.warnings = !f.warnings),
+                Some(FILTER_CORRECTED) => set_filter(|f| f.corrected = !f.corrected),
+                _ => {}
+            }
+        }
+
+        #[unsafe(method(filterReset:))]
+        fn filter_reset(&self, _sender: Option<&AnyObject>) {
+            set_filter(|f| *f = Filter::default());
+        }
+
         #[unsafe(method(reload:))]
         fn reload_action(&self, _sender: Option<&AnyObject>) {
             reload();
@@ -671,6 +942,26 @@ define_class!(
             }
         }
 
+        /// Info-Knopf an einer Überschrift des Inspektors: Erklärung als Popover.
+        #[unsafe(method(showHelp:))]
+        fn show_help(&self, sender: Option<&NSButton>) {
+            if let Some(button) = sender {
+                show_help(button);
+            }
+        }
+
+        /// Art der Abwesenheit oder ganzer/halber Tag gewählt.
+        #[unsafe(method(absenceChanged:))]
+        fn absence_changed(&self, _sender: Option<&AnyObject>) {
+            let absence = model(|m| {
+                let i = m.inspector.as_ref()?;
+                // Erster Eintrag: keine Abwesenheit.
+                let kind = usize::try_from(i.absence_kind.indexOfSelectedItem() - 1).ok().and_then(|k| AbsenceKind::ALL.get(k))?;
+                Some(Absence::new(*kind, i.absence_part.indexOfSelectedItem() == 1))
+            });
+            apply(Edit::SetAbsence(absence), true);
+        }
+
         #[unsafe(method(addBreak:))]
         fn add_break(&self, _sender: Option<&AnyObject>) {
             let (times, min) = model(|m| {
@@ -681,11 +972,13 @@ define_class!(
             });
             match times {
                 Some((Some(from), Some(to))) if to - from >= min => apply(Edit::AddBreak(from, to), true),
-                Some((Some(from), Some(to))) if to > from => show_inspector_error(&format!(
-                    "Eine Pause dauert mindestens {} Min. (siehe Einstellungen).",
-                    min / 60
-                )),
-                Some((Some(_), Some(_))) => show_inspector_error("Das Ende der Pause muss nach ihrem Beginn liegen."),
+                Some((Some(from), Some(to))) if to > from => show_inspector_error(
+                    Input::Break,
+                    &format!("Eine Pause dauert mindestens {} Min. (siehe Einstellungen).", min / 60),
+                ),
+                Some((Some(_), Some(_))) => {
+                    show_inspector_error(Input::Break, "Das Ende der Pause muss nach ihrem Beginn liegen.")
+                }
                 _ => {}
             }
         }
@@ -707,7 +1000,7 @@ define_class!(
             let min_work = model(|m| m.settings.min_work);
             match input {
                 Some((Some(from), Some(to), _)) if to > from && shown_len(from, to) < min_work => {
-                    show_inspector_error(&min_work_text(min_work))
+                    show_inspector_error(Input::Work, &min_work_text(min_work))
                 }
                 Some((Some(from), Some(to), note)) if to > from => {
                     // Kurze Lücken zu benachbarter Arbeit ohne Mac gehören zum neuen Abschnitt.
@@ -724,7 +1017,7 @@ define_class!(
                     }
                 }
                 Some((Some(_), Some(_), _)) => {
-                    show_inspector_error("Das Ende der Arbeit ohne Mac muss nach ihrem Beginn liegen.")
+                    show_inspector_error(Input::Work, "Das Ende der Arbeit ohne Mac muss nach ihrem Beginn liegen.")
                 }
                 _ => {}
             }
@@ -756,12 +1049,53 @@ define_class!(
             export_range_changed(true);
         }
 
+        /// Format im Sichern-Dialog gewählt: Der Dateiname bekommt die passende Endung.
+        #[unsafe(method(exportFormat:))]
+        fn export_format(&self, _sender: Option<&AnyObject>) {
+            export_range_changed(false);
+        }
+
+        #[unsafe(method(importRecords:))]
+        fn import_records(&self, _sender: Option<&AnyObject>) {
+            show_import();
+        }
+
         #[unsafe(method(tick:))]
         fn tick(&self, _timer: Option<&AnyObject>) {
             tick();
         }
     }
 );
+
+define_class!(
+    /// Tabellenzelle, deren Text eine eigene Farbe hat (der Saldo). In der markierten Zeile
+    /// nimmt sie die Textfarbe der Markierung an, damit der Text lesbar bleibt – Grün oder Rot
+    /// auf dem Blau der Markierung wäre es nicht.
+    #[unsafe(super(NSTableCellView, NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "TagwerkTintedCell"]
+    #[ivars = Retained<NSColor>]
+    struct TintedCell;
+
+    impl TintedCell {
+        #[unsafe(method(setBackgroundStyle:))]
+        fn set_background_style(&self, style: NSBackgroundStyle) {
+            let _: () = unsafe { msg_send![super(self), setBackgroundStyle: style] };
+            if let Some(text) = unsafe { self.textField() } {
+                let label = NSColor::labelColor();
+                let marked = style == NSBackgroundStyle::Emphasized;
+                text.setTextColor(Some(if marked { &label } else { self.ivars() }));
+            }
+        }
+    }
+);
+
+impl TintedCell {
+    fn new(mtm: MainThreadMarker, color: Retained<NSColor>) -> Retained<Self> {
+        let this = Self::alloc(mtm).set_ivars(color);
+        unsafe { msg_send![super(this), init] }
+    }
+}
 
 define_class!(
     /// Dokumentansicht des Inspektors: oben beginnend (wie Text) statt unten.
@@ -797,14 +1131,31 @@ impl Controller {
 fn cell_view(m: &Model, column: Option<&str>, row: NSInteger) -> Option<Retained<NSView>> {
     let mtm = mtm();
     let row = m.rows.get(usize::try_from(row).ok()?)?;
-    let cell = NSTableCellView::new(mtm);
+    // Die Saldo-Zelle eines Tages ist farbig – außer in der markierten Zeile.
+    let tint = match (row, column) {
+        (Row::Day { day, rec, .. }, Some("balance")) => {
+            let target = m.settings.counted_target(day, rec.work_secs);
+            (rec.work_secs > 0 || target > 0).then(|| palette::balance(rec.shown_work_secs - target))
+        }
+        _ => None,
+    };
+    let cell: Retained<NSTableCellView> = match tint {
+        Some(color) => Retained::into_super(TintedCell::new(mtm, color)),
+        None => NSTableCellView::new(mtm),
+    };
     match (row, column) {
-        (Row::Week { title, total }, _) => {
+        (Row::Week { title, total, balance }, _) => {
             let t = label(title);
             t.setFont(Some(&font_semibold(NSFont::systemFontSize())));
-            let s = label(total);
-            s.setFont(Some(&font_digits(NSFont::systemFontSize(), font_regular())));
-            s.setTextColor(Some(&NSColor::secondaryLabelColor()));
+            // Der Saldo farbig wie im Menü: grün im Plus, rot im Minus.
+            let s = label("");
+            s.setAttributedStringValue(&palette::colored(
+                &[
+                    (total.as_str(), &NSColor::secondaryLabelColor()),
+                    (rules::fmt_balance(*balance).as_str(), &palette::balance(*balance)),
+                ],
+                &font_digits(NSFont::systemFontSize(), font_regular()),
+            ));
             s.setAlignment(NSTextAlignment::Right);
             for v in [&t, &s] {
                 v.setTranslatesAutoresizingMaskIntoConstraints(false);
@@ -819,32 +1170,45 @@ fn cell_view(m: &Model, column: Option<&str>, row: NSInteger) -> Option<Retained
             unsafe { cell.setTextField(Some(&t)) };
         }
         (Row::Day { day, warnings, .. }, Some("mark")) => {
-            // Hinweise gehen vor; sonst Stift für manuell korrigierte Tage.
-            let mark = if !warnings.is_empty() {
+            // Zwei feste Plätze, damit die Symbole über die Zeilen hinweg untereinanderstehen:
+            // links das Warnschild für Hinweise, rechts der Stift für manuell korrigierte Tage.
+            let warning = (!warnings.is_empty()).then(|| {
                 let tip: Vec<String> = warnings.iter().map(Warning::text).collect();
-                Some(("exclamationmark.triangle.fill", NSColor::systemOrangeColor(), tip.join("\n")))
-            } else if day.has_corrections() {
-                Some(("pencil", NSColor::secondaryLabelColor(), "Manuell korrigiert".to_string()))
-            } else {
-                None
-            };
-            if let Some((name, color, tip)) = mark {
+                ("exclamationmark.triangle.fill", NSColor::systemOrangeColor(), tip.join("\n"))
+            });
+            let pencil = day
+                .has_corrections()
+                .then(|| ("pencil", NSColor::secondaryLabelColor(), "Manuell korrigiert".to_string()));
+            let mut tips = Vec::new();
+            for (slot, mark) in [warning, pencil].into_iter().enumerate() {
+                let Some((name, color, tip)) = mark else { continue };
                 let iv = NSImageView::new(mtm);
                 iv.setImage(symbol(name, &tip).as_deref());
                 iv.setContentTintColor(Some(&color));
+                iv.setToolTip(Some(&ns(&tip)));
                 iv.setTranslatesAutoresizingMaskIntoConstraints(false);
                 cell.addSubview(&iv);
-                iv.centerXAnchor().constraintEqualToAnchor(&cell.centerXAnchor()).setActive(true);
+                let center = 4.0 + MARK_SLOT * (slot as f64 + 0.5);
+                iv.centerXAnchor().constraintEqualToAnchor_constant(&cell.leadingAnchor(), center).setActive(true);
                 iv.centerYAnchor().constraintEqualToAnchor(&cell.centerYAnchor()).setActive(true);
-                unsafe { cell.setImageView(Some(&iv)) };
-                cell.setToolTip(Some(&ns(&tip)));
+                if tips.is_empty() {
+                    unsafe { cell.setImageView(Some(&iv)) };
+                }
+                tips.push(tip);
+            }
+            if !tips.is_empty() {
+                cell.setToolTip(Some(&ns(&tips.join("\n"))));
             }
         }
         (Row::Day { day, rec, .. }, Some(col)) => {
             let today = now().date();
             let is_today = rec.date == today;
+            // Ohne Arbeitszeit (z. B. ein Urlaubstag) gibt es weder Beginn noch Ende.
+            let worked = rec.work_secs > 0 || !day.periods.is_empty();
             let (text, align, secondary) = match col {
                 "date" => (store::fmt_date(rec.date), NSTextAlignment::Left, false),
+                "start" if !worked => ("–".to_string(), NSTextAlignment::Right, true),
+                "end" if !worked => ("–".to_string(), NSTextAlignment::Right, true),
                 "start" => (fmt_clock(rec.first_start), NSTextAlignment::Right, false),
                 "end" => {
                     if is_today
@@ -858,8 +1222,9 @@ fn cell_view(m: &Model, column: Option<&str>, row: NSInteger) -> Option<Retained
                 }
                 "work" => (store::fmt_hm(rec.shown_work_secs), NSTextAlignment::Right, false),
                 "balance" => {
-                    let target = m.settings.daily_target(rec.date);
-                    if rec.work_secs > 0 {
+                    // Mit Abwesenheit gibt es auch ohne Arbeitszeit einen Saldo (Zeitausgleich).
+                    let target = m.settings.counted_target(day, rec.work_secs);
+                    if rec.work_secs > 0 || target > 0 {
                         (rules::fmt_balance(rec.shown_work_secs - target), NSTextAlignment::Right, true)
                     } else {
                         ("–".to_string(), NSTextAlignment::Right, true)
@@ -876,14 +1241,36 @@ fn cell_view(m: &Model, column: Option<&str>, row: NSInteger) -> Option<Retained
             };
             t.setFont(Some(&font_digits(NSFont::systemFontSize(), weight)));
             t.setAlignment(align);
-            if secondary {
+            if col == "balance" && cell.downcast_ref::<TintedCell>().is_some() {
+                // Die Farbe setzt die Zelle selbst (siehe `TintedCell`).
+            } else if secondary {
                 t.setTextColor(Some(&NSColor::secondaryLabelColor()));
             }
             t.setTranslatesAutoresizingMaskIntoConstraints(false);
             cell.addSubview(&t);
             t.leadingAnchor().constraintEqualToAnchor_constant(&cell.leadingAnchor(), 2.0).setActive(true);
-            t.trailingAnchor().constraintEqualToAnchor_constant(&cell.trailingAnchor(), -2.0).setActive(true);
             t.centerYAnchor().constraintEqualToAnchor(&cell.centerYAnchor()).setActive(true);
+            match day.absence.filter(|_| col == "date") {
+                // Hinter dem Datum die Abwesenheit als Kürzel („½ U“) – für mehr ist neben dem
+                // Datum kein Platz; ausgeschrieben steht sie im Tooltip und im Inspektor.
+                Some(absence) => {
+                    let a = label(&absence.code());
+                    a.setFont(Some(&NSFont::systemFontOfSize(small_size())));
+                    a.setTextColor(Some(&NSColor::secondaryLabelColor()));
+                    a.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+                    a.setToolTip(Some(&ns(&absence.label())));
+                    a.setTranslatesAutoresizingMaskIntoConstraints(false);
+                    cell.addSubview(&a);
+                    t.setContentHuggingPriority_forOrientation(751.0, NSLayoutConstraintOrientation::Horizontal);
+                    a.setContentCompressionResistancePriority_forOrientation(250.0, NSLayoutConstraintOrientation::Horizontal);
+                    a.leadingAnchor().constraintEqualToAnchor_constant(&t.trailingAnchor(), 6.0).setActive(true);
+                    a.trailingAnchor().constraintLessThanOrEqualToAnchor_constant(&cell.trailingAnchor(), -2.0).setActive(true);
+                    a.firstBaselineAnchor().constraintEqualToAnchor(&t.firstBaselineAnchor()).setActive(true);
+                }
+                None => {
+                    t.trailingAnchor().constraintEqualToAnchor_constant(&cell.trailingAnchor(), -2.0).setActive(true);
+                }
+            }
             unsafe { cell.setTextField(Some(&t)) };
         }
         (Row::Day { .. }, None) => return None,
@@ -924,13 +1311,17 @@ fn refresh_summary() {
         };
         let (tw, _tp, tn, _) = sum(&|d| d == today);
         let week_start = today - Duration::days(today.weekday().num_days_from_monday() as i64);
-        let (ww, _wp, wn, wt) = sum(&|d| d >= week_start && d <= today);
-        let (mw, mp, mn, mt) = sum(&|d| d.year() == today.year() && d.month() == today.month());
+        let (ww, _wp, wn, _) = sum(&|d| d >= week_start && d <= today);
+        let (mw, mp, mn, _) = sum(&|d| d.year() == today.year() && d.month() == today.month());
+        // Das Soll samt Abwesenheiten (halber Urlaubstag, Zeitausgleich) wie überall sonst.
+        let (_, wt) = rules::balance(&m.days, week_start, today, &st);
+        let month_end = month_start(month_start(today) + Duration::days(31)) - Duration::days(1);
+        let (_, mt) = rules::balance(&m.days, month_start(today), month_end, &st);
         let begin = m.day(today).zip(recs.iter().find(|r| r.date == today)).map(|(d, r)| {
             let manual = if d.start.is_some() { " (manuell)" } else { "" };
             format!("Beginn {} Uhr{manual}", fmt_clock(r.first_start))
         });
-        let today_target = st.daily_target(today);
+        let today_target = st.day_target(today, m.day(today).and_then(|d| d.absence));
         let today_detail = match (tn, begin) {
             (0, _) | (_, None) if today_target > 0 => format!("Soll {}", store::fmt_hm(today_target)),
             (0, _) | (_, None) => "Kein Arbeitstag".to_string(),
@@ -938,17 +1329,53 @@ fn refresh_summary() {
             (_, Some(b)) => b,
         };
         let avg = |x: i64| if mn > 0 { x / mn as i64 } else { 0 };
+        // Je Karte: Wert, Unterzeile und – wo einer steht – der Saldo (farbig): als Wert
+        // beim Zeitkonto, sonst am Ende der Unterzeile.
+        let account = rules::account(&m.days, today, &st);
         let texts = [
-            (store::fmt_hm(tw), today_detail),
-            (store::fmt_hm(ww), format!("{} · Saldo {}", plural(wn, "Arbeitstag", "Arbeitstage"), rules::fmt_balance(ww - wt))),
-            (store::fmt_hm(mw), format!("{} · Saldo {}", plural(mn, "Arbeitstag", "Arbeitstage"), rules::fmt_balance(mw - mt))),
-            (store::fmt_hm(avg(mw)), format!("Pausen Ø {} · im {}", store::fmt_hm(avg(mp)), MONTHS[today.month0() as usize])),
+            Card { value: store::fmt_hm(tw), detail: today_detail, value_balance: None, detail_balance: None },
+            Card {
+                value: store::fmt_hm(ww),
+                detail: format!("{} · Saldo ", plural(wn, "Arbeitstag", "Arbeitstage")),
+                value_balance: None,
+                detail_balance: Some(ww - wt),
+            },
+            Card {
+                value: store::fmt_hm(mw),
+                detail: format!("{} · Saldo ", plural(mn, "Arbeitstag", "Arbeitstage")),
+                value_balance: None,
+                detail_balance: Some(mw - mt),
+            },
+            Card {
+                value: store::fmt_hm(avg(mw)),
+                detail: format!("Pausen Ø {} · {}", store::fmt_hm(avg(mp)), MONTHS[today.month0() as usize]),
+                value_balance: None,
+                detail_balance: None,
+            },
+            Card {
+                value: rules::fmt_balance(account),
+                detail: account_detail(&st, m.days.first().map(|d| d.date)),
+                value_balance: Some(account),
+                detail_balance: None,
+            },
         ];
-        (texts, m.status, recs.len(), m.error.clone(), st.summary())
+        // Mit Filter: wie viele der Tage die Tabelle zeigt.
+        let shown = m.filter.is_active().then(|| {
+            let rows = m.rows.iter().filter(|r| matches!(r, Row::Day { .. })).count();
+            format!("Filter: {rows} von {}", plural(m.records().len(), "Tag", "Tagen"))
+        });
+        (texts, m.status, shown.unwrap_or_else(|| format!("{} erfasst", plural(recs.len(), "Arbeitstag", "Arbeitstage"))), m.error.clone(), st.summary())
     });
-    for ((value, detail), (v, d)) in ui.cards.iter().zip(texts) {
-        value.setStringValue(&ns(&v));
-        detail.setStringValue(&ns(&d));
+    let detail_font = font_digits(small_size(), font_regular());
+    for ((value, detail), card) in ui.cards.iter().zip(texts) {
+        value.setStringValue(&ns(&card.value));
+        value.setTextColor(Some(&card.value_balance.map_or_else(NSColor::labelColor, palette::balance)));
+        let mut parts = vec![(card.detail.clone(), NSColor::secondaryLabelColor())];
+        if let Some(balance) = card.detail_balance {
+            parts.push((rules::fmt_balance(balance), palette::balance(balance)));
+        }
+        let parts: Vec<(&str, &NSColor)> = parts.iter().map(|(text, color)| (text.as_str(), &**color)).collect();
+        detail.setAttributedStringValue(&palette::colored(&parts, &detail_font));
     }
     let subtitle = match status {
         Some(Status::Running) => "Zeiterfassung läuft".to_string(),
@@ -962,9 +1389,34 @@ fn refresh_summary() {
     ui.window.setSubtitle(&ns(&subtitle));
     let footer = match error {
         Some(e) => e,
-        None => format!("{} erfasst  ·  {rules_text}", plural(count, "Arbeitstag", "Arbeitstage")),
+        None => format!("{count}  ·  {rules_text}"),
     };
     ui.footer.setStringValue(&ns(&footer));
+}
+
+/// Inhalt einer Karte der Übersicht.
+struct Card {
+    value: String,
+    detail: String,
+    /// Der Wert ist ein Saldo (farbig).
+    value_balance: Option<i64>,
+    /// Saldo am Ende der Unterzeile (farbig).
+    detail_balance: Option<i64>,
+}
+
+/// Unterzeile der Karte „Zeitkonto“: seit wann es zählt und der Übertrag, falls es einen gibt.
+/// `first` ist der erste erfasste Tag.
+fn account_detail(s: &Settings, first: Option<NaiveDate>) -> String {
+    let since = match (s.account_from, first) {
+        (Some(from), _) => format!("ab {}", store::fmt_date_short(from)),
+        (None, Some(first)) => format!("seit {}", store::fmt_date_short(first)),
+        (None, None) => "noch nichts erfasst".to_string(),
+    };
+    if s.account_carry == 0 {
+        since
+    } else {
+        format!("{since} · Übertrag {}", rules::fmt_balance(s.account_carry))
+    }
 }
 
 /// Alles neu einlesen und anzeigen.
@@ -994,79 +1446,296 @@ enum Edit {
     RemoveWork(usize),
     /// Arbeit ohne Mac in diesem Bereich löschen (aus der Wochenansicht).
     CutWork(i64, i64),
+    /// Abwesenheit eintragen, ändern oder (`None`) entfernen.
+    SetAbsence(Option<Absence>),
+}
+
+impl Edit {
+    /// Bezeichnung im Menü „Bearbeiten“ („Widerrufen: …“).
+    fn name(&self) -> &'static str {
+        match self {
+            Edit::SetStart(_) => "Arbeitsbeginn ändern",
+            Edit::SetEnd(_) => "Feierabend ändern",
+            Edit::AddBreak(..) => "Pause eintragen",
+            Edit::RemoveBreak(_) => "Pause entfernen",
+            Edit::AddWork(..) => "Arbeit ohne Mac eintragen",
+            Edit::RemoveWork(_) | Edit::CutWork(..) => "Arbeit ohne Mac entfernen",
+            Edit::SetAbsence(_) => "Abwesenheit ändern",
+        }
+    }
 }
 
 fn apply(edit: Edit, rebuild: bool) {
     let Some(date) = model(|m| m.inspector.as_ref().map(|i| i.date)) else { return };
     if let Err(e) = save(date, edit, rebuild) {
-        show_inspector_error(&format!("Speichern fehlgeschlagen: {e}"));
+        show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e);
     }
 }
 
 /// Änderung an einem Tag speichern und anzeigen. `rebuild` baut den Inspektor neu auf.
 fn save(date: NaiveDate, edit: Edit, rebuild: bool) -> Result<(), String> {
+    let name = edit.name();
+    let bound = match edit {
+        Edit::SetStart(_) => Some(Bound::Start),
+        Edit::SetEnd(_) => Some(Bound::End),
+        _ => None,
+    };
+    // Die Korrekturen davor und danach, wie sie in der Datenbank stehen.
+    let mut change = None;
     let result = model(|m| {
         let db = m.db.as_mut()?;
-        Some(db.edit_day(date, now(), |d| match edit {
-            Edit::SetStart(s) => d.start = s,
-            Edit::SetEnd(e) => d.end = e,
-            Edit::AddBreak(from, to) => d.add_break(from, to),
-            Edit::RemoveBreak(i) => {
-                if i < d.breaks.len() {
-                    d.breaks.remove(i);
+        Some(db.edit_day(date, now(), |d| {
+            let before = Corrections::of(d);
+            match edit {
+                // Arbeit ohne Mac davor bzw. danach entfällt: die letzte Angabe gilt.
+                Edit::SetStart(s) => {
+                    d.set_start(s);
                 }
-            }
-            Edit::AddWork(from, to, note) => d.add_work(from, to, &note),
-            Edit::RemoveWork(i) => {
-                if i < d.work.len() {
-                    d.work.remove(i);
+                Edit::SetEnd(e) => {
+                    d.set_end(e);
                 }
+                Edit::AddBreak(from, to) => d.add_break(from, to),
+                Edit::RemoveBreak(i) => {
+                    if i < d.breaks.len() {
+                        d.breaks.remove(i);
+                    }
+                }
+                Edit::AddWork(from, to, note) => d.add_work(from, to, &note),
+                Edit::RemoveWork(i) => {
+                    if i < d.work.len() {
+                        d.work.remove(i);
+                    }
+                }
+                Edit::CutWork(from, to) => d.cut_work(from, to),
+                Edit::SetAbsence(a) => d.absence = a,
             }
-            Edit::CutWork(from, to) => d.cut_work(from, to),
+            change = Some((before, Corrections::of(d)));
         }))
     });
     match result {
         None => Ok(()),
         Some(Err(e)) => Err(e.to_string()),
         Some(Ok(())) => {
-            model(|m| {
-                m.load();
-                if !rebuild {
-                    // Eingabe läuft weiter: Felder stehen lassen, nur die Zahlen aktualisieren.
-                    if let Some(date) = m.selected {
-                        m.built = Some((date, m.day(date).cloned(), m.settings));
-                    }
+            let mut cut = None;
+            if let Some((before, after)) = change {
+                // Hat der neue Beginn bzw. Feierabend Arbeit ohne Mac gekürzt?
+                cut = bound.filter(|_| before.work != after.work);
+                if before != after {
+                    model(|m| m.history.record(Step { name, date, before }, !rebuild));
                 }
-            });
-            reload_table();
-            refresh_summary();
-            refresh_inspector(rebuild);
-            week_from_model();
-            notify_change();
+            }
+            saved(rebuild);
+            if let Some(bound) = cut {
+                show_cut_note(bound);
+            }
             Ok(())
         }
     }
 }
 
-fn show_inspector_error(text: &str) {
-    model(|m| {
-        if let Some(i) = m.inspector.as_ref() {
-            i.error.setStringValue(&ns(text));
-            i.error.setHidden(false);
-        }
-    });
+/// Arbeitsbeginn oder Feierabend im Inspektor.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Bound {
+    Start,
+    End,
 }
 
-fn day_subtitle(day: Option<&Day>, settings: &Settings) -> String {
-    match day.and_then(|d| d.record(settings)) {
-        Some(r) if r.work_secs > 0 => format!(
-            "Arbeitszeit {}  ·  Pausen {}  ·  Saldo {}",
-            store::fmt_hm(r.shown_work_secs),
-            store::fmt_hm(r.shown_pause_secs),
-            rules::fmt_balance(r.shown_work_secs - settings.daily_target(r.date))
-        ),
-        Some(_) => "Keine Arbeitszeit im Arbeitszeitrahmen.".to_string(),
-        None => "Für diesen Tag ist noch nichts erfasst.".to_string(),
+/// Hinweis unter Arbeitsbeginn bzw. Feierabend: Die Angabe hat Arbeit ohne Mac gekürzt.
+fn show_cut_note(bound: Bound) {
+    let label = model(|m| {
+        m.inspector.as_ref().map(|i| match bound {
+            Bound::Start => i.start_cut.clone(),
+            Bound::End => i.end_cut.clone(),
+        })
+    });
+    if let Some(label) = label {
+        label.setHidden(false);
+    }
+}
+
+/// Liste der Arbeit ohne Mac im Inspektor neu füllen – ohne den Inspektor neu aufzubauen,
+/// damit ein Uhrzeit-Feld, in dem gerade geblättert wird, seine Eingabe behält.
+fn refresh_work_list() {
+    let state = model(|m| {
+        let i = m.inspector.as_ref()?;
+        Some((i.work_list.clone(), m.day(i.date).map(|d| d.work.clone()).unwrap_or_default()))
+    });
+    if let Some((list, work)) = state {
+        fill_work_list(&list, &work, &ui().controller);
+    }
+}
+
+/// Zeilen der Arbeit ohne Mac: Uhrzeiten, Dauer, Notiz und Knopf zum Entfernen (Tag = Stelle
+/// in `Day::work`).
+fn fill_work_list(list: &NSStackView, work: &[WorkBlock], target: &Controller) {
+    clear(list);
+    if work.is_empty() {
+        let none = label("Nichts eingetragen");
+        none.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        list.addArrangedSubview(&none);
+    }
+    for (i, w) in work.iter().enumerate() {
+        let row = hstack(8.0);
+        row.setAlignment(NSLayoutAttribute::CenterY);
+        let times = label(&format!("{} – {}", fmt_clock(w.from), fmt_clock(w.to)));
+        times.setFont(Some(&font_digits(NSFont::systemFontSize(), font_regular())));
+        let dur = label(&fmt_dur(shown_len(w.from, w.to)));
+        dur.setFont(Some(&font_digits(NSFont::systemFontSize(), font_regular())));
+        dur.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        let note = label(&w.note);
+        note.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        note.setToolTip(Some(&ns(&w.note)));
+        note.setContentCompressionResistancePriority_forOrientation(250.0, NSLayoutConstraintOrientation::Horizontal);
+        let remove = match symbol("minus.circle.fill", "Arbeit ohne Mac entfernen") {
+            Some(img) => unsafe {
+                NSButton::buttonWithImage_target_action(&img, Some(target), Some(sel!(removeWork:)), mtm())
+            },
+            None => button("Entfernen", sel!(removeWork:), target),
+        };
+        remove.setBordered(false);
+        remove.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
+        remove.setToolTip(Some(&ns("Arbeit ohne Mac entfernen")));
+        remove.setTag(i as isize);
+        let spacer = NSView::new(mtm());
+        spacer.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
+        row.addArrangedSubview(&times);
+        row.addArrangedSubview(&dur);
+        row.addArrangedSubview(&note);
+        row.addArrangedSubview(&spacer);
+        row.addArrangedSubview(&remove);
+        list.addArrangedSubview(&row);
+        pin_width(&row, list, 0.0);
+    }
+}
+
+/// Hinweis im Inspektor, dass eine Angabe Arbeit ohne Mac gekürzt hat (zunächst ausgeblendet).
+fn cut_note_label(text: &str) -> Retained<NSTextField> {
+    let l = caption(text);
+    l.setTextColor(Some(&NSColor::systemOrangeColor()));
+    l.setHidden(true);
+    l
+}
+
+/// Nach dem Speichern: neu einlesen, alles anzeigen und der Menüleisten-App Bescheid geben.
+fn saved(rebuild: bool) {
+    model(|m| {
+        m.load();
+        if !rebuild {
+            // Eingabe läuft weiter: Felder stehen lassen, nur die Zahlen aktualisieren.
+            if let Some(date) = m.selected {
+                m.built = Some((date, m.day(date).cloned(), m.settings));
+            }
+        }
+    });
+    reload_table();
+    refresh_summary();
+    refresh_inspector(rebuild);
+    if !rebuild {
+        // Ein neuer Beginn oder Feierabend kann Arbeit ohne Mac gekürzt haben.
+        refresh_work_list();
+    }
+    week_from_model();
+    notify_change();
+}
+
+/// „Widerrufen“ bzw. „Wiederholen“ (`redo`): die Korrekturen des Tages aus dem letzten
+/// Schritt wiederherstellen und den Tag zeigen. Der Stand davor wandert in die jeweils
+/// andere Richtung, sodass sich beides beliebig abwechseln lässt.
+fn step_history(redo: bool) {
+    let Some(step) = model(|m| if redo { m.history.redo.pop() } else { m.history.undo.pop() }) else { return };
+    let mut current = None;
+    let result = model(|m| {
+        let db = m.db.as_mut()?;
+        Some(db.edit_day(step.date, now(), |d| {
+            current = Some(Corrections::of(d));
+            step.before.apply(d);
+        }))
+    });
+    let back = |m: &mut Model, s: Step| if redo { m.history.undo.push(s) } else { m.history.redo.push(s) };
+    match (result, current) {
+        (Some(Ok(())), Some(before)) => {
+            let (name, date) = (step.name, step.date);
+            model(|m| back(m, Step { name, date, before }));
+            saved(true);
+            // Zeigen, was sich geändert hat.
+            match mode() {
+                Mode::Days => go_to(date),
+                Mode::Week => {
+                    model(|m| m.selected = Some(date));
+                    refresh_week(Some(date));
+                }
+            }
+        }
+        (Some(Err(e)), _) => {
+            // Nichts geändert: Der Schritt bleibt, wo er war.
+            model(|m| if redo { m.history.redo.push(step) } else { m.history.undo.push(step) });
+            show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e.to_string());
+        }
+        _ => {}
+    }
+}
+
+/// Hinweis zu einer abgelehnten Eingabe direkt über deren Feldern zeigen – und in den
+/// sichtbaren Bereich holen, falls der Inspektor gerade anders gerollt ist.
+fn show_inspector_error(input: Input, text: &str) {
+    let labels = model(|m| m.inspector.as_ref().map(|i| (i.break_error.clone(), i.work_error.clone())));
+    let Some((break_error, work_error)) = labels else { return };
+    let (shown, other) = match input {
+        Input::Break => (break_error, work_error),
+        Input::Work => (work_error, break_error),
+    };
+    other.setHidden(true);
+    shown.setStringValue(&ns(text));
+    shown.setHidden(false);
+    // Erst nach dem Layout hat der Hinweis seinen Platz.
+    ui().inspector.layoutSubtreeIfNeeded();
+    shown.scrollRectToVisible(shown.bounds());
+}
+
+/// Erklärung zu einem Abschnitt des Inspektors als Popover am Info-Knopf `button` (der Text
+/// ist dessen Tooltip).
+fn show_help(button: &NSButton) {
+    let Some(text) = button.toolTip() else { return };
+    let mtm = mtm();
+    let label = NSTextField::wrappingLabelWithString(&text, mtm);
+    label.setPreferredMaxLayoutWidth(280.0);
+    label.setSelectable(false);
+    let stack = vstack(0.0);
+    stack.setEdgeInsets(NSEdgeInsets { top: 12.0, left: 14.0, bottom: 12.0, right: 14.0 });
+    stack.addArrangedSubview(&label);
+    stack.setFrameSize(stack.fittingSize());
+    let controller = NSViewController::new(mtm);
+    controller.setView(&stack);
+    let popover = NSPopover::new(mtm);
+    popover.setBehavior(NSPopoverBehavior::Transient);
+    popover.setContentViewController(Some(&controller));
+    popover.showRelativeToRect_ofView_preferredEdge(button.bounds(), button, NSRectEdge::MinY);
+    // Das Popover lebt, bis das nächste es ablöst (AppKit hält es nicht fest).
+    HELP.with(|h| *h.borrow_mut() = Some(popover));
+}
+
+/// Hinweisfeld des Inspektors: rot, zunächst ausgeblendet (belegt dann keinen Platz).
+fn inspector_error_label() -> Retained<NSTextField> {
+    let l = caption("");
+    l.setTextColor(Some(&NSColor::systemRedColor()));
+    l.setHidden(true);
+    l
+}
+
+fn day_stats(day: Option<&Day>, settings: &Settings) -> DayStats {
+    match day.and_then(|d| d.record(settings).map(|r| (d, r))) {
+        Some((d, r)) if r.work_secs > 0 => DayStats::Numbers {
+            work: r.shown_work_secs,
+            pause: r.shown_pause_secs,
+            balance: r.shown_work_secs - settings.counted_target(d, r.work_secs),
+        },
+        // Nur eine Abwesenheit: Mit Soll (Zeitausgleich, halber Tag) gibt es einen Saldo.
+        Some((d, _)) if d.absence.is_some() && d.periods.is_empty() => match settings.counted_target(d, 0) {
+            0 => DayStats::Note("Keine Arbeitszeit, kein Soll."),
+            target => DayStats::Numbers { work: 0, pause: 0, balance: -target },
+        },
+        Some(_) => DayStats::Note("Keine Arbeitszeit im Arbeitszeitrahmen."),
+        None => DayStats::Note("Für diesen Tag ist noch nichts erfasst."),
     }
 }
 
@@ -1083,7 +1752,7 @@ fn refresh_inspector(force: bool) {
         // Laufende Zahlen (heute) aktualisieren
         model(|m| {
             if let Some(i) = m.inspector.as_ref() {
-                i.subtitle.setStringValue(&ns(&day_subtitle(day.as_ref(), &m.settings)));
+                i.stats.show(&day_stats(day.as_ref(), &m.settings));
             }
         });
         if unchanged || (selected.is_none() && model(|m| m.inspector.is_none() && m.built.is_none())) {
@@ -1137,11 +1806,15 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     // Kopf
     let title = label(&fmt_date_long(date));
     title.setFont(Some(&font_semibold(15.0)));
-    let subtitle = caption(&day_subtitle(day.as_ref(), &settings));
-    subtitle.setFont(Some(&font_digits(NSFont::systemFontSize(), font_regular())));
+    // Darunter die Kennzahlen des Tages nebeneinander – in einer Zeile brächen sie um.
+    let stats = StatsView::new();
+    stats.show(&day_stats(day.as_ref(), &settings));
     stack.addArrangedSubview(&title);
-    stack.addArrangedSubview(&subtitle);
-    pin_width(&subtitle, stack, 40.0);
+    stack.addArrangedSubview(&stats.row);
+    stack.addArrangedSubview(&stats.note);
+    pin_width(&stats.note, stack, 40.0);
+    stack.setCustomSpacing_afterView(10.0, &stats.row);
+    stack.setCustomSpacing_afterView(10.0, &stats.note);
     for w in &warnings {
         let row = hstack(6.0);
         row.setAlignment(NSLayoutAttribute::CenterY);
@@ -1158,19 +1831,95 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     let sep = separator();
     stack.addArrangedSubview(&sep);
     pin_width(&sep, stack, 40.0);
-    stack.setCustomSpacing_afterView(4.0, &title);
+    stack.setCustomSpacing_afterView(8.0, &title);
     stack.setCustomSpacing_afterView(14.0, &sep);
 
-    let section = |text: &str, prev: Option<&NSView>| {
+    // Überschrift eines Abschnitts; die Erklärung dazu steht hinter dem Info-Knopf (und als
+    // Tooltip) statt als Absatz darunter.
+    let section = |text: &str, prev: Option<&NSView>, help: &str| {
         if let Some(p) = prev {
             stack.setCustomSpacing_afterView(18.0, p);
         }
+        let row = hstack(4.0);
+        row.setAlignment(NSLayoutAttribute::CenterY);
         let h = headline(text);
-        stack.addArrangedSubview(&h);
+        h.setToolTip(Some(&ns(help)));
+        row.addArrangedSubview(&h);
+        if let Some(img) = symbol("info.circle", "Erklärung") {
+            let info =
+                unsafe { NSButton::buttonWithImage_target_action(&img, Some(target), Some(sel!(showHelp:)), mtm()) };
+            info.setBordered(false);
+            info.setContentTintColor(Some(&NSColor::tertiaryLabelColor()));
+            // Der Knopf zeigt seinen Tooltip auf Klick als Popover.
+            info.setToolTip(Some(&ns(help)));
+            row.addArrangedSubview(&info);
+        }
+        stack.addArrangedSubview(&row);
     };
 
+    // Abwesenheit
+    section(
+        "Abwesenheit",
+        None,
+        "Urlaub, Krankheit und Feiertag senken das Soll des Tages, ein halber Tag auf die Hälfte. \
+         Zeitausgleich lässt es stehen, auch ohne Arbeitszeit – das Zeitkonto sinkt entsprechend.",
+    );
+    let absence = day.as_ref().and_then(|d| d.absence);
+    let absence_kind = NSPopUpButton::new(mtm());
+    absence_kind.addItemWithTitle(&ns("Keine"));
+    for kind in AbsenceKind::ALL {
+        absence_kind.addItemWithTitle(&ns(kind.label()));
+    }
+    let selected = absence.and_then(|a| AbsenceKind::ALL.iter().position(|k| *k == a.kind)).map_or(0, |i| i + 1);
+    absence_kind.selectItemAtIndex(selected as isize);
+    let absence_part = NSPopUpButton::new(mtm());
+    absence_part.addItemWithTitle(&ns("Ganzer Tag"));
+    absence_part.addItemWithTitle(&ns("Halber Tag"));
+    absence_part.selectItemAtIndex(absence.is_some_and(|a| a.half) as isize);
+    // Halbe Tage gibt es bei Urlaub, Krankheit und Feiertag.
+    absence_part.setEnabled(absence.is_some_and(|a| a.kind.reduces_target()));
+    for popup in [&absence_kind, &absence_part] {
+        unsafe {
+            popup.setTarget(Some(target));
+            popup.setAction(Some(sel!(absenceChanged:)));
+        }
+    }
+    let row = hstack(8.0);
+    row.addArrangedSubview(&absence_kind);
+    row.addArrangedSubview(&absence_part);
+    stack.addArrangedSubview(&row);
+    // Darunter nur, was diese Abwesenheit an diesem Tag bedeutet (ohne Abwesenheit: nichts).
+    let full = settings.daily_target(date);
+    let effect = match absence {
+        Some(_) if full == 0 => {
+            Some("An diesem Tag gibt es kein Soll – die Abwesenheit ändert daran nichts.".to_string())
+        }
+        Some(a) if !a.kind.reduces_target() => Some(format!(
+            "Das Soll von {} bleibt, auch ohne Arbeitszeit – das Zeitkonto sinkt entsprechend.",
+            store::fmt_hm(full)
+        )),
+        Some(a) => Some(format!(
+            "Das Soll sinkt von {} auf {}.",
+            store::fmt_hm(full),
+            store::fmt_hm(settings.day_target(date, Some(a)))
+        )),
+        None => None,
+    };
+    let mut absence_last: Retained<NSView> = Retained::into_super(row);
+    if let Some(text) = effect {
+        let note = caption(&text);
+        stack.addArrangedSubview(&note);
+        pin_width(&note, stack, 40.0);
+        absence_last = Retained::into_super(Retained::into_super(note));
+    }
+
     // Arbeitsbeginn
-    section("Arbeitsbeginn", None);
+    section(
+        "Arbeitsbeginn",
+        Some(&absence_last),
+        "Ohne Angabe beginnt der Tag mit dem ersten Entsperren. Ein früherer Beginn wird mitgezählt. \
+         Arbeit ohne Mac vor einem neu festgelegten Beginn entfällt – die letzte Angabe gilt.",
+    );
     let auto = day.as_ref().and_then(|d| d.auto_bounds_in_frame(&settings));
     // War der Mac auch außerhalb des Rahmens entsperrt, gilt der Wert im Rahmen – dann so benennen.
     let raw_first = day.as_ref().and_then(|d| d.periods.first()).map(|p| p.from);
@@ -1186,22 +1935,29 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     row.addArrangedSubview(&start_check);
     row.addArrangedSubview(&start_picker);
     stack.addArrangedSubview(&row);
+    // Direkt unter dem Feld, wenn der neue Beginn Arbeit ohne Mac gekürzt hat.
+    let start_cut = cut_note_label(
+        "Arbeit ohne Mac vor dem Arbeitsbeginn ist entfallen – die letzte Angabe gilt. ⌘Z nimmt das zurück.",
+    );
     let start_note = caption(&match auto {
         Some((a, _)) => format!("Ohne Angabe gilt das erste Entsperren{first_in_frame} um {} Uhr.", fmt_clock(a)),
         None => "Ohne Angabe gilt das erste Entsperren des Macs im Arbeitszeitrahmen.".to_string(),
     });
+    stack.addArrangedSubview(&start_cut);
+    pin_width(&start_cut, stack, 40.0);
     stack.addArrangedSubview(&start_note);
     pin_width(&start_note, stack, 40.0);
 
     // Pausen
-    section("Pausen", Some(&start_note));
-    let pause_note = caption(&format!(
-        "Sperren ab {} Min. gelten automatisch als Pause, kürzere zählen zur Arbeitszeit. \
-         Hier lassen sich zusätzliche Pausen eintragen.",
-        settings.min_pause / 60
-    ));
-    stack.addArrangedSubview(&pause_note);
-    pin_width(&pause_note, stack, 40.0);
+    section(
+        "Pausen",
+        Some(&start_note),
+        &format!(
+            "Sperren ab {} Min. gelten automatisch als Pause, kürzere zählen zur Arbeitszeit. \
+             Hier lassen sich zusätzliche Pausen eintragen.",
+            settings.min_pause / 60
+        ),
+    );
     let breaks = day.as_ref().map(|d| d.breaks.clone()).unwrap_or_default();
     let mut last: Retained<NSView> = Retained::into_super(Retained::into_super(headline("")));
     if breaks.is_empty() {
@@ -1239,6 +1995,9 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         last = Retained::into_super(row);
     }
     stack.setCustomSpacing_afterView(12.0, &last);
+    let break_error = inspector_error_label();
+    stack.addArrangedSubview(&break_error);
+    pin_width(&break_error, stack, 40.0);
     let (bf, bt) = (12 * 3600, 12 * 3600 + settings.min_pause.max(30 * 60));
     let break_from = time_picker(date, bf, sel!(exportRange:), target);
     let break_to = time_picker(date, bt, sel!(exportRange:), target);
@@ -1257,55 +2016,21 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
 
     // Arbeit ohne Mac
     let row_view: Retained<NSView> = Retained::into_super(row);
-    section("Arbeit ohne Mac", Some(&row_view));
-    let work_note_text = caption(
+    section(
+        "Arbeit ohne Mac",
+        Some(&row_view),
         "Telefonat, Meeting oder Termin bei gesperrtem Mac: Diese Zeiten zählen als Arbeitszeit. \
          Eine Pause in dieser Zeit entfällt.",
     );
-    stack.addArrangedSubview(&work_note_text);
-    pin_width(&work_note_text, stack, 40.0);
     let work = day.as_ref().map(|d| d.work.clone()).unwrap_or_default();
-    let mut last: Retained<NSView> = Retained::into_super(Retained::into_super(work_note_text.clone()));
-    if work.is_empty() {
-        let none = label("Nichts eingetragen");
-        none.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        stack.addArrangedSubview(&none);
-        last = Retained::into_super(Retained::into_super(none));
-    }
-    for (i, w) in work.iter().enumerate() {
-        let row = hstack(8.0);
-        row.setAlignment(NSLayoutAttribute::CenterY);
-        let times = label(&format!("{} – {}", fmt_clock(w.from), fmt_clock(w.to)));
-        times.setFont(Some(&font_digits(NSFont::systemFontSize(), font_regular())));
-        let dur = label(&fmt_dur(shown_len(w.from, w.to)));
-        dur.setFont(Some(&font_digits(NSFont::systemFontSize(), font_regular())));
-        dur.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        let note = label(&w.note);
-        note.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        note.setToolTip(Some(&ns(&w.note)));
-        note.setContentCompressionResistancePriority_forOrientation(250.0, NSLayoutConstraintOrientation::Horizontal);
-        let remove = match symbol("minus.circle.fill", "Arbeit ohne Mac entfernen") {
-            Some(img) => unsafe {
-                NSButton::buttonWithImage_target_action(&img, Some(target), Some(sel!(removeWork:)), mtm())
-            },
-            None => button("Entfernen", sel!(removeWork:), target),
-        };
-        remove.setBordered(false);
-        remove.setContentTintColor(Some(&NSColor::secondaryLabelColor()));
-        remove.setToolTip(Some(&ns("Arbeit ohne Mac entfernen")));
-        remove.setTag(i as isize);
-        let spacer = NSView::new(mtm());
-        spacer.setContentHuggingPriority_forOrientation(1.0, NSLayoutConstraintOrientation::Horizontal);
-        row.addArrangedSubview(&times);
-        row.addArrangedSubview(&dur);
-        row.addArrangedSubview(&note);
-        row.addArrangedSubview(&spacer);
-        row.addArrangedSubview(&remove);
-        stack.addArrangedSubview(&row);
-        pin_width(&row, stack, 40.0);
-        last = Retained::into_super(row);
-    }
-    stack.setCustomSpacing_afterView(12.0, &last);
+    let work_list = vstack(6.0);
+    fill_work_list(&work_list, &work, target);
+    stack.addArrangedSubview(&work_list);
+    pin_width(&work_list, stack, 40.0);
+    stack.setCustomSpacing_afterView(12.0, &work_list);
+    let work_error = inspector_error_label();
+    stack.addArrangedSubview(&work_error);
+    pin_width(&work_error, stack, 40.0);
     // Vorschlag: die erste Pause des Tages, sonst die Mittagszeit.
     let (wf, wt) = day
         .as_ref()
@@ -1333,7 +2058,12 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
 
     // Feierabend
     let row_view: Retained<NSView> = Retained::into_super(row);
-    section("Feierabend", Some(&row_view));
+    section(
+        "Feierabend",
+        Some(&row_view),
+        "Ohne Angabe endet der Tag mit dem letzten Sperren. Ein späterer Feierabend wird mitgezählt. \
+         Arbeit ohne Mac nach einem neu festgelegten Feierabend entfällt – die letzte Angabe gilt.",
+    );
     let manual_end = day.as_ref().and_then(|d| d.end);
     let end_value = manual_end
         .or(rec.as_ref().map(|r| r.last_end))
@@ -1345,6 +2075,9 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     row.addArrangedSubview(&end_check);
     row.addArrangedSubview(&end_picker);
     stack.addArrangedSubview(&row);
+    let end_cut = cut_note_label(
+        "Arbeit ohne Mac nach dem Feierabend ist entfallen – die letzte Angabe gilt. ⌘Z nimmt das zurück.",
+    );
     let end_note = caption(&match auto {
         Some(_) if is_today && manual_end.is_none() => {
             "Ohne Angabe gilt das letzte Sperren. Mit Feierabend wird heute nichts mehr erfasst.".to_string()
@@ -1355,17 +2088,20 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         ),
         None => "Ohne Angabe gilt das letzte Sperren des Macs im Arbeitszeitrahmen.".to_string(),
     });
+    stack.addArrangedSubview(&end_cut);
+    pin_width(&end_cut, stack, 40.0);
     stack.addArrangedSubview(&end_note);
     pin_width(&end_note, stack, 40.0);
 
     // Automatisch erfasst
-    section("Automatisch erfasst", Some(&end_note));
-    let raw_note = caption(&format!(
-        "Zeiten, in denen der Mac entsperrt war. Gezählt wird nur im Arbeitszeitrahmen ({}).",
-        settings.frame_text()
-    ));
-    stack.addArrangedSubview(&raw_note);
-    pin_width(&raw_note, stack, 40.0);
+    section(
+        "Automatisch erfasst",
+        Some(&end_note),
+        &format!(
+            "Zeiten, in denen der Mac entsperrt war. Gezählt wird nur im Arbeitszeitrahmen ({}).",
+            settings.frame_text()
+        ),
+    );
     let periods: Vec<Span> = day.as_ref().map(|d| d.periods.clone()).unwrap_or_default();
     if periods.is_empty() {
         let none = label("Keine – der Mac war nicht entsperrt.");
@@ -1385,17 +2121,11 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         stack.addArrangedSubview(&row);
     }
 
-    let error = caption("");
-    error.setTextColor(Some(&NSColor::systemRedColor()));
-    error.setHidden(true);
-    stack.addArrangedSubview(&error);
-    pin_width(&error, stack, 40.0);
-
     model(|m| {
         m.built = Some((date, day, settings));
         m.inspector = Some(Inspector {
             date,
-            subtitle,
+            stats,
             start_picker,
             end_picker,
             break_from,
@@ -1403,13 +2133,23 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
             work_from,
             work_to,
             work_reason,
-            error,
+            work_list,
+            start_cut,
+            end_cut,
+            absence_kind,
+            absence_part,
+            break_error,
+            work_error,
         });
     });
 }
 
 /// Springt zu einem Tag (auch einem ohne Aufzeichnung).
 fn go_to(date: NaiveDate) {
+    // Blendet der Filter den Tag aus, wird er aufgehoben – sonst bliebe die Zeile unsichtbar.
+    if model(|m| m.filter.is_active() && m.row_of(date).is_none() && m.day(date).is_some()) {
+        set_filter(|f| *f = Filter::default());
+    }
     let row = model(|m| {
         m.selected = Some(date);
         m.row_of(date)
@@ -1441,8 +2181,87 @@ fn validate_menu_item(item: &NSMenuItem) -> bool {
         return mode == Mode::Days;
     } else if action == sel!(goToday:) {
         return mode == Mode::Week;
+    } else if action == sel!(filterPeriod:) {
+        let filter = model(|m| m.filter);
+        check(usize::try_from(item.tag()).ok().and_then(|i| Period::ALL.get(i)) == Some(&filter.period));
+        return mode == Mode::Days;
+    } else if action == sel!(filterToggle:) {
+        let filter = model(|m| m.filter);
+        check(if item.tag() == FILTER_WARNINGS { filter.warnings } else { filter.corrected });
+        return mode == Mode::Days;
+    } else if action == sel!(filterReset:) {
+        return mode == Mode::Days && model(|m| m.filter.is_active());
+    } else if action == sel!(undoEdit:) || action == sel!(redoEdit:) {
+        let redo = action == sel!(redoEdit:);
+        // In einem Dialog oder im Fenster „Einstellungen“ gilt der Befehl dem Textfeld.
+        if !records_is_key() {
+            item.setTitle(&ns(&history_title(redo, None)));
+            return true;
+        }
+        let name = model(|m| if redo { m.history.redo.last() } else { m.history.undo.last() }.map(|s| s.name));
+        item.setTitle(&ns(&history_title(redo, name)));
+        return name.is_some();
     }
     true
+}
+
+/// Hat das Fenster „Aufzeichnungen“ selbst die Tastatur (kein Dialog davor, kein anderes Fenster)?
+fn records_is_key() -> bool {
+    UI.with(|u| u.borrow().as_ref().is_some_and(|u| u.window.isKeyWindow()))
+}
+
+/// `Widerrufen: Pause entfernen` bzw. ohne Schritt nur `Widerrufen`.
+fn history_title(redo: bool, name: Option<&str>) -> String {
+    let verb = if redo { "Wiederholen" } else { "Widerrufen" };
+    match name {
+        Some(n) => format!("{verb}: {n}"),
+        None => verb.to_string(),
+    }
+}
+
+/// Filter der Tabelle ändern und die Zeilen neu aufbauen.
+fn set_filter(change: impl FnOnce(&mut Filter)) {
+    model(|m| {
+        change(&mut m.filter);
+        m.build_rows();
+    });
+    reload_table();
+    refresh_summary();
+    update_filter_item();
+}
+
+/// Das Filter-Symbol ist gefüllt, solange die Tabelle nicht alle Tage zeigt.
+fn update_filter_item() {
+    let Some(item) = FILTER_ITEM.with(|f| f.borrow().clone()) else { return };
+    let active = model(|m| m.filter.is_active());
+    let (image, tip) = if active {
+        ("line.3.horizontal.decrease.circle.fill", "Filter aktiv – die Tabelle zeigt nicht alle Tage")
+    } else {
+        ("line.3.horizontal.decrease.circle", "Tabelle auf einen Zeitraum oder bestimmte Tage einschränken")
+    };
+    item.setImage(symbol(image, "Filter").as_deref());
+    item.setToolTip(Some(&ns(tip)));
+}
+
+/// Menü des Filters: Zeitraum (einer davon) und Merkmale (beliebig kombinierbar).
+fn filter_menu(target: &Controller) -> Retained<NSMenu> {
+    let mtm = mtm();
+    let none = NSEventModifierFlags::empty();
+    let menu = NSMenu::new(mtm);
+    for (i, period) in Period::ALL.into_iter().enumerate() {
+        let item = menu_item(period.label(), Some(sel!(filterPeriod:)), "", none, Some(target));
+        item.setTag(i as isize);
+        menu.addItem(&item);
+    }
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+    for (title, tag) in [("Nur Tage mit Hinweisen", FILTER_WARNINGS), ("Nur korrigierte Tage", FILTER_CORRECTED)] {
+        let item = menu_item(title, Some(sel!(filterToggle:)), "", none, Some(target));
+        item.setTag(tag);
+        menu.addItem(&item);
+    }
+    menu.addItem(&NSMenuItem::separatorItem(mtm));
+    menu.addItem(&menu_item("Filter zurücksetzen", Some(sel!(filterReset:)), "", none, Some(target)));
+    menu
 }
 
 /// Einen Tag in der Ansicht „Tage“ zeigen.
@@ -1517,16 +2336,40 @@ fn model_snapshot() -> week_view::Snapshot {
     })
 }
 
-/// Eigenständig gestartet: Arbeit ohne Mac aus der Wochenansicht direkt speichern.
+/// Arbeit ohne Mac aus der Wochenansicht eintragen: eigenständig gestartet direkt in die
+/// Datenbank, sonst über die Menüleisten-App (sie kennt die laufende Erfassung).
 fn week_add_work(date: NaiveDate, from: i64, to: i64, activity: Activity) {
-    if let Err(e) = save(date, Edit::AddWork(from, to, activity.note().to_string()), true) {
-        show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e);
+    let edit = Edit::AddWork(from, to, activity.note().to_string());
+    match EMBED.with(|c| c.get()) {
+        Some(e) => via_menubar(edit.name(), date, || (e.add_work)(date, from, to, activity)),
+        None => {
+            if let Err(e) = save(date, edit, true) {
+                show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e);
+            }
+        }
     }
 }
 
 fn week_remove_work(date: NaiveDate, from: i64, to: i64) {
-    if let Err(e) = save(date, Edit::CutWork(from, to), true) {
-        show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e);
+    let edit = Edit::CutWork(from, to);
+    match EMBED.with(|c| c.get()) {
+        Some(e) => via_menubar(edit.name(), date, || (e.remove_work)(date, from, to)),
+        None => {
+            if let Err(e) = save(date, edit, true) {
+                show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e);
+            }
+        }
+    }
+}
+
+/// Eine Änderung, die die Menüleisten-App speichert (`change`), zum Widerrufen merken. Sie
+/// liest das Fenster danach neu ein – daran zeigt sich, was sich geändert hat.
+fn via_menubar(name: &'static str, date: NaiveDate, change: impl FnOnce()) {
+    let corrections = || model(|m| m.day(date).map(Corrections::of).unwrap_or_default());
+    let before = corrections();
+    change();
+    if corrections() != before {
+        model(|m| m.history.record(Step { name, date, before }, false));
     }
 }
 
@@ -1589,7 +2432,15 @@ fn export_range(ex: &Export) -> Option<(NaiveDate, NaiveDate)> {
     Some((from.min(to), from.max(to)))
 }
 
-/// Zeitraum geändert: Zusammenfassung und Dateiname anpassen.
+/// Gewähltes Format im Sichern-Dialog.
+fn export_format(ex: &Export) -> store::ExportFormat {
+    usize::try_from(ex.format.indexOfSelectedItem())
+        .ok()
+        .and_then(|i| store::ExportFormat::ALL.get(i).copied())
+        .unwrap_or(store::ExportFormat::Markdown)
+}
+
+/// Zeitraum oder Format geändert: Zusammenfassung und Dateiname anpassen.
 fn export_range_changed(custom: bool) {
     let records = model(|m| m.records());
     model(|m| {
@@ -1607,7 +2458,7 @@ fn export_range_changed(custom: bool) {
             plural(n, "Arbeitstag", "Arbeitstage"),
             store::fmt_hm(w)
         )));
-        ex.panel.setNameFieldStringValue(&ns(&store::export_file_name(from, to)));
+        ex.panel.setNameFieldStringValue(&ns(&store::export_file_name(from, to, export_format(ex))));
     });
 }
 
@@ -1622,7 +2473,7 @@ fn show_export() {
 
     let panel = NSSavePanel::savePanel(mtm);
     panel.setTitle(Some(&ns("Exportieren")));
-    panel.setMessage(Some(&ns("Aufzeichnungen eines Zeitraums als Markdown-Tabelle sichern.")));
+    panel.setMessage(Some(&ns("Aufzeichnungen eines Zeitraums als Markdown, CSV oder PDF sichern.")));
     panel.setPrompt(Some(&ns("Exportieren")));
     panel.setCanCreateDirectories(true);
     panel.setExtensionHidden(false);
@@ -1674,6 +2525,14 @@ fn show_export() {
     };
     let from_p = date_picker(from);
     let to_p = date_picker(to);
+    let format = NSPopUpButton::new(mtm);
+    for f in store::ExportFormat::ALL {
+        format.addItemWithTitle(&ns(f.label()));
+    }
+    unsafe {
+        format.setTarget(Some(target));
+        format.setAction(Some(sel!(exportFormat:)));
+    }
     let summary = label("");
     summary.setFont(Some(&font_digits(small_size(), font_regular())));
     summary.setTextColor(Some(&NSColor::secondaryLabelColor()));
@@ -1696,18 +2555,22 @@ fn show_export() {
     let row3 = hstack(8.0);
     row3.addArrangedSubview(&label_col(""));
     row3.addArrangedSubview(&summary);
+    let row4 = hstack(8.0);
+    row4.addArrangedSubview(&label_col("Format:"));
+    row4.addArrangedSubview(&format);
     let acc = vstack(8.0);
     acc.setEdgeInsets(NSEdgeInsets { top: 12.0, left: 20.0, bottom: 12.0, right: 20.0 });
     acc.addArrangedSubview(&row1);
     acc.addArrangedSubview(&row2);
     acc.addArrangedSubview(&row3);
+    acc.addArrangedSubview(&row4);
     acc.setTranslatesAutoresizingMaskIntoConstraints(true);
     let size = acc.fittingSize();
     acc.setFrameSize(NSSize::new(size.width.max(420.0), size.height));
     panel.setAccessoryView(Some(&acc));
 
     model(|m| {
-        m.export = Some(Export { panel: panel.clone(), preset, from: from_p, to: to_p, summary });
+        m.export = Some(Export { panel: panel.clone(), preset, from: from_p, to: to_p, summary, format });
     });
     export_range_changed(false);
 
@@ -1728,14 +2591,17 @@ fn export_finished(response: NSModalResponse) {
         return;
     };
     let Some((from, to)) = export_range(&ex) else { return };
-    let result = model(|m| -> Result<usize, String> {
+    let format = export_format(&ex);
+    let loaded = model(|m| -> Result<(Vec<Day>, Settings), String> {
         let db = m.db.as_ref().ok_or("Keine Datenbank geöffnet.")?;
-        let days = db
-            .load_range(from - Duration::days(1), to)
-            .map_err(|e| format!("Lesen fehlgeschlagen: {e}"))?;
-        std::fs::write(&path, store::export_markdown(&days, from, to, now(), &m.settings))
-            .map_err(|e| format!("Schreiben fehlgeschlagen: {e}"))?;
-        Ok(days.len())
+        // Vortag für die Prüfung der Ruhezeit am ersten Tag
+        let days = db.load_range(from - Duration::days(1), to).map_err(|e| format!("Lesen fehlgeschlagen: {e}"))?;
+        Ok((days, m.settings))
+    });
+    // Außerhalb des Modells: Das PDF entsteht über das Drucksystem.
+    let result = loaded.and_then(|(days, settings)| {
+        store::write_export(&days, from, to, now(), &settings, format, &path)
+            .map_err(|e| format!("Schreiben fehlgeschlagen: {e}"))
     });
     let mtm = mtm();
     let alert = NSAlert::new(mtm);
@@ -1766,6 +2632,97 @@ fn export_finished(response: NSModalResponse) {
     alert.beginSheetModalForWindow_completionHandler(&ui().window, Some(&handler));
 }
 
+// ---------- Import ----------
+
+/// „Importieren …“: einen Markdown-Export wählen, nachfragen und die Tage übernehmen.
+fn show_import() {
+    let ui = ui();
+    if ui.window.attachedSheet().is_some() {
+        return;
+    }
+    let panel = NSOpenPanel::openPanel(mtm());
+    panel.setTitle(Some(&ns("Importieren")));
+    panel.setMessage(Some(&ns("Einen Markdown-Export von Tagwerk wählen (CSV und PDF enthalten nicht alle Daten).")));
+    panel.setPrompt(Some(&ns("Öffnen")));
+    panel.setCanChooseFiles(true);
+    panel.setCanChooseDirectories(false);
+    panel.setAllowsMultipleSelection(false);
+    let p = panel.clone();
+    let handler = RcBlock::new(move |response: NSModalResponse| {
+        if response != NSModalResponseOK {
+            return;
+        }
+        p.orderOut(None);
+        if let Some(path) = p.URL().and_then(|u| u.path()).map(|s| PathBuf::from(s.to_string())) {
+            confirm_import(path);
+        }
+    });
+    activate();
+    panel.beginSheetModalForWindow_completionHandler(&ui.window, &handler);
+}
+
+/// Gelesene Datei zeigen und vor dem Ersetzen nachfragen.
+fn confirm_import(path: PathBuf) {
+    let window = ui().window;
+    let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    let days = match std::fs::read_to_string(&path) {
+        Ok(text) => store::parse_file(&text),
+        Err(e) => {
+            show_info_sheet(&window, "Import fehlgeschlagen", &format!("„{name}“ konnte nicht gelesen werden: {e}"));
+            return;
+        }
+    };
+    let (Some(first), Some(last)) = (days.first().map(|d| d.date), days.last().map(|d| d.date)) else {
+        show_info_sheet(
+            &window,
+            "Keine Aufzeichnungen gefunden",
+            &format!("„{name}“ enthält keine Aufzeichnungen. Einlesen lässt sich ein Markdown-Export von Tagwerk."),
+        );
+        return;
+    };
+    let existing = model(|m| days.iter().filter(|d| m.day(d.date).is_some()).count());
+    let alert = NSAlert::new(mtm());
+    alert.setMessageText(&ns(&format!(
+        "{} vom {} bis {} importieren?",
+        plural(days.len(), "Tag", "Tage"),
+        store::fmt_date_short(first),
+        store::fmt_date_short(last)
+    )));
+    let replaced = match existing {
+        0 => "Für diese Tage gibt es noch keine Einträge.".to_string(),
+        n => format!(
+            "Für {} davon gibt es schon Einträge – sie werden durch die aus der Datei ersetzt.",
+            plural(n, "Tag", "Tage")
+        ),
+    };
+    alert.setInformativeText(&ns(&format!(
+        "{replaced} Vorher sichert Tagwerk die Datenbank (einmal am Tag) im Ordner „backups“."
+    )));
+    alert.addButtonWithTitle(&ns("Importieren"));
+    let cancel = alert.addButtonWithTitle(&ns("Abbrechen"));
+    cancel.setKeyEquivalent(&ns("\u{1b}"));
+    let handler = RcBlock::new(move |response: NSModalResponse| {
+        if response != NSAlertFirstButtonReturn {
+            return;
+        }
+        let result = model(|m| m.db.as_mut().map(|db| db.save_days(&days, &[], now())));
+        match result {
+            Some(Ok(())) => {
+                // Widerrufen bezöge sich auf den Stand vor dem Import.
+                model(|m| m.history = History::default());
+                saved(true);
+            }
+            Some(Err(e)) => {
+                let text = e.to_string();
+                let block = RcBlock::new(move |_timer| show_info_sheet(&ui().window, "Import fehlgeschlagen", &text));
+                unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.0, false, &block) };
+            }
+            None => {}
+        }
+    });
+    alert.beginSheetModalForWindow_completionHandler(&window, Some(&handler));
+}
+
 fn reveal(path: &std::path::Path) {
     let url = NSURL::fileURLWithPath(&ns(&path.to_string_lossy()));
     NSWorkspace::sharedWorkspace().activateFileViewerSelectingURLs(&NSArray::from_retained_slice(&[url]));
@@ -1775,7 +2732,7 @@ fn reveal(path: &std::path::Path) {
 
 fn toolbar_ids() -> Retained<NSArray<NSString>> {
     let flex: Retained<NSString> = unsafe { NSToolbarFlexibleSpaceItemIdentifier }.copy();
-    NSArray::from_retained_slice(&[ns(TB_VIEW), flex, ns(TB_RELOAD), ns(TB_ADD), ns(TB_EXPORT), ns(TB_INSPECTOR)])
+    NSArray::from_retained_slice(&[ns(TB_VIEW), flex, ns(TB_FILTER), ns(TB_RELOAD), ns(TB_ADD), ns(TB_EXPORT), ns(TB_INSPECTOR)])
 }
 
 /// Umschalter „Tage | Woche“ (in der Symbolleiste).
@@ -1806,6 +2763,16 @@ fn toolbar_item(target: &Controller, id: &NSString) -> Option<Retained<NSToolbar
         item.setToolTip(Some(&ns("Zwischen Tagen und Woche wechseln")));
         item.setView(Some(&seg));
         return Some(item);
+    }
+    if id.to_string() == TB_FILTER {
+        let item = NSMenuToolbarItem::initWithItemIdentifier(NSMenuToolbarItem::alloc(mtm), id);
+        item.setLabel(&ns("Filter"));
+        item.setPaletteLabel(&ns("Filter"));
+        item.setMenu(&filter_menu(target));
+        item.setShowsIndicator(true);
+        FILTER_ITEM.with(|f| *f.borrow_mut() = Some(item.clone()));
+        update_filter_item();
+        return Some(Retained::into_super(item));
     }
     let (label, tip, image, action) = match id.to_string().as_str() {
         TB_RELOAD => ("Aktualisieren", "Aufzeichnungen neu laden", "arrow.clockwise", sel!(reload:)),
@@ -1876,6 +2843,7 @@ fn build_main_menu(app: &NSApplication, target: &Controller) {
         vec![
             Some(menu_item("Tag bearbeiten …", Some(sel!(addDay:)), "n", cmd, Some(target))),
             Some(menu_item("Exportieren …", Some(sel!(exportRecords:)), "e", cmd, Some(target))),
+            Some(menu_item("Importieren …", Some(sel!(importRecords:)), "i", cmd | NSEventModifierFlags::Shift, Some(target))),
             None,
             Some(menu_item("Datenbank im Finder zeigen", Some(sel!(revealDatabase:)), "", cmd, Some(target))),
             None,
@@ -1885,8 +2853,10 @@ fn build_main_menu(app: &NSApplication, target: &Controller) {
     submenu(
         "Bearbeiten",
         vec![
-            Some(menu_item("Widerrufen", Some(sel!(undo:)), "z", cmd, None)),
-            Some(menu_item("Wiederholen", Some(sel!(redo:)), "z", cmd | NSEventModifierFlags::Shift, None)),
+            // Korrekturen des Fensters (siehe `step_history`); Titel und Zustand setzt
+            // `validate_menu_item`.
+            Some(menu_item("Widerrufen", Some(sel!(undoEdit:)), "z", cmd, Some(target))),
+            Some(menu_item("Wiederholen", Some(sel!(redoEdit:)), "z", cmd | NSEventModifierFlags::Shift, Some(target))),
             None,
             Some(menu_item("Ausschneiden", Some(sel!(cut:)), "x", cmd, None)),
             Some(menu_item("Kopieren", Some(sel!(copy:)), "c", cmd, None)),
@@ -1899,6 +2869,12 @@ fn build_main_menu(app: &NSApplication, target: &Controller) {
         vec![
             Some(menu_item("Tage", Some(sel!(showDays:)), "1", cmd, Some(target))),
             Some(menu_item("Woche", Some(sel!(showWeek:)), "2", cmd, Some(target))),
+            None,
+            Some({
+                let filter = menu_item("Filter", None, "", cmd, None);
+                filter.setSubmenu(Some(&filter_menu(target)));
+                filter
+            }),
             None,
             Some(menu_item("Heute", Some(sel!(goToday:)), "t", cmd, Some(target))),
             Some(menu_item("Aktualisieren", Some(sel!(reload:)), "r", cmd, Some(target))),
@@ -1938,6 +2914,9 @@ fn summary_card(title: &str) -> (Retained<NSBox>, Retained<NSTextField>, Retaine
     let detail = label("");
     detail.setFont(Some(&font_digits(small_size(), font_regular())));
     detail.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    // Wird es eng, kürzt die Unterzeile, statt die Karte zu sprengen.
+    detail.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+    detail.setContentCompressionResistancePriority_forOrientation(250.0, NSLayoutConstraintOrientation::Horizontal);
     let stack = vstack(2.0);
     stack.addArrangedSubview(&t);
     stack.addArrangedSubview(&value);
@@ -1982,7 +2961,8 @@ fn build_window(controller: &Retained<Controller>, shot: bool) -> Ui {
     };
     unsafe { window.setReleasedWhenClosed(false) };
     window.setTitle(&ns("Aufzeichnungen"));
-    window.setMinSize(NSSize::new(780.0, 480.0));
+    // Schmaler passen die fünf Karten der Übersicht nicht mehr nebeneinander.
+    window.setMinSize(NSSize::new(940.0, 480.0));
     window.setDelegate(Some(ProtocolObject::from_ref(&**controller)));
     window.setToolbarStyle(NSWindowToolbarStyle::Unified);
     window.setTabbingMode(NSWindowTabbingMode::Disallowed);
@@ -2003,7 +2983,7 @@ fn build_window(controller: &Retained<Controller>, shot: bool) -> Ui {
     cards_row.setDistribution(NSStackViewDistribution::FillEqually);
     cards_row.setSpacing(12.0);
     let mut cards = Vec::new();
-    for title in ["Heute", "Diese Woche", "Dieser Monat", "Ø pro Arbeitstag"] {
+    for title in ["Heute", "Diese Woche", "Dieser Monat", "Ø pro Arbeitstag", "Zeitkonto"] {
         let (card, value, detail) = summary_card(title);
         cards_row.addArrangedSubview(&card);
         cards.push((value, detail));
@@ -2026,7 +3006,7 @@ fn build_window(controller: &Retained<Controller>, shot: bool) -> Ui {
         col.setMaxWidth(max);
         if id == "mark" {
             col.setResizingMask(NSTableColumnResizingOptions::empty());
-            col.setHeaderToolTip(Some(&ns("Manuell korrigiert")));
+            col.setHeaderToolTip(Some(&ns("Hinweise auf Regelverstöße und manuelle Korrekturen")));
         } else if id != "date" {
             col.headerCell().setAlignment(NSTextAlignment::Right);
         }
@@ -2036,8 +3016,9 @@ fn build_window(controller: &Retained<Controller>, shot: bool) -> Ui {
         table.setDataSource(Some(ProtocolObject::from_ref(&**controller)));
         table.setDelegate(Some(ProtocolObject::from_ref(&**controller)));
     }
-    // Neuer Name seit der Spalte „Saldo“: alte gespeicherte Spaltenbreiten passen nicht mehr.
-    table.setAutosaveName(Some(&ns("TagwerkRecordsTable2")));
+    // Neuer Name, seit die Symbolspalte zwei Symbole fasst (davor: seit der Spalte „Saldo“):
+    // Mit den alten gespeicherten Spaltenbreiten ragte die Tabelle rechts aus dem Fenster.
+    table.setAutosaveName(Some(&ns("TagwerkRecordsTable3")));
     table.setAutosaveTableColumns(true);
     let table_scroll = NSScrollView::new(mtm);
     table_scroll.setDocumentView(Some(&table));
@@ -2212,6 +3193,14 @@ fn stop_timer() {
 
 fn save_screenshot(path: &std::path::Path) -> Result<(), String> {
     let ui = ui();
+    if let Some(parent) = path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    // Das Fenster, wie es auf dem Bildschirm steht; nur wenn macOS das nicht liefert, die
+    // Ansicht selbst gezeichnet (dann fehlt z. B. das gewählte Segment des Umschalters).
+    if let Some(png) = snapshot::window_png(ui.window.windowNumber() as u32, false) {
+        return std::fs::write(path, png).map_err(|e| e.to_string());
+    }
     let content = ui.window.contentView().ok_or("kein Inhalt")?;
     let view = unsafe { content.superview() }.unwrap_or(content);
     view.layoutSubtreeIfNeeded();
@@ -2268,7 +3257,8 @@ pub fn show(status: Status, embed: Embed) {
     NSApplication::sharedApplication(mtm()).setActivationPolicy(NSApplicationActivationPolicy::Regular);
     let fresh = !OPEN.with(|o| o.replace(true));
     let ui = build(false);
-    week_view::set_actions(Some(embed.add_work), Some(embed.remove_work));
+    week_view::set_actions(Some(week_add_work), Some(week_remove_work));
+    week_view::set_open_day(Some(open_day));
     model(|m| m.status = Some(status));
     reload();
     let today = now().date();
@@ -2357,6 +3347,7 @@ pub fn run(screenshot: Option<PathBuf>, week: bool) -> Result<(), String> {
         week_view::set_actions(None, None);
     } else {
         week_view::set_actions(Some(week_add_work), Some(week_remove_work));
+        week_view::set_open_day(Some(open_day));
     }
     let mode = match (shot, week) {
         (_, true) => Mode::Week,
@@ -2402,3 +3393,91 @@ pub fn run(screenshot: Option<PathBuf>, week: bool) -> Result<(), String> {
     Ok(())
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn date(d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 11, d).unwrap()
+    }
+
+    fn step(name: &'static str, d: u32, start: Option<i64>) -> Step {
+        Step { name, date: date(d), before: Corrections { start, ..Corrections::default() } }
+    }
+
+    #[test]
+    fn corrections_leave_recorded_periods_alone() {
+        let mut day = Day::new(date(17));
+        day.add_period(8 * 3600, 12 * 3600);
+        day.start = Some(7 * 3600);
+        day.add_break(10 * 3600, 10 * 3600 + 1800);
+        let before = Corrections::of(&day);
+        // Inzwischen erfasst der Mac weiter, und der Tag wird anders korrigiert.
+        day.add_period(13 * 3600, 17 * 3600);
+        day.start = None;
+        day.breaks.clear();
+        day.add_work(12 * 3600, 13 * 3600, "Meeting");
+        before.apply(&mut day);
+        assert_eq!(Corrections::of(&day), before);
+        assert_eq!(day.periods.len(), 2, "erfasste Zeit bleibt");
+        assert!(day.work.is_empty());
+    }
+
+    #[test]
+    fn history_merges_follow_ups_and_forgets_redo() {
+        let mut h = History::default();
+        h.record(step("Arbeitsbeginn ändern", 17, None), false);
+        // Pfeiltasten im Uhrzeit-Feld: derselbe Schritt.
+        h.record(step("Arbeitsbeginn ändern", 17, Some(7 * 3600)), true);
+        h.record(step("Arbeitsbeginn ändern", 17, Some(7 * 3600 + 600)), true);
+        assert_eq!(h.undo.len(), 1);
+        assert_eq!(h.undo[0].before.start, None, "der Stand vor der ganzen Eingabe");
+        // Ein anderer Tag oder eine andere Angabe ist ein neuer Schritt – auch als Folgeeingabe.
+        h.record(step("Arbeitsbeginn ändern", 18, None), true);
+        h.record(step("Feierabend ändern", 18, None), true);
+        assert_eq!(h.undo.len(), 3);
+        // Eine neue Änderung verwirft, was sich wiederholen ließ.
+        h.redo.push(step("Pause entfernen", 17, None));
+        h.record(step("Pause eintragen", 17, None), false);
+        assert!(h.redo.is_empty());
+        for _ in 0..History::MAX + 10 {
+            h.record(step("Pause eintragen", 17, None), false);
+        }
+        assert_eq!(h.undo.len(), History::MAX);
+        assert_eq!(history_title(false, Some("Pause entfernen")), "Widerrufen: Pause entfernen");
+        assert_eq!(history_title(true, None), "Wiederholen");
+    }
+
+    #[test]
+    fn account_card_names_start_and_carry() {
+        let s = Settings::default();
+        assert_eq!(account_detail(&s, Some(date(2))), "seit 02.11.2026");
+        assert_eq!(account_detail(&s, None), "noch nichts erfasst");
+        let from = Settings { account_from: Some(date(9)), account_carry: -90 * 60, ..s };
+        assert_eq!(account_detail(&from, Some(date(2))), "ab 09.11.2026 · Übertrag −1:30 h");
+    }
+
+    #[test]
+    fn filter_by_period_and_marks() {
+        let today = date(19);
+        let on = |y: i32, m: u32, d: u32| NaiveDate::from_ymd_opt(y, m, d).unwrap();
+        assert!(Period::ThisMonth.contains(date(1), today) && !Period::ThisMonth.contains(on(2026, 10, 31), today));
+        assert!(Period::LastMonth.contains(on(2026, 10, 31), today) && !Period::LastMonth.contains(date(1), today));
+        assert!(Period::ThisYear.contains(on(2026, 1, 1), today) && !Period::ThisYear.contains(on(2025, 12, 31), today));
+        assert!(Period::LastYear.contains(on(2025, 12, 31), today));
+        // Januar: „Letzter Monat“ ist der Dezember des Vorjahrs.
+        assert!(Period::LastMonth.contains(on(2026, 12, 15), on(2027, 1, 10)));
+
+        let plain = Day::new(date(17));
+        let mut corrected = Day::new(date(18));
+        corrected.start = Some(7 * 3600);
+        let warning = [Warning::Weekend];
+        assert!(!Filter::default().is_active());
+        assert!(Filter::default().shows(&plain, &[], today));
+        let warnings = Filter { warnings: true, ..Filter::default() };
+        assert!(warnings.is_active() && !warnings.shows(&plain, &[], today) && warnings.shows(&plain, &warning, today));
+        let both = Filter { warnings: true, corrected: true, period: Period::ThisMonth };
+        assert!(both.shows(&corrected, &warning, today) && !both.shows(&plain, &warning, today));
+        assert!(!both.shows(&corrected, &warning, on(2026, 12, 1)), "anderer Monat");
+    }
+}

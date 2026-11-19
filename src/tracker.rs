@@ -11,7 +11,7 @@
 //! Spätestens um Mitternacht oder mit dem Feierabend endet es, damit ein vergessenes „Zurück am
 //! Mac“ nicht tagelang Arbeitszeit einträgt.
 
-use crate::day::{self, Activity, Day, Mode, Span, DAY_END};
+use crate::day::{self, Activity, Day, Mode, Span, WorkBlock, DAY_END};
 use crate::rules::{self, Settings, Warning};
 use crate::store::{self, Status};
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime};
@@ -29,6 +29,8 @@ pub enum PauseReason {
     SessionInactive,
     /// Der Benutzer arbeitet ohne Mac weiter (zählt als Arbeitszeit).
     Away,
+    /// Der Mac ist entsperrt, aber seit längerer Zeit ohne Eingabe (Inaktivitätserkennung).
+    Idle,
 }
 
 pub struct Tracker {
@@ -59,6 +61,10 @@ pub struct TodayInfo {
     pub target_secs: i64,
     /// Saldo dieser Woche (Montag bis heute, nur Tage mit Arbeitszeit).
     pub week_balance: i64,
+    /// Stand des Zeitkontos (siehe [`rules::account`]).
+    pub account: i64,
+    /// Arbeit am Stück seit der letzten Pause von mindestens 15 Minuten.
+    pub stretch_secs: i64,
     /// Hinweise zu Verstößen gegen die Regeln.
     pub warnings: Vec<Warning>,
 }
@@ -106,6 +112,26 @@ impl Tracker {
         self.running_since = None;
         self.paused_since = Some(since);
         self.pause_reason = PauseReason::Break;
+    }
+
+    /// Angehalten, weil am entsperrten Mac länger nichts eingegeben wurde?
+    pub fn on_idle(&self) -> bool {
+        self.running_since.is_none() && self.pause_reason == PauseReason::Idle
+    }
+
+    /// Inaktivität: Die Erfassung endet rückwirkend bei der letzten Eingabe `last_input`
+    /// (frühestens am Beginn der laufenden Periode) – wie eine Sperre ab diesem Zeitpunkt.
+    /// Erst ab der Mindestpause wird daraus eine Pause.
+    pub fn go_idle(&mut self, last_input: NaiveDateTime) -> bool {
+        let Some(since) = self.running_since else { return false };
+        self.stop(last_input.max(since), PauseReason::Idle)
+    }
+
+    /// Seit wann der Mac gesperrt war bzw. geschlafen hat (`None`, wenn die Erfassung läuft
+    /// oder aus einem anderen Grund angehalten ist) – für die Nachfrage beim Entsperren.
+    pub fn locked_since(&self) -> Option<NaiveDateTime> {
+        let locked = matches!(self.pause_reason, PauseReason::Locked | PauseReason::Sleep | PauseReason::SessionInactive);
+        (self.running_since.is_none() && locked).then_some(self.paused_since).flatten()
     }
 
     /// Arbeitet der Benutzer gerade ohne Mac weiter (Meeting, Telefonat …)?
@@ -301,14 +327,19 @@ impl Tracker {
             mode: Mode::Auto,
             target_secs: s.daily_target(date),
             week_balance: week_work - week_target,
+            account: rules::account(&snap, date, s),
+            stretch_secs: 0,
             warnings: Vec::new(),
         };
         let Some(d) = snap.iter().find(|d| d.date == date) else { return info };
+        // Mit Abwesenheit gilt deren Soll (halber Urlaubstag: die Hälfte).
+        info.target_secs = s.day_target(date, d.absence);
         if let Some(rec) = d.record(s) {
             info.work_secs = rec.shown_work_secs;
             info.pause_secs = rec.shown_pause_secs;
             info.first_start = (rec.work_secs > 0 || d.start.is_some()).then_some(rec.first_start);
         }
+        info.stretch_secs = Day::current_stretch_secs(&d.spans(s));
         info.start_manual = d.start.is_some();
         info.auto_first = d.auto_bounds_in_frame(s).map(|(first, _)| first);
         info.mode = d.mode();
@@ -344,21 +375,31 @@ impl Tracker {
     // ---------- manuelle Entscheidungen (immer für heute) ----------
 
     /// Arbeitsbeginn festlegen (`None` = wieder das erste Entsperren verwenden).
-    pub fn set_start(&mut self, now: NaiveDateTime, at: Option<i64>) {
+    ///
+    /// Arbeit ohne Mac vor dem neuen Beginn entfällt (die letzte Angabe gilt); zurück kommt,
+    /// was entfallen ist. Läuft gerade Arbeit ohne Mac, zählt sie erst ab dem Beginn.
+    pub fn set_start(&mut self, now: NaiveDateTime, at: Option<i64>) -> Vec<WorkBlock> {
         let at = at.map(|a| a.min(secs(now)));
-        self.day_mut(now.date()).start = at;
+        if let (Some(at), true, Some(since)) = (at, self.on_away(), self.paused_since) {
+            if since.date() == now.date() && secs(since) < at {
+                self.paused_since = Some(now.date().and_hms_opt(0, 0, 0).unwrap() + Duration::seconds(at));
+            }
+        }
+        let cut = self.day_mut(now.date()).set_start(at);
         self.cleanup();
+        cut
     }
 
-    /// Feierabend um `at` (höchstens jetzt). Stoppt die Erfassung.
-    pub fn close_day(&mut self, now: NaiveDateTime, at: i64) {
+    /// Feierabend um `at` (höchstens jetzt). Stoppt die Erfassung. Arbeit ohne Mac danach
+    /// entfällt (die letzte Angabe gilt); zurück kommt, was entfallen ist.
+    pub fn close_day(&mut self, now: NaiveDateTime, at: i64) -> Vec<WorkBlock> {
         let t = secs(now);
         if self.on_away() {
             let until = now.date().and_hms_opt(0, 0, 0).unwrap() + Duration::seconds(at.clamp(0, t));
             self.end_away(until);
         }
         self.stop(now, PauseReason::Manual);
-        self.day_mut(now.date()).end = Some(at.min(t));
+        self.day_mut(now.date()).set_end(Some(at.min(t)))
     }
 
     /// Feierabend zurücknehmen. Die Erfassung startet der Aufrufer (falls entsperrt).
@@ -583,6 +624,54 @@ mod tests {
     }
 
     #[test]
+    fn idle_ends_at_the_last_input() {
+        let mut t = Tracker::new(vec![], Settings::default());
+        t.start(dt(16, 8, 0));
+        // Um 10:12 fällt auf: seit 10:00 keine Eingabe mehr.
+        assert!(t.go_idle(dt(16, 10, 0)));
+        assert!(t.on_idle() && !t.is_running());
+        assert_eq!(t.status(dt(16, 10, 12)), Status::Paused);
+        assert_eq!(t.locked_since(), None, "keine Sperre: keine Nachfrage");
+        assert!(!t.go_idle(dt(16, 10, 5)), "läuft nicht mehr");
+        // Zurück nach 40 Min.: eine Pause ab der letzten Eingabe.
+        assert!(t.start(dt(16, 10, 40)));
+        assert!(!t.on_idle());
+        let info = t.today(dt(16, 11, 0));
+        assert_eq!((info.work_secs, info.pause_secs), (hm(2, 20), hm(0, 40)));
+        // Nur kurz weg (unter der Mindestpause): zählt weiter als Arbeit.
+        t.go_idle(dt(16, 11, 0));
+        t.start(dt(16, 11, 10));
+        assert_eq!(t.today(dt(16, 11, 30)).work_secs, hm(2, 50));
+        // Wird der Mac währenddessen gesperrt, ist es eine Sperre seit der letzten Eingabe.
+        t.go_idle(dt(16, 12, 0));
+        t.stop(dt(16, 12, 20), PauseReason::Locked);
+        assert!(!t.on_idle());
+        assert_eq!(t.locked_since(), Some(dt(16, 12, 0)));
+        // Die letzte Eingabe liegt nie vor dem Beginn der laufenden Periode.
+        let mut t = Tracker::new(vec![], Settings::default());
+        t.start(dt(16, 8, 0));
+        t.go_idle(dt(16, 7, 30));
+        assert_eq!(t.paused_since, Some(dt(16, 8, 0)));
+    }
+
+    #[test]
+    fn today_reports_stretch_and_account() {
+        let mut t = Tracker::new(vec![], Settings::default());
+        t.start(dt(16, 8, 0));
+        t.stop(dt(16, 10, 0), PauseReason::Locked);
+        t.start(dt(16, 10, 5)); // 5 Min.: keine Pause, die Arbeit am Stück läuft weiter
+        assert_eq!(t.today(dt(16, 11, 0)).stretch_secs, hm(3, 0));
+        t.stop(dt(16, 12, 0), PauseReason::Locked);
+        t.start(dt(16, 12, 30)); // 30 Min. Pause: neu
+        let info = t.today(dt(16, 13, 0));
+        assert_eq!(info.stretch_secs, hm(0, 30));
+        // Zeitkonto: heute 4:30 von 7:48, dazu der Übertrag.
+        assert_eq!(info.account, hm(4, 30) - hm(7, 48));
+        t.settings.account_carry = hm(10, 0);
+        assert_eq!(t.today(dt(16, 13, 0)).account, hm(10, 0) + hm(4, 30) - hm(7, 48));
+    }
+
+    #[test]
     fn midnight_split() {
         let all_day = Settings { frame_from: 0, frame_to: DAY_END, ..Settings::default() };
         let mut t = Tracker::new(vec![], all_day);
@@ -653,6 +742,30 @@ mod tests {
         assert_eq!(info.auto_first, Some(hm(8, 12)));
         t.set_start(dt(16, 9, 0), None);
         assert_eq!(t.today(dt(16, 9, 0)).work_secs, hm(0, 48));
+    }
+
+    #[test]
+    fn start_after_an_appointment_drops_it() {
+        // Morgens ein Termin ohne Mac, später soll der Tag erst um 09:20 beginnen.
+        let mut t = Tracker::new(vec![], Settings::default());
+        t.start(dt(16, 8, 0));
+        t.go_away(dt(16, 8, 5), Activity::Meeting);
+        t.start(dt(16, 9, 0));
+        assert_eq!(t.today(dt(16, 10, 0)).first_start, Some(hm(8, 0)));
+        let cut = t.set_start(dt(16, 10, 0), Some(hm(9, 20)));
+        assert_eq!(cut.iter().map(WorkBlock::describe).collect::<Vec<_>>(), ["Meeting 08:05–09:00"]);
+        let info = t.today(dt(16, 10, 0));
+        assert_eq!((info.first_start, info.work_secs), (Some(hm(9, 20)), hm(0, 40)));
+        // Feierabend vor einem nachgetragenen Termin: Der Termin entfällt.
+        t.add_work(dt(16, 0, 0).date(), hm(9, 40), hm(9, 55), "Telefonat");
+        let cut = t.close_day(dt(16, 10, 0), hm(9, 30));
+        assert_eq!(cut.len(), 1);
+        assert_eq!(t.today(dt(16, 10, 0)).work_secs, hm(0, 10));
+        // Läuft gerade Arbeit ohne Mac, zählt sie erst ab dem neuen Beginn.
+        let mut t = Tracker::new(vec![], Settings::default());
+        t.go_away(dt(16, 8, 0), Activity::Call);
+        assert!(t.set_start(dt(16, 9, 0), Some(hm(8, 30))).is_empty());
+        assert_eq!(t.today(dt(16, 9, 0)).work_secs, hm(0, 30));
     }
 
     #[test]
