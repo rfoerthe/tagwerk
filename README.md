@@ -57,8 +57,8 @@ festlegen oder korrigieren.
 Das Menü zeigt auf einen Blick den Status, die Arbeitszeit von heute samt Soll, die
 Pausen, den Beginn, den Saldo der Woche und Hinweise auf Regelverstöße. Der Status ist
 farbig – **grün** = läuft, **orange** = Pause, **indigo** = Feierabend –, der Saldo
-grün im Plus und rot im Minus. Diese Zeilen sind reine Anzeige und lassen sich nicht
-anklicken. Lange Hinweise brechen um, damit das Menü schmal bleibt.
+grün im Plus und rot im Minus, hier wie im Fenster „Aufzeichnungen“. Diese Zeilen sind
+reine Anzeige und lassen sich nicht anklicken. Lange Hinweise brechen um, damit das Menü schmal bleibt.
 
 - **Mitteilungen zu Pause und Höchstarbeitszeit** – über die Mitteilungszentrale von macOS:
   bei **5:45** und **6 Std.** Arbeit am Stück die Erinnerung an die Pause („Noch 15 Min.
@@ -136,6 +136,12 @@ Ein Abschnitt dauert mindestens so lange wie in den Einstellungen festgelegt (St
 15 Min.). Tage mit Regelverstößen tragen ein Warnsymbol, manuell korrigierte Tage einen
 Stift – trifft beides zu, stehen beide Symbole nebeneinander.
 
+Salden sind überall farbig, grün im Plus und rot im Minus: in der Spalte „Saldo“, in den
+Wochensummen, in den Kennzahlen samt Zeitkonto und im Kopf der Wochenansicht. Der Inspektor
+nennt oben Arbeitszeit, Pausen und Saldo des Tages als drei Zahlen nebeneinander. Was ein
+Abschnitt bewirkt, erklärt der Info-Knopf (ⓘ) neben seiner Überschrift – als Tooltip und
+auf Klick als kleines Fenster.
+
 - **Abwesenheit** – im Inspektor lässt sich für einen Tag Urlaub, Krank, Feiertag oder
   Zeitausgleich eintragen, auch für Tage ohne Aufzeichnung (über „Tag bearbeiten“). Urlaub,
   Krankheit und Feiertag senken das Soll des Tages – ganz oder, als halber Tag, auf die
@@ -165,6 +171,11 @@ Ergebnis aus automatischer Erfassung und manuellen Korrekturen. Ein Wechsel von 
 zu „Woche“ zeigt die Woche des ausgewählten Tags. In der Menüleisten-App enthält die Woche auch den gerade laufenden Abschnitt.
 
 - Blättern mit ‹ › oder den Pfeiltasten, **Heute** (⌘T) springt zur aktuellen Woche.
+- Das Raster zeigt nur, was die Woche braucht: die Stunden, in denen gearbeitet wurde, mit
+  einer Stunde Luft davor und danach (mindestens neun Stunden, in der laufenden Woche bis
+  zur aktuellen Uhrzeit), und freie Tage ohne Eintrag als schmale Spalten. Der Knopf mit
+  dem Doppelpfeil neben „Heute“ schaltet auf den ganzen Arbeitszeitrahmen um; die Wahl
+  bleibt gespeichert. Arbeit außerhalb des Rahmens ist in beiden Fällen zu sehen.
 - Jeder Tageskopf zeigt Arbeitszeit und Pausen des Tages, die Kopfzeile Arbeitszeit,
   Pausen und Saldo der Woche. Pausen zählen überall nach den angezeigten Uhrzeiten
   (15:25 – 15:45 sind 20 Min.), die Summe eines Tages ist die Summe seiner Pausen.
@@ -197,21 +208,27 @@ zu „Woche“ zeigt die Woche des ausgewählten Tags. In der Menüleisten-App e
 <br>
 <img src="doc/screenshots/wochenansicht.png" alt="Wochenansicht der laufenden Woche" width="860">
 <br><br>
-<img src="doc/screenshots/wochenansicht-ausserhalb.png" alt="Wochenansicht mit Tooltip zu Arbeit außerhalb des Arbeitszeitrahmens" width="860">
+<img src="doc/screenshots/wochenansicht-ausserhalb.png" alt="Wochenansicht mit Arbeit außerhalb des Arbeitszeitrahmens" width="860">
 </details>
 
 ### Einstellungen
 
 <table>
   <tr>
-    <td align="center"><img src="doc/screenshots/einstellungen.png" alt="Einstellungen" width="400"></td>
-    <td align="center"><img src="doc/screenshots/einstellungen-symbolsaetze.png" alt="Auswahl des Symbolsatzes für die Menüleiste" width="400"></td>
+    <td align="center"><img src="doc/screenshots/einstellungen-allgemein.png" alt="Einstellungen, Reiter „Allgemein“" width="400"><br><sub><b>Allgemein</b></sub></td>
+    <td align="center"><img src="doc/screenshots/einstellungen-arbeitszeit.png" alt="Einstellungen, Reiter „Arbeitszeit“" width="400"><br><sub><b>Arbeitszeit</b></sub></td>
+  </tr>
+  <tr>
+    <td align="center"><img src="doc/screenshots/einstellungen-erfassung.png" alt="Einstellungen, Reiter „Erfassung“" width="400"><br><sub><b>Erfassung</b></sub></td>
+    <td align="center"><img src="doc/screenshots/einstellungen-mitteilungen.png" alt="Einstellungen, Reiter „Mitteilungen“" width="400"><br><sub><b>Mitteilungen</b></sub></td>
   </tr>
 </table>
 
 Erreichbar über „Einstellungen …“ in der Menüleiste oder ⌘, im Fenster „Aufzeichnungen“.
 Änderungen gelten sofort, auch für bereits erfasste Tage. Der Ordner-Knopf in der
-Titelleiste zeigt den Datenordner im Finder.
+Titelleiste zeigt den Datenordner im Finder. **Standardwerte** setzt alle Einstellungen
+auf allen Reitern zurück, auch Zeitkonto und Übertrag; nur „Bei Anmeldung starten“ bleibt,
+wie es ist.
 
 Die Einstellungen stehen auf vier Reitern:
 
@@ -226,14 +243,26 @@ Die Einstellungen stehen auf vier Reitern:
 |              | Arbeitstage            | Mo bis Fr einzeln wählbar; das Wochensoll verteilt sich gleichmäßig auf sie (angezeigt als „4-Tage-Woche · 9:45 h pro Arbeitstag“) | Mo–Fr |
 |              | Zeitkonto              | Zählt alle erfassten Tage oder erst ab einem Datum; der Übertrag ist der Saldo aus der Zeit davor (z. B. `+12:30`) | alle Tage, kein Übertrag |
 | Erfassung    | Mindestpause           | Ab dieser Sperrdauer gilt eine Unterbrechung als Pause                  | 15 Min.         |
-|              | Arbeit ohne Mac        | Mindestdauer beim Eintragen; nie kürzer als die Mindestpause            | 15 Min.         |
+|              | Arbeit ohne Mac        | „mindestens … Minuten“: kürzere Abschnitte lassen sich nicht eintragen; nie weniger als die Mindestpause | 15 Min. |
 |              | Inaktivität            | Erfassung anhalten nach so vielen Minuten ohne Eingabe                  | aus (10 Min.)   |
 |              | Lange Sperre           | Beim Entsperren nach mindestens 30 Min. Sperre nachfragen               | aus             |
 | Mitteilungen | Mitteilungen           | Zeigt, ob Tagwerk Mitteilungen senden darf; wenn nicht, öffnet „Systemeinstellungen öffnen“ die Mitteilungseinstellungen von Tagwerk | – |
 |              | Erinnern an            | Höchstarbeitszeit (9:45 und 10 Std.) und Pause (5:45 und 6 Std. am Stück), einzeln abschaltbar | beides ein |
 
-An freien Tagen – dem Wochenende und abgewählten Arbeitstagen – gibt es kein Soll; Arbeit
-dort zählt als Mehrarbeit.
+- **Allgemein** – unter der Auswahl des Symbolsatzes stehen seine vier Zustände als
+  Vorschau: läuft, Pause, außerhalb des Arbeitszeitrahmens, Feierabend.
+- **Arbeitszeit** – unter den Arbeitstagen steht, was aus der Auswahl folgt, etwa
+  „5-Tage-Woche · 7:48 h pro Arbeitstag“. An freien Tagen – dem Wochenende und abgewählten
+  Arbeitstagen – gibt es kein Soll; Arbeit dort zählt als Mehrarbeit. Das Zeitkonto zählt
+  ohne Haken alle erfassten Tage, mit Haken erst ab dem Datum; der Übertrag wird mit
+  Vorzeichen eingegeben (`+12:30`, `−3:15`).
+- **Erfassung** – die Mindestdauer für Arbeit ohne Mac liegt nie unter der Mindestpause:
+  Wird die Mindestpause erhöht, steigt sie mit. Die Minuten für die Inaktivität lassen sich
+  erst einstellen, wenn die Erkennung eingeschaltet ist. Die Nachfrage nach langer Sperre
+  braucht Mitteilungen.
+- **Mitteilungen** – oben steht, ob macOS Mitteilungen von Tagwerk zulässt (erlaubt, nicht
+  erlaubt, ausgeblendet oder nur in der installierten App). Die beiden Schalter gelten nur
+  für die Erinnerungen; die Hinweise im Menü und im Fenster „Aufzeichnungen“ bleiben.
 
 Neun Symbolsätze stehen zur Wahl. Sie werden von der App selbst gezeichnet und sind
 damit in jeder Höhe scharf:
@@ -392,6 +421,8 @@ Tagwerk --week-screenshot <png>
                               speichern und beenden
 Tagwerk --settings-screenshot <png>
                               Fenster „Einstellungen“ als Bild speichern und beenden
+Tagwerk --menu-screenshot <png>
+                              Menü der Menüleiste öffnen, als Bild speichern und beenden
 ```
 
 Es läuft immer nur eine Instanz der Menüleisten-App.

@@ -804,7 +804,8 @@ fn build(on_change: fn()) -> State {
     let frame_row = hstack(&[&frame_from, &label("bis"), &frame_to, &label("Uhr")]);
     let weekly_row = hstack(&[&weekly, &weekly_stepper, &label("Stunden pro Woche")]);
     let pause_row = hstack(&[&pause, &pause_stepper, &label("Minuten")]);
-    let work_row = hstack(&[&work, &work_stepper, &label("Minuten")]);
+    // „Arbeit ohne Mac: mindestens 15 Minuten“ – ohne das Wort wäre nicht klar, was die Zahl ist.
+    let work_row = hstack(&[&label("mindestens"), &work, &work_stepper, &label("Minuten")]);
     let bar_row = hstack(&[&icon_popup, &show_time]);
     bar_row.setSpacing(14.0);
     let day_views: Vec<&NSView> = workdays.iter().map(|c| &***c as &NSView).collect();
@@ -888,8 +889,8 @@ fn build(on_change: fn()) -> State {
                 row(
                     None,
                     &caption(
-                        "Mindestdauer beim Eintragen; kürzere Abschnitte werden abgelehnt. Nie weniger als \
-                         die Mindestpause – wird sie erhöht, steigt dieser Wert mit.",
+                        "Kürzere Abschnitte lassen sich nicht eintragen. Nie weniger als die Mindestpause – \
+                         wird sie erhöht, steigt dieser Wert mit.",
                     ),
                 ),
                 row(Some("Inaktivität:"), &idle_row),
@@ -1134,6 +1135,12 @@ pub fn screenshot(path: &std::path::Path) -> Result<(), String> {
         s.window.orderFront(None);
     });
     let window = with_state(|s| s.window.clone()).ok_or("kein Fenster")?;
+    // Das Fenster, wie es auf dem Bildschirm steht (mit Reiterleiste) – dafür muss es erst
+    // einmal gezeichnet sein. Nur wenn macOS das nicht liefert, die Ansicht selbst gezeichnet.
+    objc2_foundation::NSRunLoop::mainRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.8));
+    if let Some(png) = crate::snapshot::window_png(window.windowNumber() as u32, false) {
+        return std::fs::write(path, png).map_err(|e| e.to_string());
+    }
     let content = window.contentView().ok_or("kein Inhalt")?;
     let frame_view = unsafe { content.superview() }.unwrap_or(content);
     frame_view.layoutSubtreeIfNeeded();

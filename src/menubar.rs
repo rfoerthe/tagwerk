@@ -10,9 +10,11 @@ use crate::glyphs;
 use crate::hotkey;
 use crate::login_item;
 use crate::notify;
+use crate::palette::{self, green, indigo, orange, red};
 use crate::records;
 use crate::rules::{self, BreakWatch, IconSet, LimitWatch};
 use crate::settings_window;
+use crate::snapshot;
 use crate::store;
 use crate::tracker::{PauseReason, Tracker};
 use crate::week_view;
@@ -21,7 +23,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSApplication,
+    NSAlert, NSAlertFirstButtonReturn, NSApplication,
     NSApplicationActivationPolicy, NSAttributedStringAttachmentConveniences, NSColor, NSDatePicker,
     NSDatePickerElementFlags, NSDatePickerStyle, NSFont, NSFontAttributeName, NSFontWeightRegular,
     NSFontWeightSemibold, NSForegroundColorAttributeName, NSImage, NSImageSymbolConfiguration, NSLineBreakMode, NSMenu,
@@ -656,10 +658,10 @@ impl AppState {
         }
         self.items.worked.set(&rich(&parts));
         let balance = rules::fmt_balance(info.week_balance);
-        let tone = if info.week_balance < -59 { Tone::Bad } else { Tone::Good };
+        let tone = if palette::is_minus(info.week_balance) { Tone::Bad } else { Tone::Good };
         self.items.balance.set(&rich(&[("Saldo diese Woche:  ", Tone::Label), (&balance, tone)]));
         let account = rules::fmt_balance(info.account);
-        let tone = if info.account < -59 { Tone::Bad } else { Tone::Good };
+        let tone = if palette::is_minus(info.account) { Tone::Bad } else { Tone::Good };
         self.items.account.set(&rich(&[("Zeitkonto:  ", Tone::Label), (&account, tone)]));
         let pauses = store::fmt_hm(info.pause_secs);
         self.items.pauses.set(&rich(&[("Pausen heute:  ", Tone::Label), (&pauses, Tone::Value)]));
@@ -959,39 +961,6 @@ enum Tone {
     Bad,
     /// Statuszeile: halbfett in der Farbe des Zustands
     Status(fn() -> Retained<NSColor>),
-}
-
-/// Farbe, die im hellen Erscheinungsbild einen dunkleren, im dunklen den hellen
-/// Systemton nimmt – die Systemfarben allein sind auf hellem Grund zu kontrastarm.
-fn adaptive(light: (f64, f64, f64), dark: fn() -> Retained<NSColor>) -> Retained<NSColor> {
-    let light = NSColor::colorWithSRGBRed_green_blue_alpha(light.0, light.1, light.2, 1.0);
-    let dark = dark();
-    let provider = block2::RcBlock::new(move |appearance: std::ptr::NonNull<NSAppearance>| {
-        let names = NSArray::from_slice(&[unsafe { NSAppearanceNameAqua }, unsafe { NSAppearanceNameDarkAqua }]);
-        let best = unsafe { appearance.as_ref() }.bestMatchFromAppearancesWithNames(&names);
-        let is_dark = best.is_some_and(|n| &*n == unsafe { NSAppearanceNameDarkAqua });
-        // Beide Farben gehören dem Block und leben so lange wie die dynamische Farbe.
-        std::ptr::NonNull::from(if is_dark { &*dark } else { &*light })
-    });
-    unsafe { NSColor::colorWithName_dynamicProvider(None, &provider) }
-}
-
-fn green() -> Retained<NSColor> {
-    adaptive((0.09, 0.50, 0.20), NSColor::systemGreenColor)
-}
-
-fn orange() -> Retained<NSColor> {
-    adaptive((0.74, 0.36, 0.0), NSColor::systemOrangeColor)
-}
-
-/// Feierabend: Indigo statt Blau, damit der Text auf der (meist blauen) Markierung
-/// beim Überfahren mit der Maus lesbar bleibt.
-fn indigo() -> Retained<NSColor> {
-    adaptive((0.30, 0.24, 0.78), NSColor::systemIndigoColor)
-}
-
-fn red() -> Retained<NSColor> {
-    adaptive((0.78, 0.12, 0.12), NSColor::systemRedColor)
 }
 
 /// Menütitel aus mehreren Teilen mit eigener Farbe und Schrift.
@@ -1381,6 +1350,60 @@ fn show_fatal(mtm: MainThreadMarker, message: &str, info: &str) {
     alert.runModal();
 }
 
+/// Bild des geöffneten Menüs für `--menu-screenshot`: Zustand setzen, das Menü öffnen, das
+/// Menüfenster vom Fensterserver holen, speichern und beenden. Solange das Menü offen ist,
+/// wartet der Hauptthread in dessen Schleife – deshalb laufen beide Schritte über Zeitgeber,
+/// die auch dann feuern.
+fn schedule_menu_screenshot(path: std::path::PathBuf) {
+    match std::env::var("TAGWERK_MENU_STATE").as_deref() {
+        Ok("break") => act(|s, t| {
+            s.tracker.take_break(t);
+        }),
+        Ok("away") => act(|s, t| {
+            s.tracker.go_away(t, Activity::Meeting);
+        }),
+        Ok("closed") => act(|s, t| {
+            s.tracker.close_day(t, secs(t));
+        }),
+        _ => {}
+    }
+    let after = |seconds: f64, block: &block2::DynBlock<dyn Fn(std::ptr::NonNull<NSTimer>)>| unsafe {
+        let timer = NSTimer::timerWithTimeInterval_repeats_block(seconds, false, block);
+        NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes);
+    };
+    // Erst das Bild (während das Menü offen ist), dann schließen und beenden.
+    let shoot = block2::RcBlock::new(move |_timer: std::ptr::NonNull<NSTimer>| {
+        // Das Menü liegt über allen normalen Fenstern; das größte Fenster dort ist es.
+        let menu = snapshot::own_windows()
+            .into_iter()
+            .filter(|(_, layer, _)| *layer > 20)
+            .max_by(|a, b| (a.2.width * a.2.height).total_cmp(&(b.2.width * b.2.height)));
+        let result = match menu.and_then(|(id, ..)| snapshot::window_png(id, true)) {
+            Some(png) => std::fs::write(&path, png).map_err(|e| e.to_string()),
+            None => Err("Das geöffnete Menü ließ sich nicht aufnehmen (Bildschirm gesperrt?).".to_string()),
+        };
+        let menu = MainThreadMarker::new().and_then(|mtm| with_state(|s| s.status_item.menu(mtm)).flatten());
+        if let Some(menu) = menu {
+            menu.cancelTracking();
+        }
+        shutdown();
+        if let Err(e) = result {
+            eprintln!("Fehler: {e}");
+            std::process::exit(1);
+        }
+        std::process::exit(0);
+    });
+    after(2.0, &shoot);
+    let open = block2::RcBlock::new(|_timer: std::ptr::NonNull<NSTimer>| {
+        // Außerhalb von `with_state`: Beim Öffnen fragt das Menü den Zustand selbst ab.
+        let button = MainThreadMarker::new().and_then(|mtm| with_state(|s| s.status_item.button(mtm)).flatten());
+        if let Some(button) = button {
+            unsafe { button.performClick(None) };
+        }
+    });
+    after(0.8, &open);
+}
+
 /// Hält eine Sperrdatei, damit nur eine Instanz läuft.
 fn single_instance() -> Option<std::fs::File> {
     let _ = std::fs::create_dir_all(store::data_dir());
@@ -1396,7 +1419,11 @@ fn single_instance() -> Option<std::fs::File> {
     }
 }
 
-pub fn run() {
+/// Startet die Menüleisten-App. Mit `screenshot` (zum Testen und für die Bilder im README:
+/// `Tagwerk --menu-screenshot <png>`) öffnet sie ihr Menü, speichert ein Bild davon und endet
+/// wieder; den Zustand dafür setzt `TAGWERK_MENU_STATE=break|away|closed` (sonst läuft die
+/// Erfassung).
+pub fn run(screenshot: Option<std::path::PathBuf>) {
     let mtm = MainThreadMarker::new().expect("Tagwerk muss im Hauptthread starten");
     let Some(_lock) = single_instance() else {
         eprintln!("Tagwerk läuft bereits.");
@@ -1641,6 +1668,9 @@ pub fn run() {
         NSRunLoop::mainRunLoop().addTimer_forMode(&timer, NSRunLoopCommonModes);
     }
 
+    if let Some(path) = screenshot {
+        schedule_menu_screenshot(path);
+    }
     app.run();
 }
 
@@ -1649,7 +1679,7 @@ mod tests {
     use super::*;
     use objc2::AnyThread;
     use objc2_app_kit::{
-        NSAttributedStringNSStringDrawing, NSBezierPath, NSBitmapImageFileType, NSBitmapImageRep, NSDeviceRGBColorSpace, NSGraphicsContext,
+        NSAppearance, NSAppearanceNameAqua, NSAppearanceNameDarkAqua, NSAttributedStringNSStringDrawing, NSBezierPath, NSBitmapImageFileType, NSBitmapImageRep, NSDeviceRGBColorSpace, NSGraphicsContext,
     };
     use objc2_foundation::NSSize;
 

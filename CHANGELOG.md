@@ -90,8 +90,39 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   („Aufzeichnungen“) wirken dann in jeder App, auch bei geschlossenem Menü. Standard: aus.
   Die Kurzbefehle brauchen keine Freigabe unter „Bedienungshilfen“; ist eine
   Tastenkombination schon vergeben, meldet Tagwerk das.
+- Die Wochenansicht nutzt den Platz: Das Raster zeigt nur die Stunden, in denen in der
+  Woche gearbeitet wurde, mit einer Stunde Luft davor und danach (mindestens neun Stunden,
+  in der laufenden Woche bis zur aktuellen Uhrzeit), und freie Tage ohne Eintrag als
+  schmale Spalten. Bisher standen immer der ganze Arbeitszeitrahmen (07–22 Uhr) und volle
+  Wochenendspalten da. Der Knopf mit dem Doppelpfeil neben „Heute“ schaltet auf den ganzen
+  Rahmen um; die Wahl bleibt gespeichert.
+- Info-Knöpfe (ⓘ) im Inspektor: Was Abwesenheit, Arbeitsbeginn, Pausen, Arbeit ohne Mac und
+  Feierabend bewirken, steht als Tooltip am Knopf neben der Überschrift und erscheint auf
+  Klick als kleines Fenster.
+- `--menu-screenshot <png>`: öffnet das Menü der Menüleiste und speichert es als Bild; den
+  Zustand setzt `TAGWERK_MENU_STATE=break|away|closed`. Der Reiter für
+  `--settings-screenshot` lässt sich mit `TAGWERK_SETTINGS_TAB=0…3` wählen.
 
 ### Geändert
+- Salden sind überall farbig, grün im Plus und rot im Minus – nicht mehr nur im Menü: in
+  der Spalte „Saldo“ der Tabelle, in den Wochensummen, in den Kennzahlen (Woche, Monat,
+  Zeitkonto) und im Kopf der Wochenansicht. In der ausgewählten Zeile bleibt die Schrift
+  weiß.
+- Der Inspektor ist kürzer: Unter dem Datum stehen Arbeitszeit, Pausen und Saldo als drei
+  Zahlen nebeneinander statt in einer Zeile, die mitten in „Saldo +1:32 h“ umbrach. Die
+  erklärenden Absätze zu Pausen, Arbeit ohne Mac und automatisch Erfasstem sind in die
+  Info-Knöpfe gewandert; zur Abwesenheit steht nur noch dann ein Satz, wenn eine
+  eingetragen ist.
+- Einstellungen › Erfassung: „Arbeit ohne Mac: mindestens 15 Minuten“ sagt jetzt selbst,
+  dass es um die Mindestdauer geht; der Text darunter ist kürzer.
+- Die Bilder im README sind neu und zeigen den aktuellen Stand: das Menü mit Zeitkonto,
+  die Ansicht „Woche“ im Fenster „Aufzeichnungen“ und alle vier Reiter der Einstellungen,
+  die jetzt auch einzeln beschrieben sind.
+- `--screenshot`, `--week-screenshot` und `--settings-screenshot` holen das Bild jetzt vom
+  Fensterserver, statt die Ansicht selbst zu zeichnen. Bisher fehlte, was macOS erst beim
+  Zusammensetzen ergänzt: Das gewählte Segment von „Tage | Woche“ und die Reiterleiste der
+  Einstellungen blieben leer. Bei gesperrtem Bildschirm gibt es kein solches Bild; dann
+  wird wie bisher gezeichnet.
 - Das Fenster „Einstellungen“ hat vier Reiter – Allgemein, Arbeitszeit, Erfassung und
   Mitteilungen – statt einer langen Liste.
 - Die Mitteilungen zur Höchstarbeitszeit und zur Pause lassen sich in den Einstellungen

@@ -15,6 +15,9 @@
 //!                                 Bild speichern, beenden
 //!   Tagwerk --settings-screenshot <png>
 //!                                 Fenster "Einstellungen" öffnen, Bild speichern, beenden
+//!   Tagwerk --menu-screenshot <png>
+//!                                 Menüleisten-App starten, ihr Menü öffnen, Bild speichern,
+//!                                 beenden
 
 #[cfg(target_os = "macos")]
 mod about;
@@ -30,12 +33,16 @@ mod menubar;
 #[cfg(target_os = "macos")]
 mod notify;
 #[cfg(target_os = "macos")]
+mod palette;
+#[cfg(target_os = "macos")]
 mod pdf;
 #[cfg(target_os = "macos")]
 mod records;
 mod rules;
 #[cfg(target_os = "macos")]
 mod settings_window;
+#[cfg(target_os = "macos")]
+mod snapshot;
 mod store;
 mod tracker;
 #[cfg(target_os = "macos")]
@@ -102,6 +109,16 @@ fn main() {
         return;
     }
 
+    if has("--menu-screenshot") {
+        let Some(path) = arg_after("--menu-screenshot") else {
+            eprintln!("Aufruf: Tagwerk --menu-screenshot <datei.png>");
+            std::process::exit(2);
+        };
+        #[cfg(target_os = "macos")]
+        menubar::run(Some(PathBuf::from(path)));
+        return;
+    }
+
     if has("--settings-screenshot") {
         let Some(path) = arg_after("--settings-screenshot") else {
             eprintln!("Aufruf: Tagwerk --settings-screenshot <datei.png>");
@@ -123,7 +140,7 @@ fn main() {
     }
 
     #[cfg(target_os = "macos")]
-    menubar::run();
+    menubar::run(None);
 
     #[cfg(not(target_os = "macos"))]
     fail("Die Menüleisten-App und das Fenster „Aufzeichnungen“ gibt es nur für macOS.");

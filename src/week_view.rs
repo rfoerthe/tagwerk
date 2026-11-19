@@ -16,6 +16,7 @@
 //! dem Arbeitsbeginn und nach dem Feierabend eine halbe Stunde ab dem Klick.
 
 use crate::day::{fmt_clock, secs_of, Activity, Day, Span, DAY_END};
+use crate::palette;
 use crate::records;
 use crate::rules::{self, Settings, Warning};
 use crate::store;
@@ -25,7 +26,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, Sel};
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::*;
-use objc2_foundation::{NSArray, NSCopying, NSDictionary, NSEdgeInsets, NSPoint, NSRect, NSRectEdge, NSSize, NSString, NSTimer};
+use objc2_foundation::{NSArray, NSCopying, NSDictionary, NSUserDefaults, NSEdgeInsets, NSPoint, NSRect, NSRectEdge, NSSize, NSString, NSTimer};
 use std::cell::{Cell, RefCell};
 
 const WEEKDAYS_SHORT: [&str; 7] = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"];
@@ -130,15 +131,60 @@ fn week_title(monday: NaiveDate) -> String {
     format!("KW {}  ·  {range}", monday.iso_week().week())
 }
 
-/// Volle Stunden, die das Raster zeigt: der Arbeitszeitrahmen und – falls in dieser
-/// Woche außerhalb gearbeitet wurde – auch diese Zeit.
-fn hour_range(s: &Settings, cols: &[Column]) -> (i64, i64) {
+/// So viele Stunden zeigt das kompakte Raster mindestens.
+const MIN_HOURS: i64 = 9;
+/// Breite eines freien Tages ohne Einträge im Verhältnis zu einem Arbeitstag.
+const NARROW: f64 = 0.45;
+
+/// Volle Stunden, die das Raster zeigt.
+///
+/// Kompakt (`compact`): die Zeit, in der in dieser Woche gearbeitet wurde, mit einer Stunde
+/// Luft davor und danach – so füllen die Abschnitte das Raster, statt sich in einem Teil
+/// davon zu drängen. `now` (Sekunden seit Mitternacht, nur in der laufenden Woche) gehört
+/// dazu, mindestens sind es [`MIN_HOURS`] Stunden. Die Luft und das Auffüllen bleiben im
+/// Arbeitszeitrahmen; Arbeit außerhalb gehört immer dazu.
+///
+/// Sonst, und in einer Woche ohne Arbeit: der ganze Arbeitszeitrahmen und – falls außerhalb
+/// gearbeitet wurde – auch diese Zeit.
+fn hour_range(s: &Settings, cols: &[Column], now: Option<i64>, compact: bool) -> (i64, i64) {
     let blocks = cols.iter().flat_map(|c| &c.blocks);
-    let from = blocks.clone().map(|b| b.from).fold(s.frame_from, i64::min);
-    let to = blocks.map(|b| b.to).fold(s.frame_to, i64::max);
-    let h0 = (from / 3600).clamp(0, 23);
-    let h1 = ((to + 3599) / 3600).clamp(h0 + 1, 24);
+    let first = blocks.clone().map(|b| b.from).min();
+    let last = blocks.map(|b| b.to).max();
+    let hours = |from: i64, to: i64| {
+        let h0 = (from / 3600).clamp(0, 23);
+        (h0, ((to + 3599) / 3600).clamp(h0 + 1, 24))
+    };
+    let (frame0, frame1) = hours(s.frame_from, s.frame_to);
+    let (Some(first), Some(last), true) = (first, last, compact) else {
+        return hours(first.map_or(s.frame_from, |f| f.min(s.frame_from)), last.map_or(s.frame_to, |l| l.max(s.frame_to)));
+    };
+    let now = now.map(|n| n.clamp(s.frame_from, s.frame_to));
+    let (used0, used1) = hours(now.map_or(first, |n| n.min(first)), now.map_or(last, |n| n.max(last)));
+    // Eine Stunde Luft, aber nicht über den Rahmen hinaus (außer die Arbeit liegt dort).
+    let mut h0 = (used0 - 1).max(frame0.min(used0));
+    let mut h1 = (used1 + 1).min(frame1.max(used1));
+    // Auf die Mindesthöhe auffüllen: abwechselnd unten und oben, solange der Rahmen reicht.
+    while h1 - h0 < MIN_HOURS && (h1 < frame1 || h0 > frame0) {
+        if h1 < frame1 {
+            h1 += 1;
+        }
+        if h1 - h0 < MIN_HOURS && h0 > frame0 {
+            h0 -= 1;
+        }
+    }
     (h0, h1)
+}
+
+/// Breite der Tagesspalten im Verhältnis zueinander: Freie Tage ohne jeden Eintrag (meist
+/// das Wochenende) sind schmal, damit die Arbeitstage den Platz bekommen.
+fn column_weights(s: &Settings, cols: &[Column]) -> [f64; 7] {
+    let mut weights = [1.0; 7];
+    for (w, c) in weights.iter_mut().zip(cols) {
+        if !s.is_workday(c.date) && c.blocks.is_empty() && c.absence.is_none() {
+            *w = NARROW;
+        }
+    }
+    weights
 }
 
 /// Spalten der Woche ab `monday`.
@@ -221,19 +267,30 @@ fn notes(day: &Day, s: &Settings, sp: Span, first: bool, last: bool) -> Vec<Stri
 /// `Woche: 31:20 h  ·  Pausen: 3:05 h  ·  Saldo +0:08 h` (Saldo bis heute, wie in der
 /// Menüleiste).
 fn week_summary(snap: &Snapshot, monday: NaiveDate, cols: &[Column]) -> String {
+    let (head, balance) = week_summary_parts(snap, monday, cols);
+    match balance {
+        Some(b) => format!("{head}{}", rules::fmt_balance(b)),
+        None => head,
+    }
+}
+
+/// Wie [`week_summary`], aber der Saldo getrennt (er wird farbig gesetzt): Der Text endet
+/// dann mit „Saldo “.
+fn week_summary_parts(snap: &Snapshot, monday: NaiveDate, cols: &[Column]) -> (String, Option<i64>) {
     let total: i64 = cols.iter().map(|c| c.work_secs).sum();
     let pauses: i64 = cols.iter().map(|c| c.pause_secs).sum();
     let today = snap.now.date();
     if monday > today {
-        return "Woche: –".to_string();
+        return ("Woche: –".to_string(), None);
     }
     let head = format!("Woche: {}  ·  Pausen: {}", store::fmt_hm(total), store::fmt_hm(pauses));
     let to = (monday + Duration::days(6)).min(today);
     let (work, target) = rules::balance(&snap.days, monday, to, &snap.settings);
-    if work == 0 {
-        return head;
+    // Ohne Arbeitszeit und ohne Soll (z. B. Zeitausgleich) gibt es keinen Saldo.
+    if work == 0 && target == 0 {
+        return (head, None);
     }
-    format!("{head}  ·  Saldo {}", rules::fmt_balance(work - target))
+    (format!("{head}  ·  Saldo "), Some(work - target))
 }
 
 /// `Hinweise an 2 Tagen` (leer, wenn es keine gibt).
@@ -255,13 +312,20 @@ struct Data {
     monday: NaiveDate,
     cols: Vec<Column>,
     hours: (i64, i64),
+    /// Breite der Spalten im Verhältnis zueinander (siehe [`column_weights`]).
+    weights: [f64; 7],
+    /// Den ganzen Arbeitszeitrahmen zeigen statt nur der Arbeitszeit der Woche.
+    full_frame: bool,
 }
 
 impl Data {
     fn rebuild(&mut self) {
         if let Some(snap) = &self.snap {
             self.cols = columns(snap, self.monday);
-            self.hours = hour_range(&snap.settings, &self.cols);
+            // „Jetzt“ gehört nur in der laufenden Woche ins Raster.
+            let now = (monday_of(snap.now.date()) == self.monday).then(|| secs_of(snap.now.time()));
+            self.hours = hour_range(&snap.settings, &self.cols, now, !self.full_frame);
+            self.weights = column_weights(&snap.settings, &self.cols);
         }
     }
 }
@@ -271,24 +335,35 @@ impl Data {
 struct Geo {
     w: f64,
     h: f64,
-    col_w: f64,
+    /// Linke Kanten der sieben Spalten und die rechte Kante der letzten.
+    xs: [f64; 8],
     hour_h: f64,
     h0: i64,
     h1: i64,
 }
 
 impl Geo {
-    fn new(bounds: NSRect, hours: (i64, i64)) -> Self {
+    fn new(bounds: NSRect, d: &Data) -> Self {
         let (w, h) = (bounds.size.width, bounds.size.height);
-        let n = (hours.1 - hours.0).max(1) as f64;
+        let n = (d.hours.1 - d.hours.0).max(1) as f64;
+        let unit = ((w - GUTTER_W) / d.weights.iter().sum::<f64>()).max(1.0);
+        let mut xs = [GUTTER_W; 8];
+        for i in 0..7 {
+            xs[i + 1] = xs[i] + d.weights[i] * unit;
+        }
         Geo {
             w,
             h,
-            col_w: ((w - GUTTER_W) / 7.0).max(1.0),
+            xs,
             hour_h: ((h - HEADER_H - GRID_PAD_TOP - GRID_PAD_BOTTOM) / n).max(1.0),
-            h0: hours.0,
-            h1: hours.1,
+            h0: d.hours.0,
+            h1: d.hours.1,
         }
+    }
+
+    /// Breite der Spalte `col`.
+    fn col_w(&self, col: usize) -> f64 {
+        self.xs[col.min(6) + 1] - self.xs[col.min(6)]
     }
 
     fn grid_top(&self) -> f64 {
@@ -306,39 +381,40 @@ impl Geo {
         (self.h0 * 3600..self.h1 * 3600).contains(&secs).then_some(secs)
     }
 
+    /// Linke Kante der Spalte `col` (7 = rechte Kante der letzten).
     fn x(&self, col: usize) -> f64 {
-        GUTTER_W + col as f64 * self.col_w
+        self.xs[col.min(7)]
     }
 
     fn block_rect(&self, col: usize, b: &Block) -> NSRect {
         let top = self.y(b.from.max(self.h0 * 3600));
         let bottom = self.y(b.to.min(self.h1 * 3600)).max(top + 3.0);
-        NSRect::new(NSPoint::new(self.x(col) + 3.0, top + 0.5), NSSize::new(self.col_w - 6.0, bottom - top - 1.0))
+        NSRect::new(NSPoint::new(self.x(col) + 3.0, top + 0.5), NSSize::new(self.col_w(col) - 6.0, bottom - top - 1.0))
     }
 
     /// Bereich einer Pause zwischen zwei Abschnitten.
     fn gap_rect(&self, col: usize, gap: Span) -> NSRect {
         let top = self.y(gap.from.max(self.h0 * 3600));
         let bottom = self.y(gap.to.min(self.h1 * 3600)).max(top);
-        NSRect::new(NSPoint::new(self.x(col) + 3.0, top), NSSize::new(self.col_w - 6.0, bottom - top))
+        NSRect::new(NSPoint::new(self.x(col) + 3.0, top), NSSize::new(self.col_w(col) - 6.0, bottom - top))
     }
 
     /// Bereich von Arbeit ohne Mac (innerhalb ihres Blocks).
     fn span_rect(&self, col: usize, sp: Span) -> NSRect {
         let top = self.y(sp.from.max(self.h0 * 3600));
         let bottom = self.y(sp.to.min(self.h1 * 3600)).max(top + 1.0);
-        NSRect::new(NSPoint::new(self.x(col) + 3.0, top + 0.5), NSSize::new(self.col_w - 6.0, bottom - top - 1.0))
+        NSRect::new(NSPoint::new(self.x(col) + 3.0, top + 0.5), NSSize::new(self.col_w(col) - 6.0, bottom - top - 1.0))
     }
 
     fn header_rect(&self, col: usize) -> NSRect {
-        NSRect::new(NSPoint::new(self.x(col), 0.0), NSSize::new(self.col_w, HEADER_H))
+        NSRect::new(NSPoint::new(self.x(col), 0.0), NSSize::new(self.col_w(col), HEADER_H))
     }
 
     fn column_at(&self, x: f64) -> Option<usize> {
         if x < GUTTER_W || x >= self.w {
             return None;
         }
-        Some((((x - GUTTER_W) / self.col_w) as usize).min(6))
+        Some((1..=7).position(|i| x < self.xs[i]).unwrap_or(6))
     }
 }
 
@@ -530,6 +606,8 @@ thread_local! {
         monday: NaiveDate::MIN,
         cols: Vec::new(),
         hours: (7, 22),
+        weights: [1.0; 7],
+        full_frame: false,
     }) };
     /// Texte der Tooltips (AppKit hält die Besitzer der Tooltip-Bereiche nicht fest).
     static TIPS: RefCell<Vec<Retained<NSString>>> = const { RefCell::new(Vec::new()) };
@@ -572,6 +650,9 @@ struct Context {
     time: Option<(Flash, String)>,
 }
 
+/// Schlüssel in den Benutzereinstellungen: den ganzen Arbeitszeitrahmen zeigen.
+const FULL_FRAME_KEY: &str = "TagwerkWeekFullFrame";
+
 /// Arbeit ohne Mac eintragen: Tag, von, bis, Grund.
 pub type AddWork = fn(NaiveDate, i64, i64, Activity);
 
@@ -612,6 +693,19 @@ define_class!(
         #[unsafe(method(today:))]
         fn today(&self, _sender: Option<&AnyObject>) {
             go_today();
+        }
+
+        /// „Ganzer Rahmen“: den ganzen Arbeitszeitrahmen zeigen oder nur die Arbeitszeit.
+        #[unsafe(method(toggleFrame:))]
+        fn toggle_frame(&self, sender: Option<&NSButton>) {
+            let full = sender.is_some_and(|b| b.state() == NSControlStateValueOn);
+            NSUserDefaults::standardUserDefaults().setBool_forKey(full, &ns(FULL_FRAME_KEY));
+            DATA.with(|d| {
+                let mut d = d.borrow_mut();
+                d.full_frame = full;
+                d.rebuild();
+            });
+            render();
         }
 
         /// Kontextmenü: Arbeit ohne Mac löschen.
@@ -854,7 +948,7 @@ fn set_hover(view: &WeekView, p: Option<NSPoint>) {
 fn hit_test(view: &WeekView, p: NSPoint) -> Option<Hit> {
     DATA.with(|d| {
         let d = d.try_borrow().ok()?;
-        let geo = Geo::new(view.bounds(), d.hours);
+        let geo = Geo::new(view.bounds(), &d);
         let label = NSColor::labelColor();
         let fonts = Fonts::new(&label, &label);
         for bx in block_boxes(&geo, &d, &fonts) {
@@ -1072,7 +1166,7 @@ fn show_add_work(date: NaiveDate, preset: Span, error: Option<(&str, Span, Activ
 fn context_at(view: &WeekView, p: NSPoint) -> Option<Context> {
     DATA.with(|d| {
         let d = d.try_borrow().ok()?;
-        let geo = Geo::new(view.bounds(), d.hours);
+        let geo = Geo::new(view.bounds(), &d);
         let col = geo.column_at(p.x)?;
         let c = d.cols.get(col)?;
         let label = NSColor::labelColor();
@@ -1280,7 +1374,7 @@ fn ax_children(view: &WeekView) -> Retained<NSArray<AnyObject>> {
     }
     let elements: Vec<Retained<AnyObject>> = DATA.with(|d| {
         let Ok(d) = d.try_borrow() else { return Vec::new() };
-        let geo = Geo::new(view.bounds(), d.hours);
+        let geo = Geo::new(view.bounds(), &d);
         ax_items(&d.cols)
             .into_iter()
             .map(|(col, part, text)| {
@@ -1308,7 +1402,7 @@ fn ax_children(view: &WeekView) -> Retained<NSArray<AnyObject>> {
 fn clickable_rects(view: &WeekView) -> Vec<NSRect> {
     DATA.with(|d| {
         let Ok(d) = d.try_borrow() else { return Vec::new() };
-        let geo = Geo::new(view.bounds(), d.hours);
+        let geo = Geo::new(view.bounds(), &d);
         let label = NSColor::labelColor();
         let fonts = Fonts::new(&label, &label);
         let mut out: Vec<NSRect> = block_boxes(&geo, &d, &fonts)
@@ -1536,7 +1630,7 @@ fn vline(x: f64, y0: f64, y1: f64, color: &NSColor) {
 }
 
 fn draw(bounds: NSRect, d: &Data, flash: Option<&Flash>, hover: Option<(NaiveDate, Span)>) {
-    let geo = Geo::new(bounds, d.hours);
+    let geo = Geo::new(bounds, d);
     let (regular, medium, semibold) = unsafe { (NSFontWeightRegular, NSFontWeightMedium, NSFontWeightSemibold) };
     let label = NSColor::labelColor();
     let secondary = NSColor::secondaryLabelColor();
@@ -1558,18 +1652,18 @@ fn draw(bounds: NSRect, d: &Data, flash: Option<&Flash>, hover: Option<(NaiveDat
     for (i, c) in d.cols.iter().enumerate() {
         let x = geo.x(i);
         if !is_workday(c.date) {
-            fill(NSRect::new(NSPoint::new(x, HEADER_H), NSSize::new(geo.col_w, geo.h - HEADER_H)), &shade);
+            fill(NSRect::new(NSPoint::new(x, HEADER_H), NSSize::new(geo.col_w(i), geo.h - HEADER_H)), &shade);
         } else if let Some(s) = &d.snap {
             for (a, b) in [(geo.h0 * 3600, s.settings.frame_from), (s.settings.frame_to, geo.h1 * 3600)] {
                 if b > a {
                     let (ya, yb) = (geo.y(a), geo.y(b));
-                    fill(NSRect::new(NSPoint::new(x, ya), NSSize::new(geo.col_w, yb - ya)), &shade);
+                    fill(NSRect::new(NSPoint::new(x, ya), NSSize::new(geo.col_w(i), yb - ya)), &shade);
                 }
             }
         }
         if Some(c.date) == today {
             fill(geo.header_rect(i), &accent.colorWithAlphaComponent(0.05));
-            let body = NSRect::new(NSPoint::new(x, HEADER_H), NSSize::new(geo.col_w, geo.h - HEADER_H));
+            let body = NSRect::new(NSPoint::new(x, HEADER_H), NSSize::new(geo.col_w(i), geo.h - HEADER_H));
             fill(body, &accent.colorWithAlphaComponent(0.05));
         }
         if !c.warnings.is_empty() {
@@ -1610,7 +1704,7 @@ fn draw(bounds: NSRect, d: &Data, flash: Option<&Flash>, hover: Option<(NaiveDat
             (Some(img), true) => img.size().width + 4.0,
             _ => 0.0,
         };
-        let x0 = (x + (geo.col_w - tw - icon_w) / 2.0).max(x + 2.0).round();
+        let x0 = (x + (geo.col_w(i) - tw - icon_w) / 2.0).max(x + 2.0).round();
         if let (Some(img), true) = (&icon, warn) {
             let sz = img.size();
             img.drawInRect(NSRect::new(NSPoint::new(x0, 7.0 + (15.0 - sz.height) / 2.0), sz));
@@ -1624,7 +1718,7 @@ fn draw(bounds: NSRect, d: &Data, flash: Option<&Flash>, hover: Option<(NaiveDat
             (None, false) => "–".to_string(),
         };
         let total_color = if warn { &orange } else { &secondary };
-        let total_rect = NSRect::new(NSPoint::new(x + 2.0, 24.0), NSSize::new(geo.col_w - 4.0, 15.0));
+        let total_rect = NSRect::new(NSPoint::new(x + 2.0, 24.0), NSSize::new(geo.col_w(i) - 4.0, 15.0));
         // Daneben die Pausen mit Tasse (wie „Pausen heute“ im Menü) – nur wenn es Platz hat.
         let a = attrs(&digits(11.0, regular), total_color, NSTextAlignment::Left);
         let pa = attrs(&digits(11.0, regular), &secondary, NSTextAlignment::Left);
@@ -1633,7 +1727,7 @@ fn draw(bounds: NSRect, d: &Data, flash: Option<&Flash>, hover: Option<(NaiveDat
         let cup_w = cup.as_ref().map_or(0.0, |img| img.size().width + 3.0);
         let width = tw + 12.0 + cup_w + pw;
         if c.work_secs > 0 && width <= total_rect.size.width {
-            let x0 = (x + (geo.col_w - width) / 2.0).round();
+            let x0 = (x + (geo.col_w(i) - width) / 2.0).round();
             text_in(&total, NSRect::new(NSPoint::new(x0, 24.0), NSSize::new(tw, 15.0)), &a);
             let mut px = x0 + tw + 12.0;
             if let Some(img) = &cup {
@@ -1725,7 +1819,7 @@ fn draw(bounds: NSRect, d: &Data, flash: Option<&Flash>, hover: Option<(NaiveDat
             let red = NSColor::systemRedColor();
             let y = geo.y(now);
             let x = geo.x(i);
-            fill(NSRect::new(NSPoint::new(x, y - 0.75), NSSize::new(geo.col_w, 1.5)), &red);
+            fill(NSRect::new(NSPoint::new(x, y - 0.75), NSSize::new(geo.col_w(i), 1.5)), &red);
             red.setFill();
             NSBezierPath::bezierPathWithOvalInRect(NSRect::new(NSPoint::new(x - 4.0, y - 4.0), NSSize::new(8.0, 8.0)))
                 .fill();
@@ -1764,7 +1858,7 @@ fn update_tooltips(view: &WeekView) {
     view.removeAllToolTips();
     let tips: Vec<(NSRect, String)> = DATA.with(|d| {
         let Ok(d) = d.try_borrow() else { return Vec::new() };
-        let geo = Geo::new(view.bounds(), d.hours);
+        let geo = Geo::new(view.bounds(), &d);
         let mut out = Vec::new();
         for (i, c) in d.cols.iter().enumerate() {
             let mut text = String::new();
@@ -1859,14 +1953,23 @@ fn go_today() {
 fn render() {
     let (title, summary, warn) = DATA.with(|d| {
         let d = d.borrow();
-        let summary = d.snap.as_ref().map(|s| week_summary(s, d.monday, &d.cols)).unwrap_or_default();
+        let summary = d.snap.as_ref().map(|s| week_summary_parts(s, d.monday, &d.cols)).unwrap_or_default();
         (week_title(d.monday), summary, warnings_summary(&d.cols))
     });
     let view = UI.with(|u| {
         let u = u.borrow();
         let u = u.as_ref()?;
         u.title.setStringValue(&ns(&title));
-        u.summary.setStringValue(&ns(&summary));
+        // Der Saldo farbig wie im Menü.
+        let (head, balance) = &summary;
+        let font = digits(NSFont::systemFontSize(), unsafe { NSFontWeightRegular });
+        let secondary = NSColor::secondaryLabelColor();
+        let value = balance.map(|b| (rules::fmt_balance(b), palette::balance(b)));
+        let mut parts: Vec<(&str, &NSColor)> = vec![(head.as_str(), &secondary)];
+        if let Some((text, color)) = &value {
+            parts.push((text.as_str(), color));
+        }
+        u.summary.setAttributedStringValue(&palette::colored(&parts, &font));
         u.warn_label.setStringValue(&ns(&warn));
         u.warn_row.setHidden(warn.is_empty());
         Some(u.view.clone())
@@ -1927,6 +2030,23 @@ fn build() -> Ui {
     nav.setToolTip_forSegment(Some(&ns("Nächste Woche (→)")), 1);
     let today = unsafe { NSButton::buttonWithTitle_target_action(&ns("Heute"), Some(target), Some(sel!(today:)), mtm) };
     today.setToolTip(Some(&ns("Zur aktuellen Woche (⌘T)")));
+    // Das Raster zeigt sonst nur die Zeit, in der in der Woche gearbeitet wurde.
+    let full = NSUserDefaults::standardUserDefaults().boolForKey(&ns(FULL_FRAME_KEY));
+    DATA.with(|d| d.borrow_mut().full_frame = full);
+    // Als Symbol: Ein Titel nähme der Wochenangabe daneben den Platz.
+    let frame =
+        unsafe { NSButton::buttonWithTitle_target_action(&ns("Ganzer Rahmen"), Some(target), Some(sel!(toggleFrame:)), mtm) };
+    if let Some(img) =
+        NSImage::imageWithSystemSymbolName_accessibilityDescription(&ns("arrow.up.and.down"), Some(&ns("Ganzer Rahmen")))
+    {
+        frame.setImage(Some(&img));
+        frame.setImagePosition(NSCellImagePosition::ImageOnly);
+    }
+    frame.setButtonType(NSButtonType::PushOnPushOff);
+    frame.setState(if full { NSControlStateValueOn } else { NSControlStateValueOff });
+    frame.setToolTip(Some(&ns(
+        "Den ganzen Arbeitszeitrahmen zeigen – sonst nur die Zeit, in der in dieser Woche gearbeitet wurde",
+    )));
 
     let title = NSTextField::labelWithString(&ns(""), mtm);
     title.setFont(Some(&font(15.0, unsafe { NSFontWeightSemibold })));
@@ -1957,10 +2077,10 @@ fn build() -> Ui {
     bar.setAlignment(NSLayoutAttribute::CenterY);
     bar.setSpacing(10.0);
     bar.setEdgeInsets(NSEdgeInsets { top: 10.0, left: 16.0, bottom: 10.0, right: 16.0 });
-    for v in [&*nav as &NSView, &today, &title, &warn_row, &summary] {
+    for v in [&*nav as &NSView, &today, &frame, &title, &warn_row, &summary] {
         bar.addArrangedSubview(v);
     }
-    bar.setCustomSpacing_afterView(14.0, &today);
+    bar.setCustomSpacing_afterView(14.0, &frame);
     bar.setCustomSpacing_afterView(18.0, &warn_row);
 
     let line = NSBox::new(mtm);
@@ -2073,20 +2193,56 @@ mod tests {
 
     #[test]
     fn hours_cover_frame_and_outside_work() {
-        assert_eq!(hour_range(&Settings::default(), &[]), (7, 22));
+        assert_eq!(hour_range(&Settings::default(), &[], None, false), (7, 22));
         let s = Settings { frame_from: h(6, 30), frame_to: h(18, 15), ..Settings::default() };
-        assert_eq!(hour_range(&s, &[]), (6, 19));
+        assert_eq!(hour_range(&s, &[], None, false), (6, 19));
+        // Ohne Arbeit zeigt auch das kompakte Raster den ganzen Rahmen.
+        assert_eq!(hour_range(&s, &[], Some(h(10, 0)), true), (6, 19));
         // Arbeit außerhalb des Rahmens erweitert das Raster.
         let mut d = Day::new(date(2026, 11, 17));
         d.add_period(h(5, 40), h(9, 0));
         d.add_period(h(21, 0), h(22, 30));
         let cols = columns(&snap(vec![d], date(2026, 11, 18).and_hms_opt(9, 0, 0).unwrap(), false), date(2026, 11, 16));
-        assert_eq!(hour_range(&Settings::default(), &cols), (5, 23));
+        assert_eq!(hour_range(&Settings::default(), &cols, None, false), (5, 23));
+        // Kompakt reicht das Raster genauso weit – die Arbeit außerhalb gehört dazu.
+        assert_eq!(hour_range(&Settings::default(), &cols, None, true), (5, 23));
         let outside: Vec<(i64, i64)> =
             cols[1].blocks.iter().filter(|b| b.kind == Kind::Outside).map(|b| (b.from, b.to)).collect();
         assert_eq!(outside, vec![(h(5, 40), h(7, 0)), (h(22, 0), h(22, 30))]);
         assert_eq!(cols[1].warnings.len(), 1);
         assert!(cols[1].warnings[0].contains("außerhalb des Arbeitszeitrahmens"));
+    }
+
+    #[test]
+    fn compact_hours_follow_the_work() {
+        let s = Settings::default();
+        let week = |periods: &[(i64, i64)]| {
+            let mut d = Day::new(date(2026, 11, 17));
+            for &(from, to) in periods {
+                d.add_period(from, to);
+            }
+            columns(&snap(vec![d], date(2026, 11, 22).and_hms_opt(9, 0, 0).unwrap(), false), date(2026, 11, 16))
+        };
+        // 08:27–17:04: eine Stunde Luft davor (aber nicht vor dem Rahmen) und danach.
+        let cols = week(&[(h(8, 27), h(12, 0)), (h(12, 45), h(17, 4))]);
+        assert_eq!(hour_range(&s, &cols, None, true), (7, 19));
+        assert_eq!(hour_range(&s, &cols, None, false), (7, 22), "ganzer Rahmen");
+        // In der laufenden Woche gehört „jetzt“ dazu.
+        assert_eq!(hour_range(&s, &cols, Some(h(20, 10)), true), (7, 22));
+        // Ein kurzer Tag: auf die Mindesthöhe aufgefüllt, innerhalb des Rahmens.
+        let short = week(&[(h(10, 0), h(12, 0))]);
+        let (h0, h1) = hour_range(&s, &short, None, true);
+        assert_eq!(h1 - h0, MIN_HOURS);
+        assert!(h0 >= 7 && h0 <= 9 && h1 >= 13 && h1 <= 22, "{h0}–{h1}");
+        // Freie Tage ohne Eintrag sind schmal, Arbeitstage und ein Samstag mit Arbeit nicht.
+        assert_eq!(column_weights(&s, &cols), [1.0, 1.0, 1.0, 1.0, 1.0, NARROW, NARROW]);
+        let mut sat = Day::new(date(2026, 11, 21));
+        sat.add_period(h(10, 0), h(11, 0));
+        let cols = columns(&snap(vec![sat], date(2026, 11, 22).and_hms_opt(9, 0, 0).unwrap(), false), date(2026, 11, 16));
+        assert_eq!(column_weights(&s, &cols), [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, NARROW]);
+        // Vier-Tage-Woche: Der freie Freitag ist ebenfalls schmal.
+        let four = Settings { workdays: 0b0_1111, ..s };
+        assert_eq!(column_weights(&four, &cols)[4], NARROW);
     }
 
     #[test]
