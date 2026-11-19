@@ -8,7 +8,7 @@
 #                                  Testdatenbank ersetzen (vorher wird sie gesichert)
 #   testdata/testdb.sh --restore   die zuletzt gesicherte zentrale Datenbank zurückholen
 #
-# Die Testdaten reichen immer bis gestern (sechs Wochen plus die laufende Woche, siehe
+# Die Testdaten reichen immer bis gestern (18 volle Monate plus der laufende Monat, siehe
 # generate_testdata.py) und werden bei jedem Aufruf neu erzeugt – samt Markdown-Quelle
 # target/testdata/testdaten.md. Nichts davon liegt im Repository. Sie enthalten Arbeit
 # ohne Mac und Regelverstöße, darunter rund 10 % Tage mit mehr als 6 Std. ohne Pause.
