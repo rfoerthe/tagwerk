@@ -365,6 +365,7 @@ bundesweite Feiertage frei. An rund 25 % der Tage gibt es Arbeit ohne Mac (Meeti
 Telefonat, Networking, Sonstiges – bei gesperrtem Mac, vor dem Beginn oder nach dem Ende,
 einmal auch Meeting und Telefonat direkt hintereinander als zwei Abschnitte), dazu
 einige Regelverstöße: zu kurze Ruhezeit, Arbeit vor 7 und nach 22 Uhr, zu wenig Pause.
+An rund 10 % der Tage wird außerdem mehr als 6 Stunden ohne Pause durchgearbeitet.
 Datenbank und Markdown-Quelle landen in `target/testdata/` und werden bei jedem Aufruf
 neu erzeugt.
 

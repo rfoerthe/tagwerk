@@ -29,6 +29,10 @@ laufenden Woche bis gestern. Heute selbst bleibt frei.
     Woche 4  Mo ab 06:1x                      -> vor 7 Uhr gearbeitet
     Woche 5  Mi 7 Std. mit 20 Min. Pause      -> zu wenig Pause (30 Min. nötig)
              Fr 9:20 Std. mit 30 Min. Pause   -> zu wenig Pause (45 Min. nötig)
+- Mehr als 6 Std. ohne Pause an rund 10 % der Werktage, über den Zeitraum verteilt:
+  zwischen 6:10 und 8:45 Std. Arbeit am Stück, unterbrochen höchstens von kurzen Sperren
+  unter 15 Min. (zählen als Arbeitszeit) -> zu wenig Pause (30 Min. nötig). Diese Tage
+  haben keine Arbeit ohne Mac und keinen weiteren Regelverstoß.
   Alle anderen Tage halten Arbeitszeitgesetz und Arbeitszeitrahmen ein; das prüft das
   Skript selbst (wie Tagwerk) und meldet auf stderr eine Übersicht.
 
@@ -50,11 +54,16 @@ MIN_REST = 11 * 3600
 MAX_WORK = 10 * 3600
 WEEK_TARGET = 39 * 3600
 WORK_SHARE = 0.25  # Anteil der Werktage mit Arbeit ohne Mac
+NO_BREAK_SHARE = 0.10  # Anteil der Werktage mit mehr als 6 Std. Arbeit ohne Pause
 H = 3600
 M = 60
 DAY = 24 * H
 EARLIEST = 7 * H + 5 * M  # frühester Beginn normaler Tage
 LATEST_END = 20 * H  # spätestes Ende normaler Tage (Ruhezeit bis 7 Uhr)
+WORK_RANGE = (5 * H + 15 * M, 9 * H + 45 * M)  # Arbeitszeit normaler Tage
+# Arbeitszeit der Tage ohne Pause: über 6 Std., aber unter 9 Std. (sonst wären 45 Min. nötig)
+NO_BREAK_RANGE = (6 * H + 10 * M, 8 * H + 45 * M)
+NO_BREAK = "no_break"
 WEEKDAYS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
 KIND_WORK = "Arbeit ohne Mac"
 
@@ -73,6 +82,7 @@ EXPECTED = {
     "before_7": {"außerhalb Rahmen"},
     "pause_20": {"Pause 30 Min."},
     "pause_30_long": {"Pause 45 Min."},
+    NO_BREAK: {"Pause 30 Min."},
 }
 VARIANTS = ["meeting", "call_pause", "other", "networking", "back_to_back", "call_morning", "call_evening"]
 # Arten, die in einer Sperre nachgetragen werden: (Dauer in Min. von–bis, Notiz)
@@ -275,18 +285,21 @@ def short_locks(rng, work, taken):
 
 
 def normal_day(rng, work, variant, min_start):
-    """Ein Tag ohne Regelverstoß mit `work` gezählter Arbeitszeit; `variant` ist die Art der
-    Arbeit ohne Mac (oder None). Gibt None zurück, wenn die Art nicht in den Tag passt."""
+    """Ein Tag mit `work` gezählter Arbeitszeit; `variant` ist die Art der Arbeit ohne Mac,
+    NO_BREAK (durchgearbeitet: keine Sperre ab 15 Min. – einziger Regelverstoß des Tages)
+    oder None. Gibt None zurück, wenn die Art nicht in den Tag passt."""
     call = rng.randint(15, 40) * M + rng.randint(0, 59) if variant in ("call_morning", "call_evening") else 0
     pwork = work - call  # Arbeitszeit an den Perioden
     start = int(min(max(rng.gauss(8 * H, 35 * M), EARLIEST), 9 * H + 30 * M)) + rng.randint(0, 59)
     locks = []
-    if work > 6 * H or rng.random() < 0.5:
+    if variant == NO_BREAK:
+        pass  # keine Mittags- und keine Kaffeepause, nur kurze Sperren
+    elif work > 6 * H or rng.random() < 0.5:
         # Mittagspause gegen 12–13 Uhr; ab 9 Std. Arbeit mindestens 45 Min.
         lunch = rng.randint(45, 60) if work > 9 * H else rng.randint(30, 55)
         pos = min(max(12 * H + rng.randint(0, 50) * M - start, 3 * H), pwork - 2 * H)
         locks.append((pos, lunch * M + rng.randint(0, 59), None))
-    if work > 6 * H and rng.random() < 0.3:
+    if variant != NO_BREAK and work > 6 * H and rng.random() < 0.3:
         # Kaffeepause am Nachmittag (zählt als Pause)
         locks.append((int(pwork * 0.8), rng.randint(15, 22) * M + rng.randint(0, 59), None))
     if variant == "call_pause" or variant in LOCKED:
@@ -375,7 +388,7 @@ def generate(first, last, seed):
     mondays = sorted({d - dt.timedelta(days=d.weekday()) for d in all_days})
     specials = place_specials(mondays, set(workdays))
 
-    # Arbeit ohne Mac: rund 20 % der Werktage, jede Art etwa gleich oft
+    # Arbeit ohne Mac: rund 25 % der Werktage, jede Art etwa gleich oft
     free = [d for d in workdays if d not in specials]
     count = min(len(free), round(len(workdays) * WORK_SHARE))
     variants = VARIANTS[:]
@@ -383,6 +396,11 @@ def generate(first, last, seed):
     # gleichmäßig über den Zeitraum verteilt: je ein Tag aus jedem Abschnitt
     picks = [rng.choice(free[i * len(free) // count:(i + 1) * len(free) // count]) for i in range(count)]
     away = dict(zip(picks, (variants * count)[:count]))
+
+    # Mehr als 6 Std. ohne Pause: rund 10 % der Werktage, ebenfalls gleichmäßig verteilt
+    free = [d for d in free if d not in away]
+    count = min(len(free), round(len(workdays) * NO_BREAK_SHARE))
+    no_break = {rng.choice(free[i * len(free) // count:(i + 1) * len(free) // count]) for i in range(count)}
 
     # Arbeitszeit je Tag: Wochensoll anteilig (bei Feiertagen weniger), ±8 % Zufall
     plan, fixed = {}, {}
@@ -395,15 +413,14 @@ def generate(first, last, seed):
             continue
         target = WEEK_TARGET * len(week) / 5 * rng.uniform(0.92, 1.08)
         rest = target - sum(fixed[d].work() for d in week if d in fixed)
-        lo, hi = 5 * H + 15 * M, 9 * H + 45 * M
-        work = [min(max(rest / len(open_days) + rng.uniform(-1.9, 1.9) * H, lo), hi) for _ in open_days]
+        bounds = [NO_BREAK_RANGE if d in no_break else WORK_RANGE for d in open_days]
+        work = [min(max(rest / len(open_days) + rng.uniform(-1.9, 1.9) * H, lo), hi) for lo, hi in bounds]
         # Summe angleichen, ohne die Grenzen zu verlassen
         for _ in range(50):
             diff = rest - sum(work)
             if abs(diff) < M:
                 break
-            for i in range(len(work)):
-                work[i] = min(max(work[i] + diff / len(work), lo), hi)
+            work = [min(max(w + diff / len(work), lo), hi) for w, (lo, hi) in zip(work, bounds)]
         for d, w in zip(open_days, work):
             plan[d] = int(w) // 60 * 60 + rng.randint(0, 59)
 
@@ -416,9 +433,9 @@ def generate(first, last, seed):
             min_start = 0
             if prev is not None:
                 min_start = prev[1] + MIN_REST - (d - prev[0]).days * DAY + rng.randint(5, 25) * M
-            variant = away.get(d)
+            variant = NO_BREAK if d in no_break else away.get(d)
             day = normal_day(rng, plan[d], variant, min_start)
-            for fallback in ("meeting", "call_pause", None):
+            for fallback in () if variant == NO_BREAK else ("meeting", "call_pause", None):
                 if day is not None:
                     break
                 day = normal_day(rng, plan[d], fallback, min_start)
@@ -435,6 +452,15 @@ def expected_warnings(days):
         if day.kind in EXPECTED:
             out[d] = EXPECTED[day.kind]
     return out
+
+
+def no_break_days(days):
+    return [d for d in sorted(days) if days[d].kind == NO_BREAK]
+
+
+def no_break_ok(days):
+    """Tage ohne Pause: ein einziger Arbeitsabschnitt von mehr als 6 Std."""
+    return all(len(days[d].spans()) == 1 and days[d].work() > 6 * H for d in no_break_days(days))
 
 
 # ---------- Ausgabe -------------------------------------------------------------
@@ -483,6 +509,15 @@ def report(days, hol, first, last, seed, found):
     for d in away:
         blocks = ", ".join(f"{clock(f)[:5]}–{clock(t)[:5]} {n or 'Sonstiges'}" for f, t, n in days[d].blocks)
         print(f"  {date_cell(d)}  {VARIANT_NAMES[days[d].kind]:22s} {blocks}", file=err)
+    through = no_break_days(days)
+    print(
+        f"Mehr als 6 Std. ohne Pause an {len(through)} von {len(days)} Werktagen "
+        f"({len(through) / len(days) * 100:.0f} %):",
+        file=err,
+    )
+    for d in through:
+        (f, t), = days[d].spans()
+        print(f"  {date_cell(d)}  {clock(f)[:5]}–{clock(t)[:5]}  {(t - f) / H:.2f} Std.", file=err)
     print("Regelverstöße:", file=err)
     for d in sorted(found):
         print(f"  {date_cell(d)}  {', '.join(sorted(found[d]))}", file=err)
@@ -502,7 +537,7 @@ def main():
     for seed in range(args.seed, args.seed + 100):
         days, hol = generate(first, last, seed)
         found = warnings(days)
-        if found == expected_warnings(days):
+        if found == expected_warnings(days) and no_break_ok(days):
             break
     else:
         sys.exit("Keine Testdaten ohne ungewollte Regelverstöße gefunden.")

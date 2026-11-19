@@ -21,6 +21,12 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 - `--settings-screenshot`: Stand der Mitteilungen zur Ansicht über
   `TAGWERK_NOTIFICATIONS=allowed|denied|hidden|undetermined`.
 
+### Geändert
+- Testdaten (`testdata/testdb.sh`): An rund 10 % der Tage wird mehr als 6 Std. ohne Pause
+  gearbeitet (6:10 bis 8:45 Std. am Stück, höchstens kurze Sperren unter 15 Min.) – Tagwerk
+  meldet dort „Ab 6 Std. Arbeit sind 30 Min. Pause vorgeschrieben“. Die Tage sind über den
+  Zeitraum verteilt; das Skript listet sie in seiner Übersicht auf.
+
 ## [1.3.0] - 2026-11-18
 
 ### Zusammenfassung
