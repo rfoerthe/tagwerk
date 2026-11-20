@@ -7,6 +7,13 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 ## [Unveröffentlicht]
 
 ### Geändert
+- Ein manueller Feierabend zählt ab dem letzten Sperren davor, ein manueller Arbeitsbeginn
+  bis zum ersten Entsperren danach – auch wenn der Mac nach dem Feierabend bzw. vor dem
+  Beginn noch entsperrt war. Bisher galt das letzte Sperren bzw. erste Entsperren des
+  ganzen Tages: Wer abends kurz an den Mac ging und den Feierabend dann zurückverlegte,
+  verlor die Zeit zwischen dem Sperren und dem Feierabend, und die Wochenansicht zeigte den
+  Feierabend nicht an. Das gilt auch für Beginn oder Feierabend in der Mittagslücke; die
+  Zeit vor dem Beginn bzw. nach dem Feierabend entfällt wie bisher.
 - Testdaten (`testdata/testdb.sh`): Der Zeitraum umfasst 18 volle Kalendermonate plus den
   laufenden Monat bis gestern (bisher sechs Wochen plus die laufende Woche). Die
   eingebauten Regelverstöße – zu kurze Ruhezeit, Arbeit vor 7 und nach 22 Uhr, zu wenig

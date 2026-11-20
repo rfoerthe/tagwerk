@@ -1917,7 +1917,8 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     section(
         "Arbeitsbeginn",
         Some(&absence_last),
-        "Ohne Angabe beginnt der Tag mit dem ersten Entsperren. Ein früherer Beginn wird mitgezählt. \
+        "Ohne Angabe beginnt der Tag mit dem ersten Entsperren. War der Mac zum Beginn gesperrt, zählt \
+         die Zeit bis zum Entsperren danach mit; was davor erfasst wurde, entfällt. \
          Arbeit ohne Mac vor einem neu festgelegten Beginn entfällt – die letzte Angabe gilt.",
     );
     let auto = day.as_ref().and_then(|d| d.auto_bounds_in_frame(&settings));
@@ -1940,7 +1941,11 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         "Arbeit ohne Mac vor dem Arbeitsbeginn ist entfallen – die letzte Angabe gilt. ⌘Z nimmt das zurück.",
     );
     let start_note = caption(&match auto {
-        Some((a, _)) => format!("Ohne Angabe gilt das erste Entsperren{first_in_frame} um {} Uhr.", fmt_clock(a)),
+        Some((a, _)) => format!(
+            "Ohne Angabe gilt das erste Entsperren{first_in_frame} um {} Uhr. War der Mac zum Beginn \
+             gesperrt, zählt die Zeit bis zum Entsperren danach mit.",
+            fmt_clock(a)
+        ),
         None => "Ohne Angabe gilt das erste Entsperren des Macs im Arbeitszeitrahmen.".to_string(),
     });
     stack.addArrangedSubview(&start_cut);
@@ -2061,7 +2066,8 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     section(
         "Feierabend",
         Some(&row_view),
-        "Ohne Angabe endet der Tag mit dem letzten Sperren. Ein späterer Feierabend wird mitgezählt. \
+        "Ohne Angabe endet der Tag mit dem letzten Sperren. War der Mac zum Feierabend gesperrt, zählt \
+         die Zeit seit dem Sperren davor mit; was danach erfasst wurde, entfällt. \
          Arbeit ohne Mac nach einem neu festgelegten Feierabend entfällt – die letzte Angabe gilt.",
     );
     let manual_end = day.as_ref().and_then(|d| d.end);
@@ -2083,7 +2089,8 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
             "Ohne Angabe gilt das letzte Sperren. Mit Feierabend wird heute nichts mehr erfasst.".to_string()
         }
         Some((_, a)) => format!(
-            "Ohne Angabe gilt das letzte Sperren{last_in_frame} um {} Uhr. Ein späterer Feierabend wird mitgezählt.",
+            "Ohne Angabe gilt das letzte Sperren{last_in_frame} um {} Uhr. War der Mac zum Feierabend \
+             gesperrt, zählt die Zeit seit dem Sperren davor mit.",
             fmt_clock(a)
         ),
         None => "Ohne Angabe gilt das letzte Sperren des Macs im Arbeitszeitrahmen.".to_string(),

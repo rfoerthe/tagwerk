@@ -522,26 +522,35 @@ impl Day {
         let mut base = self.periods.clone();
         base.extend(manual.iter().copied());
         let mut spans = fill_gaps(base, min_pause);
-        // Manuelle Angaben fügen nur vor dem ersten Entsperren bzw. nach dem letzten Sperren
-        // Zeit hinzu – nie in Lücken dazwischen (das wäre z. B. die gesperrte Mittagszeit).
-        // Bezug für Beginn und Feierabend ist das erste Entsperren bzw. letzte Sperren – auch
-        // wenn davor bzw. danach Arbeit ohne Mac liegt (sonst verkürzte sie den Tag).
+        // Ein manueller Beginn zählt bis zum ersten Entsperren danach, ein manueller Feierabend
+        // ab dem letzten Sperren davor – auch in einer Lücke wie der gesperrten Mittagszeit.
+        // Was vor dem Beginn bzw. nach dem Feierabend entsperrt war, entfällt ohnehin und
+        // ändert daran nichts (sonst hinge der Tag von einem frühen oder späten Blick auf
+        // den Mac ab). Bezug ist das Entsperren bzw. Sperren – auch wenn davor bzw. danach
+        // Arbeit ohne Mac liegt (sonst verkürzte sie den Tag).
         let unlocked = fill_gaps(self.periods.clone(), min_pause);
         if let Some(s) = self.start {
-            // Früherer Beginn: die Zeit bis zum ersten Entsperren zählt mit.
-            let first = unlocked.first().or(spans.first()).map(|x| x.from).unwrap_or(self.end.unwrap_or(s));
+            // Beginn vor einem Entsperren: die Zeit bis zum ersten Entsperren danach zählt mit.
+            let first = if unlocked.is_empty() {
+                spans.first().map(|x| x.from).unwrap_or(self.end.unwrap_or(s))
+            } else {
+                // Nach dem letzten Sperren gibt es kein Entsperren, bis zu dem etwas zählen könnte.
+                unlocked.iter().find(|x| x.to > s).map_or(s, |x| x.from)
+            };
             if s < first {
                 spans.insert(0, Span::new(s, first));
             }
             spans = clip(spans, s, DAY_END);
         }
         if let Some(e) = self.end {
-            // Späterer Feierabend: die Zeit nach dem letzten Sperren zählt mit.
-            let last = unlocked
-                .last()
-                .or(spans.last())
-                .map(|x| x.to.max(self.start.unwrap_or(0)))
-                .unwrap_or(self.start.unwrap_or(e));
+            // Feierabend nach einem Sperren: die Zeit seit dem letzten Sperren davor zählt mit.
+            let from_start = |to: i64| to.max(self.start.unwrap_or(0));
+            let last = if unlocked.is_empty() {
+                spans.last().map(|x| from_start(x.to)).unwrap_or(self.start.unwrap_or(e))
+            } else {
+                // Vor dem ersten Entsperren gibt es kein Sperren, ab dem etwas zählen könnte.
+                unlocked.iter().rev().find(|x| x.from < e).map_or(e, |x| from_start(x.to))
+            };
             if e > last {
                 spans.push(Span::new(last, e));
             }
@@ -899,17 +908,67 @@ mod tests {
     }
 
     #[test]
-    fn start_and_end_inside_gap_add_no_time() {
-        // Beginn in der Mittagslücke (gesperrt 11:58–12:41): Arbeit ab 12:41
+    fn start_counts_until_first_unlock_after_it() {
+        // Beginn in der Mittagslücke (gesperrt 11:58–12:41): Die Zeit bis zum Entsperren
+        // zählt, der Vormittag entfällt.
         let mut d = day();
         d.start = Some(h(12, 30));
         let r = d.record(&st()).unwrap();
-        assert_eq!((r.first_start, r.work_secs), (h(12, 41), h(4, 49)));
-        // Feierabend in der Mittagslücke: die gesperrte Zeit zählt nicht als Arbeit
+        assert_eq!((r.first_start, r.work_secs), (h(12, 30), h(4, 49) + h(0, 11)));
+        // Vor dem Beginn schon einmal kurz entsperrt: Das ändert den Beginn nicht.
+        let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 20).unwrap());
+        d.add_period(h(8, 30), h(12, 0));
+        d.start = Some(h(8, 0));
+        let before = d.spans(&st());
+        assert_eq!(before, vec![Span::new(h(8, 0), h(12, 0))]);
+        d.add_period(h(6, 0), h(6, 1));
+        assert_eq!(d.spans(&st()), before);
+        // Beginn nach dem letzten Sperren: Es gibt nichts, was zählen könnte.
+        let mut d = day();
+        d.start = Some(h(18, 0));
+        assert_eq!(d.record(&st()).unwrap().work_secs, 0);
+        // Beginn während einer kurzen Sperre (zählt als Arbeit): beginnt genau dort.
+        let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 20).unwrap());
+        d.add_period(h(8, 0), h(10, 0));
+        d.add_period(h(10, 10), h(12, 0));
+        d.start = Some(h(10, 5));
+        assert_eq!(d.spans(&st()), vec![Span::new(h(10, 5), h(12, 0))]);
+        // Beginn und Feierabend in derselben Lücke: Nur die Zeit dazwischen zählt.
+        let mut d = day();
+        d.start = Some(h(12, 5));
+        d.end = Some(h(12, 35));
+        assert_eq!(d.spans(&st()), vec![Span::new(h(12, 5), h(12, 35))]);
+    }
+
+    #[test]
+    fn end_counts_from_last_lock_before_it() {
+        // Feierabend in der Mittagslücke (gesperrt 11:58–12:41): Die Zeit seit dem Sperren
+        // zählt, der Nachmittag entfällt.
         let mut d = day();
         d.end = Some(h(12, 20));
         let r = d.record(&st()).unwrap();
-        assert_eq!((r.last_end, r.work_secs), (h(11, 58), h(3, 46)));
+        assert_eq!((r.last_end, r.work_secs), (h(12, 20), h(3, 46) + h(0, 22)));
+        // Nach dem Feierabend noch einmal kurz entsperrt: Das ändert das Ende nicht.
+        let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 20).unwrap());
+        d.add_period(h(11, 28), h(12, 0));
+        d.add_period(h(13, 1), h(15, 21));
+        d.add_work(h(15, 21), h(16, 25), "Meeting");
+        d.end = Some(h(16, 30));
+        let before = d.spans(&st());
+        assert_eq!(before.last(), Some(&Span::new(h(13, 1), h(16, 30))));
+        d.add_period(h(17, 51), h(17, 52));
+        assert_eq!(d.spans(&st()), before);
+        // Feierabend vor dem ersten Entsperren: Es gibt nichts, was zählen könnte.
+        let mut d = day();
+        d.end = Some(h(7, 30));
+        let r = d.record(&st()).unwrap();
+        assert_eq!((r.first_start, r.last_end, r.work_secs), (h(8, 12), h(8, 12), 0));
+        // Feierabend während einer kurzen Sperre (zählt als Arbeit): endet genau dort.
+        let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 20).unwrap());
+        d.add_period(h(8, 0), h(10, 0));
+        d.add_period(h(10, 10), h(12, 0));
+        d.end = Some(h(10, 5));
+        assert_eq!(d.spans(&st()), vec![Span::new(h(8, 0), h(10, 5))]);
     }
 
     #[test]
