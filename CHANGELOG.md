@@ -6,6 +6,16 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+## [1.5.0] - 2026-11-20
+
+### Zusammenfassung
+Die Wochenansicht wird zum Werkzeug: Arbeitsbeginn und Feierabend lassen sich mit der Maus
+verschieben, Abwesenheiten per Rechtsklick eintragen, und der Tag in Bearbeitung ist
+markiert. Ein Tag lässt sich mit „Alle Einträge löschen …“ ganz leeren. Saldo und
+Zeitkonto zählen jetzt auch vergangene Arbeitstage ohne Eintrag – **das Zeitkonto kann
+dadurch sinken**; fehlende Urlaubs-, Feier- und Krankheitstage zeigt die Liste zum
+Nachtragen an.
+
 ### Hinzugefügt
 - Wochenansicht: Arbeitsbeginn und Feierabend lassen sich mit der Maus verschieben. An der
   Oberkante des ersten bzw. der Unterkante des letzten Abschnitts erscheint ein Griff;
@@ -13,7 +23,7 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   mit, und Arbeit ohne Mac, die entfiele, ist gestrichelt. Die Zeit rastet auf 5 Minuten
   ein (mit ⌥ auf die Minute) und am erfassten Wert, der den manuellen Wert wieder
   aufhebt. Esc bricht ab, ⌘Z nimmt die Änderung zurück. Arbeitsbeginn und Feierabend
-  tragen eine türkise Linie, manuell festgelegte kräftiger und mit einem Punkt. Ohne Maus
+  tragen eine Linie in Textfarbe, manuell festgelegte kräftiger und mit einem Punkt. Ohne Maus
   geht dasselbe über das Kontextmenü (ändern mit Uhrzeit-Feld, zurücksetzen) und für
   VoiceOver über Aktionen am Abschnitt.
 - Inspektor: „Alle Einträge löschen …“ ganz unten leert einen Tag – automatisch erfasste
@@ -73,6 +83,9 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   Sommer- und Herbsturlaub, zwischen den Jahren, Heiligabend und Silvester halb, der Rest
   einzeln) und 6 Tage Zeitausgleich (Brückentage, sonst Freitage). Die Wochen gleichen das
   Zeitkonto aus, sodass es um null pendelt.
+- Die Bilder des Fensters „Aufzeichnungen“ und der Wochenansicht im README sind neu und
+  zeigen Abwesenheit, die Linien für Arbeitsbeginn und Feierabend und den Tag in
+  Bearbeitung.
 
 ## [1.4.0] - 2026-11-19
 
@@ -439,7 +452,8 @@ als Markdown. Alle Daten bleiben lokal auf dem Mac.
   notarisiert es und installiert sie auf Wunsch nach `/Applications`.
 - `github-release.sh` veröffentlicht ein geprüftes DMG als Release auf GitHub.
 
-[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.4.0...HEAD
+[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.5.0...HEAD
+[1.5.0]: https://github.com/rfoerthe/tagwerk/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/rfoerthe/tagwerk/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/rfoerthe/tagwerk/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/rfoerthe/tagwerk/compare/v1.1.0...v1.2.0

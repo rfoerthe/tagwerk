@@ -2743,11 +2743,12 @@ fn draw(
         }
     }
 
-    // Arbeitsbeginn und Feierabend als türkise Linie an der Kante (nicht das „jetzt“ eines
-    // laufenden Abschnitts): erfasst dünn und gedämpft, manuell festgelegt kräftig und mit
-    // einem Punkt am rechten Ende.
-    let edge_color = NSColor::systemTealColor();
-    let edge_auto = edge_color.colorWithAlphaComponent(0.7);
+    // Arbeitsbeginn und Feierabend als Linie in Textfarbe an der Kante (nicht das „jetzt“
+    // eines laufenden Abschnitts) – neutral, damit sie sich vom türkisen Abwesenheitsband
+    // eines halben Tages abhebt: erfasst dünn und gedämpft, manuell festgelegt kräftig und
+    // mit einem Punkt am rechten Ende.
+    let edge_color = NSColor::labelColor();
+    let edge_auto = edge_color.colorWithAlphaComponent(0.55);
     for (i, c) in d.cols.iter().enumerate() {
         let Some(e) = c.edges else { continue };
         let (x, w) = (geo.x(i) + 3.0, geo.col_w(i) - 6.0);
