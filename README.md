@@ -415,6 +415,13 @@ gespeichert – und nach dem Kopieren wieder gestartet.
 Das Ergebnis liegt in `target/dist/Tagwerk-<Version>.dmg`. Das Skript führt vorher
 `cargo clean` aus; ältere DMGs in `target/dist` werden dabei gelöscht.
 
+Geöffnet zeigt das DMG auf hellem Hintergrund das App-Symbol, einen Pfeil und den Ordner
+„Programme“. Den Hintergrund zeichnet `tools/MakeDMGBackground.swift` (braucht `swift`
+aus den Xcode Command Line Tools), das Fenster richtet der Finder per AppleScript ein.
+Beim ersten Build fragt macOS deshalb, ob das Terminal den Finder steuern darf; ohne
+diese Erlaubnis entsteht ein gültiges, aber ungestaltetes DMG. Ein bereits eingehängtes
+Volume „Tagwerk“ muss vor dem Build ausgeworfen sein.
+
 <details>
 <summary>Signieren und Notarisieren</summary>
 <br>

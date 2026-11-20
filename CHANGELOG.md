@@ -6,6 +6,10 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Geändert
+- Das geöffnete DMG zeigt ein gestaltetes Fenster: Titel „Tagwerk“, App-Symbol und Ordner
+  „Programme“ mit einem Pfeil dazwischen und dem Hinweis, die App hineinzuziehen.
+
 ## [1.5.0] - 2026-11-20
 
 ### Zusammenfassung
