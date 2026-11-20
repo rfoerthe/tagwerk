@@ -1472,8 +1472,9 @@ fn apply(edit: Edit, rebuild: bool) {
     }
 }
 
-/// Änderung an einem Tag speichern und anzeigen. `rebuild` baut den Inspektor neu auf.
-fn save(date: NaiveDate, edit: Edit, rebuild: bool) -> Result<(), String> {
+/// Änderung an einem Tag speichern und anzeigen. `rebuild` baut den Inspektor neu auf. Gibt
+/// zurück, ob ein neuer Arbeitsbeginn bzw. Feierabend Arbeit ohne Mac gekürzt hat.
+fn save(date: NaiveDate, edit: Edit, rebuild: bool) -> Result<Option<Bound>, String> {
     let name = edit.name();
     let bound = match edit {
         Edit::SetStart(_) => Some(Bound::Start),
@@ -1513,7 +1514,7 @@ fn save(date: NaiveDate, edit: Edit, rebuild: bool) -> Result<(), String> {
         }))
     });
     match result {
-        None => Ok(()),
+        None => Ok(None),
         Some(Err(e)) => Err(e.to_string()),
         Some(Ok(())) => {
             let mut cut = None;
@@ -1526,12 +1527,16 @@ fn save(date: NaiveDate, edit: Edit, rebuild: bool) -> Result<(), String> {
             }
             saved(rebuild);
             if let Some(bound) = cut {
-                show_cut_note(bound);
+                show_cut_note(date, bound);
             }
-            Ok(())
+            Ok(cut)
         }
     }
 }
+
+/// Hinweis, wenn ein neuer Arbeitsbeginn bzw. Feierabend Arbeit ohne Mac gekürzt hat.
+const START_CUT: &str = "Arbeit ohne Mac vor dem Arbeitsbeginn ist entfallen – die letzte Angabe gilt. ⌘Z nimmt das zurück.";
+const END_CUT: &str = "Arbeit ohne Mac nach dem Feierabend ist entfallen – die letzte Angabe gilt. ⌘Z nimmt das zurück.";
 
 /// Arbeitsbeginn oder Feierabend im Inspektor.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1540,10 +1545,11 @@ enum Bound {
     End,
 }
 
-/// Hinweis unter Arbeitsbeginn bzw. Feierabend: Die Angabe hat Arbeit ohne Mac gekürzt.
-fn show_cut_note(bound: Bound) {
+/// Hinweis unter Arbeitsbeginn bzw. Feierabend: Die Angabe hat Arbeit ohne Mac gekürzt (nur,
+/// wenn der Inspektor diesen Tag zeigt).
+fn show_cut_note(date: NaiveDate, bound: Bound) {
     let label = model(|m| {
-        m.inspector.as_ref().map(|i| match bound {
+        m.inspector.as_ref().filter(|i| i.date == date).map(|i| match bound {
             Bound::Start => i.start_cut.clone(),
             Bound::End => i.end_cut.clone(),
         })
@@ -1938,7 +1944,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     stack.addArrangedSubview(&row);
     // Direkt unter dem Feld, wenn der neue Beginn Arbeit ohne Mac gekürzt hat.
     let start_cut = cut_note_label(
-        "Arbeit ohne Mac vor dem Arbeitsbeginn ist entfallen – die letzte Angabe gilt. ⌘Z nimmt das zurück.",
+        START_CUT,
     );
     let start_note = caption(&match auto {
         Some((a, _)) => format!(
@@ -2082,7 +2088,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     row.addArrangedSubview(&end_picker);
     stack.addArrangedSubview(&row);
     let end_cut = cut_note_label(
-        "Arbeit ohne Mac nach dem Feierabend ist entfallen – die letzte Angabe gilt. ⌘Z nimmt das zurück.",
+        END_CUT,
     );
     let end_note = caption(&match auto {
         Some(_) if is_today && manual_end.is_none() => {
@@ -2354,6 +2360,21 @@ fn week_add_work(date: NaiveDate, from: i64, to: i64, activity: Activity) {
                 show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e);
             }
         }
+    }
+}
+
+/// Arbeitsbeginn bzw. Feierabend aus der Wochenansicht (verschoben, im Dialog geändert oder
+/// zurückgesetzt). Wie im Inspektor gespeichert, also auch mit ⌘Z zu widerrufen.
+fn week_set_bound(date: NaiveDate, bound: week_view::Bound, at: Option<i64>) {
+    let (edit, text) = match bound {
+        week_view::Bound::Start => (Edit::SetStart(at), START_CUT),
+        week_view::Bound::End => (Edit::SetEnd(at), END_CUT),
+    };
+    match save(date, edit, true) {
+        Err(e) => show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e),
+        // Im Inspektor steht der Hinweis unter dem Feld, in der Woche als Meldung.
+        Ok(Some(_)) if mode() == Mode::Week => show_info_sheet(&ui().window, "Arbeit ohne Mac entfallen", text),
+        Ok(_) => {}
     }
 }
 
@@ -3264,7 +3285,7 @@ pub fn show(status: Status, embed: Embed) {
     NSApplication::sharedApplication(mtm()).setActivationPolicy(NSApplicationActivationPolicy::Regular);
     let fresh = !OPEN.with(|o| o.replace(true));
     let ui = build(false);
-    week_view::set_actions(Some(week_add_work), Some(week_remove_work));
+    week_view::set_actions(Some(week_add_work), Some(week_remove_work), Some(week_set_bound));
     week_view::set_open_day(Some(open_day));
     model(|m| m.status = Some(status));
     reload();
@@ -3351,9 +3372,9 @@ pub fn run(screenshot: Option<PathBuf>, week: bool) -> Result<(), String> {
     let ui = build(shot);
     if shot {
         // Bildschirmfotos nur zum Ansehen.
-        week_view::set_actions(None, None);
+        week_view::set_actions(None, None, None);
     } else {
-        week_view::set_actions(Some(week_add_work), Some(week_remove_work));
+        week_view::set_actions(Some(week_add_work), Some(week_remove_work), Some(week_set_bound));
         week_view::set_open_day(Some(open_day));
     }
     let mode = match (shot, week) {
@@ -3380,6 +3401,10 @@ pub fn run(screenshot: Option<PathBuf>, week: bool) -> Result<(), String> {
     // Zum Testen: Rückmeldung „kopiert“ in der Wochenansicht (TAGWERK_FLASH=1).
     if mode == Mode::Week && std::env::var("TAGWERK_FLASH").is_ok() {
         week_view::flash_first_block();
+    }
+    // Zum Testen: Arbeitsbeginn des ersten Tages beim Ziehen (TAGWERK_DRAG=1).
+    if mode == Mode::Week && std::env::var("TAGWERK_DRAG").is_ok() {
+        week_view::drag_first_start();
     }
 
     if shot {
