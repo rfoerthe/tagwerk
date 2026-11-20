@@ -150,7 +150,9 @@ auf Klick als kleines Fenster.
   Zeitausgleich eintragen, auch für Tage ohne Aufzeichnung (über „Tag bearbeiten“), in der
   Wochenansicht per Rechtsklick – dort auch im Voraus. Ganztags geht das nur an einem Tag
   ohne andere Einträge (erfasste Zeiten, Arbeitsbeginn, Feierabend, Pausen, Arbeit ohne
-  Mac): Die löscht man vorher selbst mit „Alle Einträge löschen …“. Umgekehrt sperrt eine
+  Mac): Die löscht man vorher selbst mit „Alle Einträge löschen …“. Heute zählen dabei nur
+  die Einträge von Hand – die automatisch erfasste Zeit entfällt nach einer Rückfrage mit
+  der Abwesenheit, und die Erfassung endet für heute (⌘Z nimmt das zurück). Umgekehrt sperrt eine
   ganztägige Abwesenheit den Tag: Im Inspektor und in der Wochenansicht lässt sich dann
   nichts anderes eintragen oder ändern, bis sie wieder auf „Keine“ steht, und die
   Menüleisten-App erfasst an diesem Tag nichts: Das Menü zeigt „Heute abwesend: Urlaub“
@@ -505,8 +507,13 @@ Menüleiste zeichnet die App selbst (`src/glyphs.rs`).
 <br>
 
 `testdata/testdb.sh` erzeugt eine Testdatenbank, die immer bis gestern reicht: 18 volle
-Kalendermonate plus die Tage des laufenden Monats, Wochensummen um 39 Stunden ± 10 %,
-bundesweite Feiertage frei. An rund 25 % der Tage gibt es Arbeit ohne Mac (Meeting,
+Kalendermonate plus die Tage des laufenden Monats, Wochensummen um 39 Stunden ± 8 %.
+Kein Werktag bleibt ohne Eintrag: Die bundesweiten Feiertage sind als „Feiertag“
+eingetragen, dazu 30 Urlaubstage im Jahr (Karwoche, Brückentag nach Himmelfahrt, zwei bis
+drei Wochen im Sommer, eine Herbstwoche, zwischen den Jahren, Heiligabend und Silvester als
+halbe Tage, der Rest einzeln) und 6 Tage Zeitausgleich (zuerst Brückentage, sonst
+Freitage). Die Mehrarbeit dafür ist über das Jahr verteilt, das Zeitkonto pendelt um null.
+An rund 25 % der Tage gibt es Arbeit ohne Mac (Meeting,
 Telefonat, Networking, Sonstiges – bei gesperrtem Mac, vor dem Beginn oder nach dem Ende,
 auch Meeting und Telefonat direkt hintereinander als zwei Abschnitte), dazu alle sechs
 Wochen dieselben Regelverstöße: zu kurze Ruhezeit, Arbeit vor 7 und nach 22 Uhr, zu wenig

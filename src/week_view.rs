@@ -1248,9 +1248,11 @@ fn context_at(view: &WeekView, p: NSPoint) -> Option<Context> {
             // An freien Tagen gibt es kein Soll – höchstens eine Abwesenheit zum Entfernen.
             (snap.settings.is_workday(c.date) || current.is_some()).then_some(current)
         });
-        let busy = day.is_some_and(Day::has_entries);
+        // Heute zählen für die Abwesenheit nur Einträge von Hand (siehe `Day::accepts_absence`).
+        let today = d.snap.as_ref().is_some_and(|s| s.now.date() == c.date);
+        let busy = day.is_some_and(|x| x.blocks_full_absence(today));
         // Nur mit Einträgen außer der Abwesenheit – die allein entfernt „Abwesenheit → Keine“.
-        let clearable = CLEAR_DAY.with(|c| c.get()).is_some() && busy;
+        let clearable = CLEAR_DAY.with(|c| c.get()).is_some() && day.is_some_and(Day::has_entries);
         let mut ctx = Context { date: c.date, work: None, preset: None, time, absence, busy, clearable };
         if editable() {
             ctx.work = c.manual.iter().filter(|_| !c.locked).find(|m| contains(geo.span_rect(col, m.span), p)).map(|m| (m.block, m.note.clone()));
@@ -2021,8 +2023,9 @@ fn draw(bounds: NSRect, d: &Data, flash: Option<&Flash>, hover: Option<(NaiveDat
         }
     }
 
-    // Leere Woche
-    if d.cols.iter().all(|c| c.blocks.is_empty()) {
+    // Leere Woche – außer es gibt Abwesenheiten: Ihre Bänder sagen schon, warum (der Hinweis
+    // läge sonst quer über ihnen).
+    if d.cols.iter().all(|c| c.blocks.is_empty() && c.absence.is_none()) {
         let a = attrs(&font(13.0, regular), &secondary, NSTextAlignment::Center);
         let y = (grid_top + grid_bottom) / 2.0 - 9.0;
         text_in(

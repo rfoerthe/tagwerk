@@ -11,7 +11,8 @@
 # Die Testdaten reichen immer bis gestern (18 volle Monate plus der laufende Monat, siehe
 # generate_testdata.py) und werden bei jedem Aufruf neu erzeugt – samt Markdown-Quelle
 # target/testdata/testdaten.md. Nichts davon liegt im Repository. Sie enthalten Arbeit
-# ohne Mac und Regelverstöße, darunter rund 10 % Tage mit mehr als 6 Std. ohne Pause.
+# ohne Mac und Regelverstöße, darunter rund 10 % Tage mit mehr als 6 Std. ohne Pause, sowie
+# Feiertage, 30 Urlaubstage und 6 Tage Zeitausgleich im Jahr als Abwesenheiten.
 #
 # Laufende Tagwerk-Instanzen, die die zentrale Datenbank benutzen, werden vor dem
 # Austausch beendet und danach wieder gestartet (sofern sie als App-Bundle liefen).
@@ -98,7 +99,8 @@ build_test_db() {
   rm -rf "$tmp"
   echo "$(sqlite3 "$TEST_DB" 'SELECT count(DISTINCT date) FROM periods') Tage," \
     "$(sqlite3 "$TEST_DB" 'SELECT count(DISTINCT date) FROM work_blocks') davon mit Arbeit ohne Mac" \
-    "($(sqlite3 "$TEST_DB" 'SELECT min(date) || " bis " || max(date) FROM periods'))"
+    "($(sqlite3 "$TEST_DB" 'SELECT min(date) || " bis " || max(date) FROM periods'))," \
+    "$(sqlite3 "$TEST_DB" 'SELECT count(*) FROM absences') Abwesenheiten"
 }
 
 # ---------- Laufende Instanzen ----------------------------------------------

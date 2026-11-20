@@ -1006,10 +1006,12 @@ define_class!(
                 // Erster Eintrag: keine Abwesenheit.
                 let kind = usize::try_from(i.absence_kind.indexOfSelectedItem() - 1).ok().and_then(|k| AbsenceKind::ALL.get(k))?;
                 // Neben anderen Einträgen geht nur ein halber Tag („Ganzer Tag“ ist gesperrt).
-                let busy = m.day(i.date).is_some_and(Day::has_entries);
+                let busy = m.day(i.date).is_some_and(|d| d.blocks_full_absence(i.date == now().date()));
                 Some(Absence::new(*kind, busy || i.absence_part.indexOfSelectedItem() == 1))
             });
-            apply(Edit::SetAbsence(absence), true);
+            if let Some(date) = model(|m| m.inspector.as_ref().map(|i| i.date)) {
+                set_absence(date, absence);
+            }
         }
 
         #[unsafe(method(addBreak:))]
@@ -1579,13 +1581,16 @@ fn save(date: NaiveDate, edit: Edit, rebuild: bool) -> Result<(), String> {
         Edit::SetEnd(_) => Some(Bound::End),
         _ => None,
     };
-    // Löschen trifft auch die erfassten Zeiten – Widerrufen muss sie zurückbringen.
-    let snapshot = if matches!(edit, Edit::ClearDay) { Corrections::whole } else { Corrections::of };
+    let today = date == now().date();
     // Die Korrekturen davor und danach, wie sie in der Datenbank stehen.
     let mut change = None;
     let result = model(|m| {
         let db = m.db.as_mut()?;
         Some(db.edit_day(date, now(), |d| {
+            // Löschen (auch heute erfasster Zeit für eine ganztägige Abwesenheit) trifft die
+            // erfassten Zeiten – Widerrufen muss sie zurückbringen.
+            let clears = matches!(edit, Edit::SetAbsence(a) if d.clears_for_absence(a, today));
+            let snapshot = if clears || matches!(edit, Edit::ClearDay) { Corrections::whole } else { Corrections::of };
             let before = snapshot(d);
             // Ganztägige Abwesenheit: nur sie selbst lässt sich ändern oder der Tag leeren.
             let locked = d.locks_entries() && !matches!(edit, Edit::SetAbsence(_) | Edit::ClearDay);
@@ -1611,8 +1616,14 @@ fn save(date: NaiveDate, edit: Edit, rebuild: bool) -> Result<(), String> {
                     }
                 }
                 Edit::CutWork(from, to) => d.cut_work(from, to),
-                // Ganztags nur am leeren Tag (die Oberfläche bietet es sonst nicht an).
-                Edit::SetAbsence(a) if d.accepts_absence(a) => d.absence = a,
+                // Ganztags nur am leeren Tag (die Oberfläche bietet es sonst nicht an); heute
+                // entfällt dabei die automatisch erfasste Zeit.
+                Edit::SetAbsence(a) if d.accepts_absence(a, today) => {
+                    if clears {
+                        d.periods.clear();
+                    }
+                    d.absence = a;
+                }
                 Edit::SetAbsence(_) => {}
                 Edit::ClearDay => *d = Day::new(date),
             }
@@ -1983,8 +1994,9 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
          vorher mit „Alle Einträge löschen …“ unten; ein halber Tag geht auch neben Arbeitszeit.",
     );
     let absence = day.as_ref().and_then(|d| d.absence);
-    // Ganztags nur an einem Tag ohne andere Einträge (siehe `Day::accepts_absence`).
-    let busy = day.as_ref().is_some_and(Day::has_entries);
+    // Ganztags nur an einem Tag ohne andere Einträge (siehe `Day::accepts_absence`; heute
+    // zählen nur die von Hand).
+    let busy = day.as_ref().is_some_and(|d| d.blocks_full_absence(is_today));
     // Ganztägige Abwesenheit: Die übrigen Einträge sind gesperrt (siehe `Day::locks_entries`).
     let locked = day.as_ref().is_some_and(Day::locks_entries);
     let blocked = "Ganztags erst, wenn der Tag keine anderen Einträge hat – siehe „Alle Einträge löschen …“ unten.";
@@ -2625,12 +2637,66 @@ fn week_add_work(date: NaiveDate, from: i64, to: i64, activity: Activity) {
     }
 }
 
-/// Abwesenheit aus der Wochenansicht: direkt in die Datenbank (die Menüleisten-App liest sie
-/// danach ein), zum Widerrufen gemerkt wie im Inspektor.
+/// Abwesenheit aus der Wochenansicht: wie im Inspektor (siehe [`set_absence`]).
 fn week_set_absence(date: NaiveDate, absence: Option<Absence>) {
-    if let Err(e) = save(date, Edit::SetAbsence(absence), true) {
-        show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e);
+    set_absence(date, absence);
+}
+
+/// Abwesenheit eintragen, ändern oder entfernen (Inspektor und Wochenansicht): direkt in die
+/// Datenbank (die Menüleisten-App liest sie danach ein), zum Widerrufen gemerkt. Eine
+/// ganztägige Abwesenheit für heute neben automatisch erfasster Zeit fragt vorher nach: Die
+/// Zeit entfällt, und die Erfassung endet für heute.
+fn set_absence(date: NaiveDate, absence: Option<Absence>) {
+    let today = date == now().date();
+    let recorded = model(|m| {
+        m.day(date)
+            .filter(|d| d.clears_for_absence(absence, today))
+            .map(|d| d.periods.iter().map(Span::len).sum::<i64>())
+    });
+    let Some(recorded) = recorded else {
+        if let Err(e) = save(date, Edit::SetAbsence(absence), true) {
+            show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e);
+        }
+        return;
+    };
+    let window = ui().window;
+    if window.attachedSheet().is_some() {
+        refresh_inspector(true);
+        return;
     }
+    let label = absence.map(Absence::label).unwrap_or_default();
+    let alert = NSAlert::new(mtm());
+    alert.setAlertStyle(NSAlertStyle::Warning);
+    alert.setMessageText(&ns(&format!("Heute ganztägig „{label}“ eintragen?")));
+    alert.setInformativeText(&ns(&absence_today_text(recorded)));
+    let ok = alert.addButtonWithTitle(&ns("Eintragen"));
+    ok.setHasDestructiveAction(true);
+    // Return bestätigt nicht versehentlich: Standard ist „Abbrechen“.
+    ok.setKeyEquivalent(&ns(""));
+    let cancel = alert.addButtonWithTitle(&ns("Abbrechen"));
+    cancel.setKeyEquivalent(&ns("\r"));
+    let handler = RcBlock::new(move |response: NSModalResponse| {
+        if response != NSAlertFirstButtonReturn {
+            // Die Auswahl im Inspektor wieder auf den gespeicherten Stand.
+            refresh_inspector(true);
+            return;
+        }
+        if let Err(e) = save(date, Edit::SetAbsence(absence), true) {
+            let block = RcBlock::new(move |_timer| show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e));
+            unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.0, false, &block) };
+        }
+    });
+    alert.beginSheetModalForWindow_completionHandler(&window, Some(&handler));
+}
+
+/// Erklärung in der Rückfrage zu einer ganztägigen Abwesenheit für heute (`recorded`: heute
+/// erfasste Zeit in Sekunden).
+fn absence_today_text(recorded: i64) -> String {
+    format!(
+        "Die heute automatisch erfasste Zeit ({}) wird gelöscht, und die Erfassung endet für heute – \
+         bis die Abwesenheit wieder auf „Keine“ steht. ⌘Z nimmt das zurück.",
+        fmt_dur(recorded)
+    )
 }
 
 fn week_remove_work(date: NaiveDate, from: i64, to: i64) {

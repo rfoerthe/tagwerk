@@ -32,6 +32,8 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   an einem Tag ohne andere Einträge eintragen; erfasste Zeiten und Korrekturen löscht man
   vorher selbst mit „Alle Einträge löschen …“. Im Inspektor und im Rechtsklick-Menü sind
   ganze Tage sonst gesperrt (mit Hinweis); ein halber Tag geht weiter neben Arbeitszeit.
+  Für heute zählen nur die Einträge von Hand: Die automatisch erfasste Zeit entfällt nach
+  einer Rückfrage mit der Abwesenheit, die Erfassung endet für heute; ⌘Z holt beides zurück.
   Umgekehrt sperrt eine ganztägige Abwesenheit den Tag: Arbeitsbeginn, Feierabend, Pausen
   und Arbeit ohne Mac lassen sich im Inspektor und in der Wochenansicht erst wieder
   eintragen oder ändern, wenn die Abwesenheit auf „Keine“ steht. Auch die Menüleisten-App
@@ -54,7 +56,11 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   laufenden Monat bis gestern (bisher sechs Wochen plus die laufende Woche). Die
   eingebauten Regelverstöße – zu kurze Ruhezeit, Arbeit vor 7 und nach 22 Uhr, zu wenig
   Pause – wiederholen sich alle sechs Wochen, von der laufenden Woche aus rückwärts
-  gezählt.
+  gezählt. Dazu kommen Abwesenheiten, damit kein Werktag ohne Eintrag bleibt: die
+  bundesweiten Feiertage, 30 Urlaubstage im Jahr (Karwoche, Brückentag nach Himmelfahrt,
+  Sommer- und Herbsturlaub, zwischen den Jahren, Heiligabend und Silvester halb, der Rest
+  einzeln) und 6 Tage Zeitausgleich (Brückentage, sonst Freitage). Die Wochen gleichen das
+  Zeitkonto aus, sodass es um null pendelt.
 
 ## [1.4.0] - 2026-11-19
 
