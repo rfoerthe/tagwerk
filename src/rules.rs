@@ -242,12 +242,14 @@ impl Settings {
         }
     }
 
-    /// Soll, das für `day` in den Saldo eingeht. Ohne eingetragene Abwesenheit nur, wenn
-    /// gearbeitet wurde (`work_secs` > 0) – nicht erfasste freie Tage drücken den Saldo nicht.
-    /// Mit Abwesenheit gilt, was sie besagt: halber Urlaubstag = halbes Soll, Zeitausgleich =
-    /// volles Soll, auch ganz ohne Arbeitszeit.
-    pub fn counted_target(&self, day: &Day, work_secs: i64) -> i64 {
-        if day.absence.is_none() && work_secs <= 0 {
+    /// Soll, das für `day` in den Saldo eingeht (`today`: heute). Bis gestern zählt jeder
+    /// Arbeitstag, auch ohne Arbeitszeit – bis eine Abwesenheit eingetragen ist, ist er ein
+    /// Minus. Heute (und später) zählt das Soll erst mit Arbeitszeit oder Abwesenheit, damit
+    /// der Tag nicht schon morgens im Minus beginnt; künftige Tage (eine geplante Abwesenheit)
+    /// zählen noch gar nicht. Mit Abwesenheit gilt, was sie besagt: halber Urlaubstag =
+    /// halbes Soll, Zeitausgleich = volles Soll.
+    pub fn counted_target(&self, day: &Day, work_secs: i64, today: NaiveDate) -> i64 {
+        if day.date > today || (day.absence.is_none() && work_secs <= 0 && day.date >= today) {
             0
         } else {
             self.day_target(day.date, day.absence)
@@ -424,21 +426,39 @@ pub fn day_warnings(days: &[Day], date: NaiveDate, s: &Settings) -> Vec<Warning>
     out
 }
 
-/// Arbeitszeit (wie angezeigt, in ganzen Minuten) und Soll der Tage von `from` bis `to`. Soll
-/// gibt es für Tage, an denen gearbeitet wurde, und nach den eingetragenen Abwesenheiten
-/// (siehe [`Settings::counted_target`]) – freie Tage ohne Eintrag drücken den Saldo nicht.
-pub fn balance(days: &[Day], from: NaiveDate, to: NaiveDate, s: &Settings) -> (i64, i64) {
-    days.iter()
+/// Arbeitstage von `from` bis `to` ohne jeden Eintrag (`days`: alle Tage, nach Datum
+/// sortiert). Sie zählen trotzdem ins Soll – ab dem ersten erfassten Tag (davor gibt es keine
+/// Daten) bis gestern (heute zählt erst mit Arbeitszeit, siehe [`Settings::counted_target`]).
+pub fn missing_workdays(days: &[Day], from: NaiveDate, to: NaiveDate, today: NaiveDate, s: &Settings) -> Vec<NaiveDate> {
+    let Some(first) = days.iter().find(|d| !d.is_empty()).map(|d| d.date) else { return Vec::new() };
+    let Some(yesterday) = today.pred_opt() else { return Vec::new() };
+    let (from, to) = (from.max(first), to.min(yesterday));
+    if from > to {
+        return Vec::new();
+    }
+    let recorded: std::collections::HashSet<NaiveDate> =
+        days.iter().filter(|d| d.date >= from && d.date <= to && !d.is_empty()).map(|d| d.date).collect();
+    from.iter_days().take_while(|d| *d <= to).filter(|d| s.is_workday(*d) && !recorded.contains(d)).collect()
+}
+
+/// Arbeitszeit (wie angezeigt, in ganzen Minuten) und Soll der Tage von `from` bis `to`
+/// (`days`: alle Tage, `today`: heute). Das Soll zählt nach [`Settings::counted_target`] –
+/// auch für Arbeitstage ganz ohne Eintrag ([`missing_workdays`]); freie Tage zählen nur mit
+/// Zeitausgleich.
+pub fn balance(days: &[Day], from: NaiveDate, to: NaiveDate, today: NaiveDate, s: &Settings) -> (i64, i64) {
+    let (work, target) = days
+        .iter()
         .filter(|d| d.date >= from && d.date <= to)
         .filter_map(|d| d.record(s).map(|r| (d, r)))
-        .fold((0, 0), |(w, t), (d, r)| (w + r.shown_work_secs, t + s.counted_target(d, r.work_secs)))
+        .fold((0, 0), |(w, t), (d, r)| (w + r.shown_work_secs, t + s.counted_target(d, r.work_secs, today)));
+    let missing: i64 = missing_workdays(days, from, to, today, s).iter().map(|d| s.daily_target(*d)).sum();
+    (work, target + missing)
 }
 
 /// Stand des Zeitkontos am Tag `today`: Übertrag plus Saldo aller Tage seit dem eingestellten
-/// Beginn (ohne Beginn: aller erfassten Tage). Wie beim Saldo zählt das Soll nur an Tagen, an
-/// denen gearbeitet wurde.
+/// Beginn (ohne Beginn: seit dem ersten erfassten Tag), siehe [`balance`].
 pub fn account(days: &[Day], today: NaiveDate, s: &Settings) -> i64 {
-    let (work, target) = balance(days, s.account_from.unwrap_or(NaiveDate::MIN), today, s);
+    let (work, target) = balance(days, s.account_from.unwrap_or(NaiveDate::MIN), today, today, s);
     s.account_carry + work - target
 }
 
@@ -846,7 +866,7 @@ mod tests {
         let mut fri = Day::new(date(20));
         fri.add_period(h(9, 0), h(11, 0));
         assert!(day_warnings(&[fri.clone()], date(20), &four).is_empty());
-        assert_eq!(balance(&[fri], date(16), date(22), &four), (h(2, 0), 0));
+        assert_eq!(balance(&[fri], date(16), date(22), date(23), &four), (h(2, 0), 0));
         // Ungültige Angaben: ohne Arbeitstag wieder Mo–Fr, Samstag und Sonntag gibt es nicht.
         assert_eq!(Settings { workdays: 0, ..s }.sanitized().workdays, ALL_WORKDAYS);
         assert_eq!(Settings { workdays: 0b110_0001, ..s }.sanitized().workdays, 0b0_0001);
@@ -880,17 +900,24 @@ mod tests {
 
         // Halber Urlaubstag mit 4 Std. Arbeit: +0:06 statt −3:48.
         let half = day(16, 4, Some(Absence::new(Vacation, true)));
-        assert_eq!(s.counted_target(&half, h(4, 0)), full / 2);
+        assert_eq!(s.counted_target(&half, h(4, 0), date(23)), full / 2);
         // Ganzer Urlaubstag, trotzdem 1 Std. gearbeitet: Mehrarbeit.
         let vacation = day(17, 1, Some(Absence::new(Vacation, false)));
         // Zeitausgleich ohne Arbeitszeit: das volle Soll zählt.
         let off = day(18, 0, Some(Absence::new(TimeOff, false)));
-        // Feiertag ohne Arbeitszeit und ein freier Tag ohne Eintrag: kein Soll.
+        // Feiertag ohne Arbeitszeit: kein Soll.
         let holiday = day(19, 0, Some(Absence::new(Holiday, false)));
         let days = vec![half, vacation, off, holiday];
-        let (work, target) = balance(&days, date(16), date(22), &s);
+        // Stand Freitag: Der Freitag ohne Eintrag zählt noch nicht …
+        let (work, target) = balance(&days, date(16), date(22), date(20), &s);
         assert_eq!((work, target), (h(5, 0), full / 2 + full));
-        assert_eq!(fmt_balance(account(&days, date(22), &s)), "−6:42 h");
+        assert_eq!(fmt_balance(account(&days, date(20), &s)), "−6:42 h");
+        // … ab Samstag schon: ein Arbeitstag ohne Abwesenheit, das volle Soll fehlt.
+        assert_eq!(balance(&days, date(16), date(22), date(21), &s), (h(5, 0), full / 2 + 2 * full));
+        assert_eq!(fmt_balance(account(&days, date(22), &s)), "−14:30 h");
+        // Geplanter Zeitausgleich zählt erst an seinem Tag.
+        assert_eq!(s.counted_target(&days[2], 0, date(17)), 0);
+        assert_eq!(s.counted_target(&days[2], 0, date(18)), full);
         // Die Abwesenheit allein macht aus dem Tag einen Eintrag.
         assert!(!days[2].is_empty() && days[2].has_corrections());
         // Texte für Export und Tabelle – und zurück.
@@ -910,8 +937,10 @@ mod tests {
             x.add_period(from, to);
             x
         };
-        // Mo 9 Std. (+1:12), Di 7 Std. (−0:48), Sa 1 Std. (+1:00)
-        let days = vec![day(16, h(8, 0), h(17, 0)), day(17, h(8, 0), h(15, 0)), day(21, h(10, 0), h(11, 0))];
+        // Mo 9 Std. (+1:12), Di 7 Std. (−0:48), Mi bis Fr genau das Soll, Sa 1 Std. (+1:00)
+        let mut days = vec![day(16, h(8, 0), h(17, 0)), day(17, h(8, 0), h(15, 0))];
+        days.extend((18..=20).map(|d| day(d, h(8, 0), h(15, 48))));
+        days.push(day(21, h(10, 0), h(11, 0)));
         assert_eq!(account(&days, date(22), &s), h(1, 24));
         // Stand an einem früheren Tag: spätere Tage zählen noch nicht.
         assert_eq!(account(&days, date(16), &s), h(1, 12));
@@ -943,14 +972,27 @@ mod tests {
     }
 
     #[test]
-    fn balance_counts_only_worked_days() {
+    fn balance_counts_workdays_without_entries() {
         let s = Settings::default();
         let mut mon = Day::new(date(16));
         mon.add_period(h(8, 0), h(17, 0)); // 9 Std.
         let mut sat = Day::new(date(21));
         sat.add_period(h(10, 0), h(11, 0)); // Wochenende: kein Soll
-        let (work, target) = balance(&[mon, sat], date(16), date(22), &s);
-        assert_eq!((work, target), (h(10, 0), h(7, 48)));
+        let days = [mon, sat];
+        // Stand Dienstag: Heute zählt erst mit Arbeitszeit.
+        assert_eq!(balance(&days, date(16), date(22), date(17), &s), (h(10, 0), h(7, 48)));
+        assert!(missing_workdays(&days, date(16), date(22), date(17), &s).is_empty());
+        // Stand Montag darauf: Di bis Fr ohne Eintrag zählen mit ihrem Soll.
+        assert_eq!(missing_workdays(&days, date(16), date(22), date(23), &s), (17..=20).map(date).collect::<Vec<_>>());
+        assert_eq!(balance(&days, date(16), date(22), date(23), &s), (h(10, 0), 5 * h(7, 48)));
+        // Vor dem ersten erfassten Tag zählt nichts; ohne Einträge gar nichts.
+        assert!(missing_workdays(&days, date(2), date(13), date(23), &s).is_empty());
+        assert!(missing_workdays(&[], date(16), date(22), date(23), &s).is_empty());
+        // Ein Tag nur mit Pause o. Ä., aber ohne Arbeitszeit, zählt sein Soll ebenso.
+        let mut tue = Day::new(date(17));
+        tue.add_break(h(12, 0), h(12, 30));
+        assert_eq!(s.counted_target(&tue, 0, date(23)), h(7, 48));
+        assert_eq!(s.counted_target(&tue, 0, date(17)), 0, "heute noch nicht");
     }
 
     #[test]
@@ -968,7 +1010,7 @@ mod tests {
             .collect();
         let rec = days[0].record(&s).unwrap();
         assert_eq!(fmt_balance(rec.shown_work_secs - s.daily_target(rec.date)), "−0:14 h");
-        let (work, target) = balance(&days, date(16), date(22), &s);
+        let (work, target) = balance(&days, date(16), date(22), date(18), &s);
         assert_eq!(work, h(15, 8));
         assert_eq!(fmt_balance(work - target), "−0:28 h");
     }

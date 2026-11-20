@@ -359,6 +359,29 @@ impl Day {
         self.periods.is_empty() && !self.has_corrections()
     }
 
+    /// Gibt es Einträge außer der Abwesenheit (erfasste Zeiten oder Korrekturen)?
+    pub fn has_entries(&self) -> bool {
+        !self.periods.is_empty()
+            || self.start.is_some()
+            || self.end.is_some()
+            || !self.breaks.is_empty()
+            || !self.work.is_empty()
+    }
+
+    /// Lässt sich `absence` eintragen? Eine ganztägige Abwesenheit (auch Zeitausgleich) nur an
+    /// einem Tag ohne andere Einträge – die löscht man vorher selbst („Alle Einträge
+    /// löschen“); ein halber Tag geht auch neben Arbeitszeit. Keine Abwesenheit geht immer.
+    pub fn accepts_absence(&self, absence: Option<Absence>) -> bool {
+        absence.is_none_or(|a| a.half) || !self.has_entries()
+    }
+
+    /// Sperrt eine ganztägige Abwesenheit die übrigen Einträge? Dann lassen sie sich von Hand
+    /// weder eintragen noch ändern, bis die Abwesenheit wieder auf „Keine“ steht (oder der
+    /// Tag mit „Alle Einträge löschen“ geleert ist).
+    pub fn locks_entries(&self) -> bool {
+        self.absence.is_some_and(|a| !a.half)
+    }
+
     /// Fügt eine automatisch erfasste Periode hinzu (überlappende werden zusammengefasst).
     pub fn add_period(&mut self, from: i64, to: i64) {
         if to < from {
@@ -772,6 +795,42 @@ mod tests {
 
     fn st() -> Settings {
         Settings::default()
+    }
+
+    #[test]
+    fn full_day_absence_needs_an_empty_day() {
+        let vacation = Some(Absence::new(AbsenceKind::Vacation, false));
+        let half = Some(Absence::new(AbsenceKind::Vacation, true));
+        let time_off = Some(Absence::new(AbsenceKind::TimeOff, false));
+        let empty = || Day::new(NaiveDate::from_ymd_opt(2026, 11, 16).unwrap());
+        let mut d = empty();
+        assert!(!d.has_entries() && d.accepts_absence(vacation) && d.accepts_absence(time_off));
+        // Eine Abwesenheit allein ist kein Eintrag: Sie lässt sich ändern.
+        d.absence = half;
+        assert!(!d.has_entries() && d.accepts_absence(vacation));
+        // Mit erfasster Zeit oder einer Korrektur nur noch halbe Tage (oder keine).
+        for change in [
+            (|d: &mut Day| d.add_period(h(8, 0), h(12, 0))) as fn(&mut Day),
+            |d| d.start = Some(h(8, 0)),
+            |d| d.end = Some(h(17, 0)),
+            |d| d.add_break(h(12, 0), h(12, 30)),
+            |d| d.add_work(h(13, 0), h(14, 0), "Meeting"),
+        ] {
+            let mut busy = empty();
+            change(&mut busy);
+            assert!(busy.has_entries());
+            assert!(!busy.accepts_absence(vacation) && !busy.accepts_absence(time_off));
+            assert!(busy.accepts_absence(half) && busy.accepts_absence(None));
+        }
+        // Umgekehrt sperrt nur eine ganztägige Abwesenheit die übrigen Einträge.
+        let mut off = empty();
+        assert!(!off.locks_entries());
+        off.absence = half;
+        assert!(!off.locks_entries(), "halber Tag: Arbeitszeit geht");
+        off.absence = vacation;
+        assert!(off.locks_entries());
+        off.absence = time_off;
+        assert!(off.locks_entries());
     }
 
     fn day() -> Day {

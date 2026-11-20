@@ -13,8 +13,36 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   Standardtaste. ⌘Z stellt den Tag samt erfasster Zeiten wieder her. Wird der heutige Tag
   gelöscht, zählt die Menüleisten-App eine laufende Erfassung bzw. laufende Arbeit ohne Mac
   ab dem Löschen weiter, statt die gelöschte Zeit beim nächsten Speichern zurückzuschreiben.
+  Der Befehl erscheint nur bei Einträgen außer der Abwesenheit; eine Abwesenheit allein
+  entfernt man mit „Keine“.
+- Wochenansicht: Abwesenheit per Rechtsklick (Untermenü „Abwesenheit“: Urlaub, Krank,
+  Feiertag – je ganz oder halb –, Zeitausgleich oder keine), an Arbeitstagen und auch im
+  Voraus. Sie liegt als türkises, gestricheltes Band über dem Arbeitszeitrahmen des Tages
+  und lässt sich mit ⌘Z widerrufen. Ebenfalls per Rechtsklick: „Alle Einträge löschen …“
+  (mit derselben Rückfrage wie im Inspektor).
+- „Aufzeichnungen“: Ein Doppelklick auf eine Zeile der Liste oder ein Rechtsklick („In der
+  Wochenansicht zeigen“) springt in die Woche des Tags bzw. der Wochenzeile.
+- „Aufzeichnungen“: Vergangene Arbeitstage ganz ohne Eintrag erscheinen in der Liste (mit
+  Fragezeichen, 0:00 h und ihrem Soll als Minus) und lassen sich auswählen, um Zeiten oder
+  eine Abwesenheit nachzutragen. Auch Export (Markdown, CSV, PDF) führt sie auf, und die
+  Wochenansicht zeigt im Tageskopf ihr fehlendes Soll in Rot (z. B. „−7:48 h“).
 
 ### Geändert
+- Eine ganztägige Abwesenheit (Urlaub, Krank, Feiertag, Zeitausgleich) lässt sich nur noch
+  an einem Tag ohne andere Einträge eintragen; erfasste Zeiten und Korrekturen löscht man
+  vorher selbst mit „Alle Einträge löschen …“. Im Inspektor und im Rechtsklick-Menü sind
+  ganze Tage sonst gesperrt (mit Hinweis); ein halber Tag geht weiter neben Arbeitszeit.
+  Umgekehrt sperrt eine ganztägige Abwesenheit den Tag: Arbeitsbeginn, Feierabend, Pausen
+  und Arbeit ohne Mac lassen sich im Inspektor und in der Wochenansicht erst wieder
+  eintragen oder ändern, wenn die Abwesenheit auf „Keine“ steht. Auch die Menüleisten-App
+  erfasst an so einem Tag nichts (auch nicht über Mitternacht hinein) und zeigt „Heute
+  abwesend: …“ statt Arbeitsbeginn, Unterbrechen, Ohne Mac und Feierabend.
+- Saldo und Zeitkonto zählen das Soll jedes Arbeitstags bis gestern – auch ohne Eintrag, ab
+  dem ersten erfassten Tag. Bisher drückten nicht erfasste Arbeitstage den Saldo nicht, und
+  ein vergessener Urlaubstag fiel nicht auf. Heute zählt das Soll wie bisher erst mit
+  Arbeitszeit oder Abwesenheit, künftige Tage (eine geplante Abwesenheit) noch gar nicht.
+  **Das Zeitkonto kann dadurch sinken:** Nicht eingetragene Urlaubs-, Feier- und
+  Krankheitstage zeigt die Liste jetzt als „fehlend“ – dort als Abwesenheit nachtragen.
 - Ein manueller Feierabend zählt ab dem letzten Sperren davor, ein manueller Arbeitsbeginn
   bis zum ersten Entsperren danach – auch wenn der Mac nach dem Feierabend bzw. vor dem
   Beginn noch entsperrt war. Bisher galt das letzte Sperren bzw. erste Entsperren des

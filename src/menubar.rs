@@ -80,6 +80,8 @@ struct MenuItems {
     count_pause_list: Vec<Span>,
     /// Ziel der Menüeinträge, die zur Laufzeit entstehen.
     controller: Retained<Controller>,
+    /// „Arbeitsbeginn festlegen“ (Untermenü).
+    start: Retained<NSMenuItem>,
     start_reset: Retained<NSMenuItem>,
     close: Retained<NSMenuItem>,
     reopen: Retained<NSMenuItem>,
@@ -96,6 +98,8 @@ enum IconKind {
     Break,
     Outside,
     Closed,
+    /// Heute ganztägig abwesend (Urlaub, Krank …): Es wird nichts erfasst.
+    Absent,
 }
 
 struct AppState {
@@ -722,7 +726,10 @@ impl AppState {
         if let Some(alert) = self.breaks.update(t.date(), info.stretch_secs, running || away).filter(|_| notify_break) {
             notify::post_text(alert.id(), &alert.title(), &alert.body());
         }
-        self.items.pause.setHidden(closed);
+        // Ganztägig abwesend: nichts zu erfassen, also auch nichts zu steuern.
+        let absent = matches!(status, store::Status::Absent);
+        self.items.start.setHidden(absent);
+        self.items.pause.setHidden(closed || absent);
         let (title, symbol) = if running {
             ("Arbeit unterbrechen", "pause.fill")
         } else if away {
@@ -734,7 +741,7 @@ impl AppState {
             self.items.pause.setTitle(&ns(title));
             set_item_symbol(&self.items.pause, symbol, title);
         }
-        self.items.away.setHidden(closed || away);
+        self.items.away.setHidden(closed || away || absent);
         let pauses = self.tracker.pauses_today(t);
         if pauses != self.items.count_pause_list {
             self.items.count_pause_menu.removeAllItems();
@@ -756,9 +763,9 @@ impl AppState {
             }
             self.items.count_pause_list = pauses;
         }
-        self.items.count_pause.setHidden(self.items.count_pause_list.is_empty());
-        self.items.close.setHidden(closed);
-        self.items.reopen.setHidden(!closed);
+        self.items.count_pause.setHidden(self.items.count_pause_list.is_empty() || absent);
+        self.items.close.setHidden(closed || absent);
+        self.items.reopen.setHidden(!closed || absent);
         if week_view::is_visible() {
             week_view::update(self.week_snapshot(t));
         }
@@ -772,6 +779,7 @@ impl AppState {
                 IconKind::Break => "Pause",
                 IconKind::Outside => "außerhalb des Arbeitszeitrahmens",
                 IconKind::Closed => "Feierabend",
+                IconKind::Absent => "heute abwesend",
             };
             let mut tip = format!(
                 "Tagwerk – {state}\nHeute gearbeitet: {}\nPausen: {}",
@@ -837,6 +845,9 @@ fn break_text(since: NaiveDateTime, t: NaiveDateTime, min_pause: i64) -> String 
 /// Statuszeile und Symbol für das Menü und die Menüleiste.
 fn status_line(tracker: &Tracker, t: NaiveDateTime) -> (String, IconKind) {
     let settings = &tracker.settings;
+    if let Some(absence) = tracker.absent(t.date()) {
+        return (format!("Heute abwesend: {}", absence.label()), IconKind::Absent);
+    }
     match (tracker.status(t), tracker.mode(t)) {
         (_, Mode::Closed(at)) => (format!("Feierabend um {} Uhr", fmt_clock(at)), IconKind::Closed),
         // Außerhalb des Rahmens zählt auch Arbeit ohne Mac nicht: Symbol wie bei „außerhalb“.
@@ -925,6 +936,7 @@ impl IconKind {
             IconKind::Break => ("cup.and.saucer.fill", "Pause"),
             IconKind::Outside => ("moon.stars", "Außerhalb des Arbeitszeitrahmens"),
             IconKind::Closed => ("moon.zzz", "Feierabend"),
+            IconKind::Absent => ("calendar.badge.minus", "Heute abwesend"),
         }
     }
 
@@ -936,7 +948,8 @@ impl IconKind {
             // gesperrt oder im Ruhezustand – in der Menüleiste kaum je zu sehen
             IconKind::Paused | IconKind::Break => glyphs::State::Break,
             IconKind::Outside => glyphs::State::Outside,
-            IconKind::Closed => glyphs::State::Closed,
+            // Wie Feierabend: Heute wird nichts mehr erfasst.
+            IconKind::Closed | IconKind::Absent => glyphs::State::Closed,
         }
     }
 }
@@ -992,6 +1005,7 @@ fn status_title(text: &str, kind: IconKind) -> Retained<NSAttributedString> {
         IconKind::Running | IconKind::Away => green,
         IconKind::Break | IconKind::Paused => orange,
         IconKind::Closed => indigo,
+        IconKind::Absent => palette::absence,
         IconKind::Outside => NSColor::labelColor,
     };
     let dot: fn() -> Retained<NSColor> = match kind {
@@ -1485,6 +1499,7 @@ pub fn run(screenshot: Option<std::path::PathBuf>) {
         hints: (0..6).map(|_| InfoLine::wrapping(mtm)).collect(),
         error: InfoLine::wrapping(mtm),
         pause: menu_item(mtm, "", Some(sel!(togglePause:)), "p", &controller),
+        start: start_item.clone(),
         start_reset,
         close,
         reopen: menu_item(mtm, "Feierabend aufheben", Some(sel!(reopenDay:)), "", &controller),

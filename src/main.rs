@@ -48,7 +48,7 @@ mod tracker;
 #[cfg(target_os = "macos")]
 mod week_view;
 
-use chrono::{Duration, Local};
+use chrono::Local;
 use std::path::PathBuf;
 
 fn fail(msg: impl std::fmt::Display) -> ! {
@@ -164,13 +164,14 @@ fn export(from: Option<String>, to: Option<String>, format: Option<String>, outp
         fail("Der Beginn des Zeitraums liegt nach dem Ende.");
     }
     let db = store::Db::open().unwrap_or_else(|e| fail(e));
-    // Vortag für die Prüfung der Ruhezeit am ersten Tag
-    let days = db.load_range(from - Duration::days(1), to).unwrap_or_else(|e| fail(e));
+    // Alle Tage: der Vortag für die Ruhezeit am ersten Tag, der erste erfasste Tag für das
+    // Soll der Arbeitstage ohne Eintrag.
+    let days = db.load().unwrap_or_else(|e| fail(e));
     let settings = db.load_settings().unwrap_or_else(|e| fail(e));
     match output {
         None => match format {
             store::ExportFormat::Markdown => print!("{}", store::export_markdown(&days, from, to, now, &settings)),
-            store::ExportFormat::Csv => print!("{}", store::export_csv(&store::Report::new(&days, from, to, &settings))),
+            store::ExportFormat::Csv => print!("{}", store::export_csv(&store::Report::new(&days, from, to, now.date(), &settings))),
             store::ExportFormat::Pdf => fail("Ein PDF braucht eine Ausgabedatei: -o datei.pdf"),
         },
         Some(path) => {
