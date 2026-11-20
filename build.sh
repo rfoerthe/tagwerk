@@ -186,21 +186,95 @@ if [[ "$DO_NOTARIZE" == 1 ]]; then
 fi
 
 # 6) DMG -----------------------------------------------------------------------
+# Das Fenster des geöffneten DMGs zeigt App-Symbol, Pfeil und den Ordner „Programme“
+# auf hellem Hintergrund. Dafür entsteht erst ein beschreibbares Abbild, dessen
+# Fenster der Finder einrichtet; danach wird es komprimiert.
 step "Erzeuge $DMG"
+command -v swift >/dev/null || fail "swift wurde nicht gefunden – xcode-select --install ausführen."
 STAGE="$WORK/dmg"
-mkdir -p "$STAGE"
-cp -R "$APP" "$STAGE/"
+mkdir -p "$STAGE/.background"
+swift tools/MakeDMGBackground.swift "$STAGE/.background/background.png" \
+  || fail "DMG-Hintergrund konnte nicht erzeugt werden."
+ditto "$APP" "$STAGE/$APP_NAME.app"
 ln -s /Applications "$STAGE/Programme"
-rm -f "$DMG"
-if diskutil image create from -h >/dev/null 2>&1; then
-  if ! out="$(diskutil image create from --format UDZO --volumeName "$APP_NAME" "$STAGE" "$DMG" 2>&1)"; then
-    echo "$out" >&2
-    fail "DMG konnte nicht erstellt werden."
-  fi
+
+MOUNT=""
+detach_dmg() {
+  [[ -n "$MOUNT" ]] || return 0
+  hdiutil detach "$MOUNT" -quiet 2>/dev/null \
+    || hdiutil detach "$MOUNT" -force -quiet 2>/dev/null \
+    || true
+  MOUNT=""
+}
+trap detach_dmg EXIT
+
+# Ab macOS 27 löst "diskutil image" hdiutil create/attach ab; ältere Systeme kennen
+# nur hdiutil.
+if diskutil image -h >/dev/null 2>&1; then
+  RW="$WORK/rw.sparsebundle"
+  create_rw() { diskutil image create from "$STAGE" "$RW" --format UDSB --volumeName "$APP_NAME"; }
+  attach_rw() { diskutil image attach --nobrowse "$RW"; }
 else
-  # ältere macOS-Versionen ohne "diskutil image"
-  hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -ov -format UDZO "$DMG" >/dev/null
+  RW="$WORK/rw.dmg"
+  create_rw() { hdiutil create -volname "$APP_NAME" -srcfolder "$STAGE" -fs HFS+ -format UDRW -ov "$RW"; }
+  attach_rw() { hdiutil attach "$RW" -nobrowse; }
 fi
+rm -rf "$RW"
+# Ein eingehängtes Volume gleichen Namens würde der Finder statt des neuen nehmen.
+[[ -d "/Volumes/$APP_NAME" ]] && fail "/Volumes/$APP_NAME ist eingehängt – bitte erst auswerfen."
+if ! out="$(create_rw 2>&1)"; then
+  echo "$out" >&2
+  fail "DMG konnte nicht erstellt werden."
+fi
+out="$(attach_rw 2>&1)" || { echo "$out" >&2; fail "DMG konnte nicht eingehängt werden."; }
+MOUNT="$(printf '%s\n' "$out" | awk '/\/Volumes\// {print substr($0, index($0, "/Volumes/")); exit}')"
+[[ -n "$MOUNT" && -d "$MOUNT" ]] || { echo "$out" >&2; fail "Eingehängtes DMG nicht gefunden."; }
+
+step "Richte das DMG-Fenster ein (Symbole, Pfeil, Hintergrund)"
+# Der Finder legt das Fenster an. Gelingt das nicht (z. B. fehlende Erlaubnis zur
+# Steuerung des Finders), bleibt das DMG gültig, nur ohne Gestaltung.
+osascript <<APPLESCRIPT >/dev/null &
+tell application "Finder"
+  tell disk "$(basename "$MOUNT")"
+    open
+    set current view of container window to icon view
+    set toolbar visible of container window to false
+    set statusbar visible of container window to false
+    -- 600 × 400 pt Hintergrund plus Titel- und Pfadleiste
+    set the bounds of container window to {200, 120, 800, 580}
+    set theOptions to the icon view options of container window
+    set arrangement of theOptions to not arranged
+    set icon size of theOptions to 128
+    set text size of theOptions to 13
+    set background picture of theOptions to file ".background:background.png"
+    set position of item "$APP_NAME.app" of container window to {150, 200}
+    set position of item "Programme" of container window to {450, 200}
+    update without registering applications
+    delay 1
+    close
+  end tell
+end tell
+APPLESCRIPT
+STYLE_PID=$!
+for _ in $(seq 1 25); do
+  kill -0 "$STYLE_PID" 2>/dev/null || break
+  sleep 1
+done
+if kill -0 "$STYLE_PID" 2>/dev/null; then
+  kill "$STYLE_PID" 2>/dev/null || true
+  wait "$STYLE_PID" 2>/dev/null || true
+  echo "Hinweis: Der Finder hat nicht rechtzeitig geantwortet – das DMG bleibt ungestaltet." >&2
+elif ! wait "$STYLE_PID"; then
+  echo "Hinweis: Das DMG-Fenster ließ sich nicht gestalten (Erlaubnis zur Steuerung des Finders?)." >&2
+fi
+sync
+detach_dmg
+
+step "Komprimiere $(basename "$DMG")"
+rm -f "$DMG"
+hdiutil convert "$RW" -format UDZO -imagekey zlib-level=9 -o "$DMG" -quiet \
+  || fail "DMG konnte nicht komprimiert werden."
+rm -rf "$RW"
 if [[ "$DO_SIGN" == 1 ]]; then
   codesign --force --timestamp --sign "$SIGN_IDENTITY" "$DMG"
 fi
