@@ -7,6 +7,15 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 ## [Unveröffentlicht]
 
 ### Hinzugefügt
+- Wochenansicht: Arbeitsbeginn und Feierabend lassen sich mit der Maus verschieben. An der
+  Oberkante des ersten bzw. der Unterkante des letzten Abschnitts erscheint ein Griff;
+  beim Ziehen zeigt ein Schild die neue Uhrzeit und die Abweichung, der Tageskopf rechnet
+  mit, und Arbeit ohne Mac, die entfiele, ist gestrichelt. Die Zeit rastet auf 5 Minuten
+  ein (mit ⌥ auf die Minute) und am erfassten Wert, der den manuellen Wert wieder
+  aufhebt. Esc bricht ab, ⌘Z nimmt die Änderung zurück. Arbeitsbeginn und Feierabend
+  tragen eine türkise Linie, manuell festgelegte kräftiger und mit einem Punkt. Ohne Maus
+  geht dasselbe über das Kontextmenü (ändern mit Uhrzeit-Feld, zurücksetzen) und für
+  VoiceOver über Aktionen am Abschnitt.
 - Inspektor: „Alle Einträge löschen …“ ganz unten leert einen Tag – automatisch erfasste
   Zeiten wie manuelle Einträge (Arbeitsbeginn, Feierabend, Pausen, Arbeit ohne Mac,
   Abwesenheit). Ein Bestätigungsdialog nennt, was wegfällt; „Abbrechen“ ist die

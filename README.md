@@ -207,8 +207,19 @@ zu „Woche“ zeigt die Woche des ausgewählten Tags. In der Menüleisten-App e
 - Ein Klick auf die Uhrzeit von Beginn oder Ende kopiert sie in die Zwischenablage.
 - Ein Doppelklick auf einen Tageskopf oder einen Abschnitt öffnet den Tag in der Ansicht
   „Tage“ mit dem Inspektor – für Pausen, Arbeitsbeginn und Feierabend.
+- Arbeitsbeginn und Feierabend lassen sich mit der Maus verschieben: Fährt die Maus an die
+  Oberkante des ersten bzw. die Unterkante des letzten Abschnitts, erscheint ein Griff.
+  Beim Ziehen folgt der Tag samt Arbeitszeit und Pausen im Tageskopf, ein Schild nennt die
+  neue Uhrzeit und die Abweichung („Beginn 07:30 · +25 Min.“). Die Zeit rastet auf
+  5 Minuten ein, mit gedrückter ⌥-Taste auf die Minute, und am erfassten Wert – dorthin
+  zurückgezogen, gilt wieder die automatische Erfassung. Arbeit ohne Mac, die dabei
+  entfiele, ist orange gestrichelt; Esc bricht ab, ⌘Z nimmt die Änderung zurück.
+  Arbeitsbeginn und Feierabend tragen eine türkise Linie. Ist eine Grenze manuell
+  festgelegt, ist die Linie kräftiger und hat am rechten Ende einen Punkt. Das Ende eines
+  laufenden Abschnitts („jetzt“) ist kein Feierabend und lässt sich nicht verschieben.
 - Ein Rechtsklick zeigt als Menü alles, was an der Stelle geht: Tag bearbeiten, Uhrzeit
-  kopieren, Arbeit ohne Mac eintragen oder löschen und – an Arbeitstagen, auch künftigen –
+  kopieren, Arbeit ohne Mac eintragen oder löschen, Arbeitsbeginn bzw. Feierabend ändern
+  (mit Uhrzeit-Feld) oder zurücksetzen und – an Arbeitstagen, auch künftigen –
   die Abwesenheit wählen (Urlaub, Krank, Feiertag, je ganz oder halb, Zeitausgleich, keine;
   ganztags nur an einem Tag ohne andere Einträge) oder alle Einträge des Tages löschen.
 - Eine Abwesenheit liegt als türkises, gestricheltes Band über dem Arbeitszeitrahmen des
@@ -220,7 +231,9 @@ zu „Woche“ zeigt die Woche des ausgewählten Tags. In der Menüleisten-App e
 - Ein vergangener Arbeitstag ohne Arbeitszeit und ohne Abwesenheit zeigt im Tageskopf sein
   fehlendes Soll in Rot (z. B. „−7:48 h“) – so sieht man, woher ein Minus im Wochensaldo kommt.
 - Für VoiceOver ist die Woche eine Gruppe mit einem Element je Tag (Arbeitszeit, Pausen,
-  Hinweise) und je Abschnitt, Pause und Arbeit ohne Mac.
+  Hinweise) und je Abschnitt, Pause und Arbeit ohne Mac. Am ersten bzw. letzten Abschnitt
+  gibt es Aktionen, um Arbeitsbeginn bzw. Feierabend 5 Minuten früher oder später zu legen,
+  zu ändern oder zurückzusetzen.
 - Tage mit Regelverstößen tragen ein Warnschild; ein Klick auf den Tageskopf zeigt die
   Hinweise.
 - Arbeit außerhalb des Arbeitszeitrahmens erscheint orange als „nicht gezählt“.
