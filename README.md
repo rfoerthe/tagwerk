@@ -185,7 +185,7 @@ auf Klick als kleines Fenster.
 
 ### Wochenansicht
 
-<img src="doc/screenshots/wochenansicht-hinweise.png" alt="Wochenansicht mit Hinweisen zu Regelverstößen und nicht gezählter Arbeit" width="860">
+<img src="doc/screenshots/wochenansicht-hinweise.png" alt="Wochenansicht mit Hinweisen zu Regelverstößen und einem Tag Zeitausgleich" width="860">
 
 Die Ansicht **Woche** im Fenster „Aufzeichnungen“ zeigt eine Kalenderwoche wie einen
 Kalender: je Tag eine Spalte, jeder Arbeitsabschnitt ein Block von Beginn bis Ende – das
@@ -214,7 +214,7 @@ zu „Woche“ zeigt die Woche des ausgewählten Tags. In der Menüleisten-App e
   5 Minuten ein, mit gedrückter ⌥-Taste auf die Minute, und am erfassten Wert – dorthin
   zurückgezogen, gilt wieder die automatische Erfassung. Arbeit ohne Mac, die dabei
   entfiele, ist orange gestrichelt; Esc bricht ab, ⌘Z nimmt die Änderung zurück.
-  Arbeitsbeginn und Feierabend tragen eine türkise Linie. Ist eine Grenze manuell
+  Arbeitsbeginn und Feierabend tragen eine Linie in Textfarbe. Ist eine Grenze manuell
   festgelegt, ist die Linie kräftiger und hat am rechten Ende einen Punkt. Das Ende eines
   laufenden Abschnitts („jetzt“) ist kein Feierabend und lässt sich nicht verschieben.
 - Ein Rechtsklick zeigt als Menü alles, was an der Stelle geht: Tag bearbeiten, Uhrzeit
