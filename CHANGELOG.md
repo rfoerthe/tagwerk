@@ -16,8 +16,47 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   tragen eine türkise Linie, manuell festgelegte kräftiger und mit einem Punkt. Ohne Maus
   geht dasselbe über das Kontextmenü (ändern mit Uhrzeit-Feld, zurücksetzen) und für
   VoiceOver über Aktionen am Abschnitt.
+- Inspektor: „Alle Einträge löschen …“ ganz unten leert einen Tag – automatisch erfasste
+  Zeiten wie manuelle Einträge (Arbeitsbeginn, Feierabend, Pausen, Arbeit ohne Mac,
+  Abwesenheit). Ein Bestätigungsdialog nennt, was wegfällt; „Abbrechen“ ist die
+  Standardtaste. ⌘Z stellt den Tag samt erfasster Zeiten wieder her. Wird der heutige Tag
+  gelöscht, zählt die Menüleisten-App eine laufende Erfassung bzw. laufende Arbeit ohne Mac
+  ab dem Löschen weiter, statt die gelöschte Zeit beim nächsten Speichern zurückzuschreiben.
+  Der Befehl erscheint nur bei Einträgen außer der Abwesenheit; eine Abwesenheit allein
+  entfernt man mit „Keine“.
+- Wochenansicht: Abwesenheit per Rechtsklick (Untermenü „Abwesenheit“: Urlaub, Krank,
+  Feiertag – je ganz oder halb –, Zeitausgleich oder keine), an Arbeitstagen und auch im
+  Voraus. Sie liegt als türkises, gestricheltes Band über dem Arbeitszeitrahmen des Tages
+  und lässt sich mit ⌘Z widerrufen. Ebenfalls per Rechtsklick: „Alle Einträge löschen …“
+  (mit derselben Rückfrage wie im Inspektor).
+- Wochenansicht: Der Tag in Bearbeitung (in „Tage“ ausgewählt) ist markiert – Datum auf
+  einer Pille in Magenta, gestrichelter Rahmen in Magenta um die Spalte. Ein Klick oder Rechtsklick in eine
+  Tagesspalte wählt den Tag, auch für den Inspektor in „Tage“.
+- „Aufzeichnungen“: Ein Doppelklick auf eine Zeile der Liste oder ein Rechtsklick („In der
+  Wochenansicht zeigen“) springt in die Woche des Tags bzw. der Wochenzeile.
+- „Aufzeichnungen“: Vergangene Arbeitstage ganz ohne Eintrag erscheinen in der Liste (mit
+  Fragezeichen, 0:00 h und ihrem Soll als Minus) und lassen sich auswählen, um Zeiten oder
+  eine Abwesenheit nachzutragen. Auch Export (Markdown, CSV, PDF) führt sie auf, und die
+  Wochenansicht zeigt im Tageskopf ihr fehlendes Soll in Rot (z. B. „−7:48 h“).
 
 ### Geändert
+- Eine ganztägige Abwesenheit (Urlaub, Krank, Feiertag, Zeitausgleich) lässt sich nur noch
+  an einem Tag ohne andere Einträge eintragen; erfasste Zeiten und Korrekturen löscht man
+  vorher selbst mit „Alle Einträge löschen …“. Im Inspektor und im Rechtsklick-Menü sind
+  ganze Tage sonst gesperrt (mit Hinweis); ein halber Tag geht weiter neben Arbeitszeit.
+  Für heute zählen nur die Einträge von Hand: Die automatisch erfasste Zeit entfällt nach
+  einer Rückfrage mit der Abwesenheit, die Erfassung endet für heute; ⌘Z holt beides zurück.
+  Umgekehrt sperrt eine ganztägige Abwesenheit den Tag: Arbeitsbeginn, Feierabend, Pausen
+  und Arbeit ohne Mac lassen sich im Inspektor und in der Wochenansicht erst wieder
+  eintragen oder ändern, wenn die Abwesenheit auf „Keine“ steht. Auch die Menüleisten-App
+  erfasst an so einem Tag nichts (auch nicht über Mitternacht hinein) und zeigt „Heute
+  abwesend: …“ statt Arbeitsbeginn, Unterbrechen, Ohne Mac und Feierabend.
+- Saldo und Zeitkonto zählen das Soll jedes Arbeitstags bis gestern – auch ohne Eintrag, ab
+  dem ersten erfassten Tag. Bisher drückten nicht erfasste Arbeitstage den Saldo nicht, und
+  ein vergessener Urlaubstag fiel nicht auf. Heute zählt das Soll wie bisher erst mit
+  Arbeitszeit oder Abwesenheit, künftige Tage (eine geplante Abwesenheit) noch gar nicht.
+  **Das Zeitkonto kann dadurch sinken:** Nicht eingetragene Urlaubs-, Feier- und
+  Krankheitstage zeigt die Liste jetzt als „fehlend“ – dort als Abwesenheit nachtragen.
 - Ein manueller Feierabend zählt ab dem letzten Sperren davor, ein manueller Arbeitsbeginn
   bis zum ersten Entsperren danach – auch wenn der Mac nach dem Feierabend bzw. vor dem
   Beginn noch entsperrt war. Bisher galt das letzte Sperren bzw. erste Entsperren des
@@ -29,7 +68,11 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   laufenden Monat bis gestern (bisher sechs Wochen plus die laufende Woche). Die
   eingebauten Regelverstöße – zu kurze Ruhezeit, Arbeit vor 7 und nach 22 Uhr, zu wenig
   Pause – wiederholen sich alle sechs Wochen, von der laufenden Woche aus rückwärts
-  gezählt.
+  gezählt. Dazu kommen Abwesenheiten, damit kein Werktag ohne Eintrag bleibt: die
+  bundesweiten Feiertage, 30 Urlaubstage im Jahr (Karwoche, Brückentag nach Himmelfahrt,
+  Sommer- und Herbsturlaub, zwischen den Jahren, Heiligabend und Silvester halb, der Rest
+  einzeln) und 6 Tage Zeitausgleich (Brückentage, sonst Freitage). Die Wochen gleichen das
+  Zeitkonto aus, sodass es um null pendelt.
 
 ## [1.4.0] - 2026-11-19
 

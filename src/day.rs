@@ -359,6 +359,49 @@ impl Day {
         self.periods.is_empty() && !self.has_corrections()
     }
 
+    /// Gibt es Einträge außer der Abwesenheit (erfasste Zeiten oder Korrekturen)?
+    pub fn has_entries(&self) -> bool {
+        !self.periods.is_empty()
+            || self.start.is_some()
+            || self.end.is_some()
+            || !self.breaks.is_empty()
+            || !self.work.is_empty()
+    }
+
+    /// Gibt es Einträge, die von Hand stammen (Arbeitsbeginn, Feierabend, Pausen, Arbeit ohne
+    /// Mac)?
+    pub fn has_manual_entries(&self) -> bool {
+        self.start.is_some() || self.end.is_some() || !self.breaks.is_empty() || !self.work.is_empty()
+    }
+
+    /// Lässt sich `absence` eintragen (`today`: Der Tag ist heute)? Eine ganztägige Abwesenheit
+    /// (auch Zeitausgleich) nur an einem Tag ohne andere Einträge – die löscht man vorher
+    /// selbst („Alle Einträge löschen“); ein halber Tag geht auch neben Arbeitszeit. Heute
+    /// zählen nur die Einträge von Hand: Die automatische Erfassung legt beim Entsperren sofort
+    /// wieder Zeiten an; die entfallen mit der Abwesenheit (siehe [`Day::clears_for_absence`]).
+    /// Keine Abwesenheit geht immer.
+    pub fn accepts_absence(&self, absence: Option<Absence>, today: bool) -> bool {
+        absence.is_none_or(|a| a.half) || !self.blocks_full_absence(today)
+    }
+
+    /// Verhindern die Einträge eine ganztägige Abwesenheit (`today`: siehe
+    /// [`Day::accepts_absence`])?
+    pub fn blocks_full_absence(&self, today: bool) -> bool {
+        if today { self.has_manual_entries() } else { self.has_entries() }
+    }
+
+    /// Löscht `absence` heute automatisch erfasste Zeiten (ganzer Tag neben erfasster Zeit)?
+    pub fn clears_for_absence(&self, absence: Option<Absence>, today: bool) -> bool {
+        today && absence.is_some_and(|a| !a.half) && !self.periods.is_empty() && self.accepts_absence(absence, true)
+    }
+
+    /// Sperrt eine ganztägige Abwesenheit die übrigen Einträge? Dann lassen sie sich von Hand
+    /// weder eintragen noch ändern, bis die Abwesenheit wieder auf „Keine“ steht (oder der
+    /// Tag mit „Alle Einträge löschen“ geleert ist).
+    pub fn locks_entries(&self) -> bool {
+        self.absence.is_some_and(|a| !a.half)
+    }
+
     /// Fügt eine automatisch erfasste Periode hinzu (überlappende werden zusammengefasst).
     pub fn add_period(&mut self, from: i64, to: i64) {
         if to < from {
@@ -772,6 +815,50 @@ mod tests {
 
     fn st() -> Settings {
         Settings::default()
+    }
+
+    #[test]
+    fn full_day_absence_needs_an_empty_day() {
+        let vacation = Some(Absence::new(AbsenceKind::Vacation, false));
+        let half = Some(Absence::new(AbsenceKind::Vacation, true));
+        let time_off = Some(Absence::new(AbsenceKind::TimeOff, false));
+        let empty = || Day::new(NaiveDate::from_ymd_opt(2026, 11, 16).unwrap());
+        let mut d = empty();
+        assert!(!d.has_entries() && d.accepts_absence(vacation, false) && d.accepts_absence(time_off, false));
+        // Eine Abwesenheit allein ist kein Eintrag: Sie lässt sich ändern.
+        d.absence = half;
+        assert!(!d.has_entries() && d.accepts_absence(vacation, false));
+        // Mit erfasster Zeit oder einer Korrektur nur noch halbe Tage (oder keine).
+        for change in [
+            (|d: &mut Day| d.add_period(h(8, 0), h(12, 0))) as fn(&mut Day),
+            |d| d.start = Some(h(8, 0)),
+            |d| d.end = Some(h(17, 0)),
+            |d| d.add_break(h(12, 0), h(12, 30)),
+            |d| d.add_work(h(13, 0), h(14, 0), "Meeting"),
+        ] {
+            let mut busy = empty();
+            change(&mut busy);
+            assert!(busy.has_entries());
+            assert!(!busy.accepts_absence(vacation, false) && !busy.accepts_absence(time_off, false));
+            assert!(busy.accepts_absence(half, false) && busy.accepts_absence(None, false));
+        }
+        // Heute zählen nur Einträge von Hand: Erfasste Zeit entfällt mit der Abwesenheit.
+        let mut today = empty();
+        today.add_period(h(8, 0), h(9, 30));
+        assert!(!today.accepts_absence(vacation, false) && today.accepts_absence(vacation, true));
+        assert!(today.clears_for_absence(vacation, true) && !today.clears_for_absence(half, true));
+        assert!(!today.clears_for_absence(vacation, false), "nur heute");
+        today.add_break(h(9, 0), h(9, 15));
+        assert!(!today.accepts_absence(vacation, true) && !today.clears_for_absence(vacation, true));
+        // Umgekehrt sperrt nur eine ganztägige Abwesenheit die übrigen Einträge.
+        let mut off = empty();
+        assert!(!off.locks_entries());
+        off.absence = half;
+        assert!(!off.locks_entries(), "halber Tag: Arbeitszeit geht");
+        off.absence = vacation;
+        assert!(off.locks_entries());
+        off.absence = time_off;
+        assert!(off.locks_entries());
     }
 
     fn day() -> Day {

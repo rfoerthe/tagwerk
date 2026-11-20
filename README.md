@@ -118,6 +118,8 @@ reine Anzeige und lassen sich nicht anklicken. Lange Hinweise brechen um, damit 
 
 Ein natives macOS-Fenster (⌘A bei geöffnetem Menü) mit zwei Ansichten, zwischen denen der
 Umschalter **Tage | Woche** in der Symbolleiste wechselt (Menü „Darstellung“, ⌘1 und ⌘2).
+Aus der Liste in „Tage“ springt ein Doppelklick auf eine Zeile oder ein Rechtsklick („In der
+Wochenansicht zeigen“) in die Woche dieses Tags – auf einer Wochenzeile in diese Woche.
 Das Fenster öffnet in der zuletzt benutzten Ansicht.
 
 Die Ansicht **Tage** zeigt Kennzahlen für heute, die Woche, den Monat, den
@@ -134,7 +136,9 @@ eigene Abschnitte; ist die Lücke zur benachbarten Arbeitszeit (erfasst oder Arb
 Mac) kürzer als die Mindestpause, wird sie dem neuen Abschnitt dazugerechnet (mit Hinweis).
 Ein Abschnitt dauert mindestens so lange wie in den Einstellungen festgelegt (Standard
 15 Min.). Tage mit Regelverstößen tragen ein Warnsymbol, manuell korrigierte Tage einen
-Stift – trifft beides zu, stehen beide Symbole nebeneinander.
+Stift – trifft beides zu, stehen beide Symbole nebeneinander. Vergangene Arbeitstage ganz
+ohne Eintrag stehen mit einem Fragezeichen in der Liste: 0:00 h Arbeitszeit und ihr Soll
+als Minus, bis Zeiten oder eine Abwesenheit nachgetragen sind.
 
 Salden sind überall farbig, grün im Plus und rot im Minus: in der Spalte „Saldo“, in den
 Wochensummen, in den Kennzahlen samt Zeitkonto und im Kopf der Wochenansicht. Der Inspektor
@@ -143,18 +147,36 @@ Abschnitt bewirkt, erklärt der Info-Knopf (ⓘ) neben seiner Überschrift – a
 auf Klick als kleines Fenster.
 
 - **Abwesenheit** – im Inspektor lässt sich für einen Tag Urlaub, Krank, Feiertag oder
-  Zeitausgleich eintragen, auch für Tage ohne Aufzeichnung (über „Tag bearbeiten“). Urlaub,
+  Zeitausgleich eintragen, auch für Tage ohne Aufzeichnung (über „Tag bearbeiten“), in der
+  Wochenansicht per Rechtsklick – dort auch im Voraus. Ganztags geht das nur an einem Tag
+  ohne andere Einträge (erfasste Zeiten, Arbeitsbeginn, Feierabend, Pausen, Arbeit ohne
+  Mac): Die löscht man vorher selbst mit „Alle Einträge löschen …“. Heute zählen dabei nur
+  die Einträge von Hand – die automatisch erfasste Zeit entfällt nach einer Rückfrage mit
+  der Abwesenheit, und die Erfassung endet für heute (⌘Z nimmt das zurück). Umgekehrt sperrt eine
+  ganztägige Abwesenheit den Tag: Im Inspektor und in der Wochenansicht lässt sich dann
+  nichts anderes eintragen oder ändern, bis sie wieder auf „Keine“ steht, und die
+  Menüleisten-App erfasst an diesem Tag nichts: Das Menü zeigt „Heute abwesend: Urlaub“
+  ohne Arbeitsbeginn, Unterbrechen, Ohne Mac und Feierabend. Ein halber Tag geht auch neben
+  Arbeitszeit. Urlaub,
   Krankheit und Feiertag senken das Soll des Tages – ganz oder, als halber Tag, auf die
   Hälfte: Ein halber Urlaubstag mit vier Stunden Arbeit ist damit kein Minus mehr.
   Zeitausgleich lässt das Soll stehen, auch ganz ohne Arbeitszeit – so sinkt das Zeitkonto
   um den freien Tag. In der Tabelle steht hinter dem Datum ein Kürzel (U, K, F, ZA, halbe
   Tage mit ½), in der Wochenansicht die Abwesenheit im Tageskopf.
 
+- **Alle Einträge löschen** – ganz unten im Inspektor oder per Rechtsklick in der
+  Wochenansicht leert „Alle Einträge löschen …“ einen Tag: die automatisch erfassten Zeiten ebenso wie Arbeitsbeginn, Feierabend, Pausen, Arbeit
+  ohne Mac und Abwesenheit. Vorher fragt ein Dialog nach und nennt, was wegfällt; ⌘Z holt
+  den Tag vollständig zurück. Für heute läuft die automatische Erfassung danach ab dem
+  Löschen weiter. Der Befehl erscheint nur, wenn der Tag mehr als eine Abwesenheit hat –
+  die allein entfernt „Abwesenheit → Keine“.
+
 - **Widerrufen und Wiederholen** (⌘Z, ⇧⌘Z, Menü „Bearbeiten“) – jede Korrektur aus dem
   Inspektor und der Wochenansicht lässt sich zurücknehmen, bis zu 50 Schritte, solange das
   Fenster offen ist. Das Menü nennt den Schritt („Widerrufen: Pause entfernen“), und der
   betroffene Tag wird gezeigt. Zurückgenommen werden nur die Korrekturen des Tages; inzwischen
-  erfasste Zeit bleibt.
+  erfasste Zeit bleibt (außer nach „Alle Einträge löschen“, das auch die erfasste Zeit
+  zurückbringt).
 - **Filter** (Symbolleiste oder Menü „Darstellung“) – schränkt die Tabelle auf einen Zeitraum
   ein (dieser oder letzter Monat, dieses oder letztes Jahr), auf Tage mit Hinweisen oder auf
   korrigierte Tage; die Merkmale lassen sich kombinieren. Solange gefiltert wird, ist das
@@ -197,7 +219,17 @@ zu „Woche“ zeigt die Woche des ausgewählten Tags. In der Menüleisten-App e
   laufenden Abschnitts („jetzt“) ist kein Feierabend und lässt sich nicht verschieben.
 - Ein Rechtsklick zeigt als Menü alles, was an der Stelle geht: Tag bearbeiten, Uhrzeit
   kopieren, Arbeit ohne Mac eintragen oder löschen, Arbeitsbeginn bzw. Feierabend ändern
-  (mit Uhrzeit-Feld) oder zurücksetzen.
+  (mit Uhrzeit-Feld) oder zurücksetzen und – an Arbeitstagen, auch künftigen –
+  die Abwesenheit wählen (Urlaub, Krank, Feiertag, je ganz oder halb, Zeitausgleich, keine;
+  ganztags nur an einem Tag ohne andere Einträge) oder alle Einträge des Tages löschen.
+- Eine Abwesenheit liegt als türkises, gestricheltes Band über dem Arbeitszeitrahmen des
+  Tages, mit ihrer Art oben; Abschnitte, an denen trotzdem gearbeitet wurde, darüber.
+- Der Tag in Bearbeitung – derselbe, den in „Tage“ der Inspektor zeigt – trägt sein Datum
+  weiß auf einer Pille in Magenta, ein gestrichelter Rahmen in Magenta umfasst seine Spalte. Ein Klick oder
+  Rechtsklick in eine Tagesspalte wählt den Tag; beim Wechsel zu „Tage“ steht er dort im
+  Inspektor. Heute bleibt davon unabhängig blau getönt.
+- Ein vergangener Arbeitstag ohne Arbeitszeit und ohne Abwesenheit zeigt im Tageskopf sein
+  fehlendes Soll in Rot (z. B. „−7:48 h“) – so sieht man, woher ein Minus im Wochensaldo kommt.
 - Für VoiceOver ist die Woche eine Gruppe mit einem Element je Tag (Arbeitszeit, Pausen,
   Hinweise) und je Abschnitt, Pause und Arbeit ohne Mac. Am ersten bzw. letzten Abschnitt
   gibt es Aktionen, um Arbeitsbeginn bzw. Feierabend 5 Minuten früher oder später zu legen,
@@ -335,13 +367,14 @@ erfasste Arbeitszeit ändern sie nicht.
 | Pausen (§ 4 ArbZG)   | mehr als 6 Std. Arbeit: 30 Min., mehr als 9 Std.: 45 Min.; höchstens 6 Std. am Stück ohne Pause; es zählen Pausen ab 15 Min. |
 | Ruhezeit (§ 5 ArbZG) | mindestens 11 Std. zwischen dem Ende eines Arbeitstags und dem nächsten Beginn |
 | Höchstarbeitszeit    | mehr als 10 Std. Arbeit an einem Tag; Mitteilung bei 9:45 und 10 Std. (abschaltbar) |
-| Erfassung            | Beginn und Ende durch Entsperren/Sperren, Arbeit unterbrechen/Weiter arbeiten oder Ohne Mac weiterarbeiten; keine Einträge in der Zukunft |
+| Erfassung            | Beginn und Ende durch Entsperren/Sperren, Arbeit unterbrechen/Weiter arbeiten oder Ohne Mac weiterarbeiten; keine Zeiten in der Zukunft (Abwesenheiten schon) |
 
 > [!NOTE]
-> Der Saldo vergleicht die Arbeitszeit mit dem Soll – aber nur für Tage, an denen
-> gearbeitet wurde oder eine Abwesenheit eingetragen ist. Freie Tage ohne Eintrag, also
-> auch Urlaub, Feiertage oder Krankheit, drücken den Saldo nicht; eine eingetragene
-> Abwesenheit regelt das Soll des Tages (halber Urlaubstag: die Hälfte, Zeitausgleich: voll).
+> Der Saldo vergleicht die Arbeitszeit mit dem Soll. Jeder Arbeitstag bis gestern zählt
+> sein Soll – auch ganz ohne Eintrag, ab dem ersten erfassten Tag. Urlaub, Feiertage und
+> Krankheit trägt man deshalb als Abwesenheit ein; sie regelt das Soll des Tages (halber
+> Urlaubstag: die Hälfte, Zeitausgleich: voll). Heute zählt das Soll erst mit Arbeitszeit
+> oder Abwesenheit, künftige Tage (eine geplante Abwesenheit) noch gar nicht.
 > Arbeit am Wochenende und an abgewählten Arbeitstagen zählt vollständig als Mehrarbeit.
 > Das Zeitkonto ist dieser Saldo über alle Tage (oder ab einem Datum) plus Übertrag.
 
@@ -491,8 +524,13 @@ Menüleiste zeichnet die App selbst (`src/glyphs.rs`).
 <br>
 
 `testdata/testdb.sh` erzeugt eine Testdatenbank, die immer bis gestern reicht: 18 volle
-Kalendermonate plus die Tage des laufenden Monats, Wochensummen um 39 Stunden ± 10 %,
-bundesweite Feiertage frei. An rund 25 % der Tage gibt es Arbeit ohne Mac (Meeting,
+Kalendermonate plus die Tage des laufenden Monats, Wochensummen um 39 Stunden ± 8 %.
+Kein Werktag bleibt ohne Eintrag: Die bundesweiten Feiertage sind als „Feiertag“
+eingetragen, dazu 30 Urlaubstage im Jahr (Karwoche, Brückentag nach Himmelfahrt, zwei bis
+drei Wochen im Sommer, eine Herbstwoche, zwischen den Jahren, Heiligabend und Silvester als
+halbe Tage, der Rest einzeln) und 6 Tage Zeitausgleich (zuerst Brückentage, sonst
+Freitage). Die Mehrarbeit dafür ist über das Jahr verteilt, das Zeitkonto pendelt um null.
+An rund 25 % der Tage gibt es Arbeit ohne Mac (Meeting,
 Telefonat, Networking, Sonstiges – bei gesperrtem Mac, vor dem Beginn oder nach dem Ende,
 auch Meeting und Telefonat direkt hintereinander als zwei Abschnitte), dazu alle sechs
 Wochen dieselben Regelverstöße: zu kurze Ruhezeit, Arbeit vor 7 und nach 22 Uhr, zu wenig

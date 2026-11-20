@@ -10,8 +10,12 @@
 //! bzw. bis „Zurück am Mac“ als Arbeit ohne Mac – auch wenn der Mac dazwischen gesperrt ist.
 //! Spätestens um Mitternacht oder mit dem Feierabend endet es, damit ein vergessenes „Zurück am
 //! Mac“ nicht tagelang Arbeitszeit einträgt.
+//!
+//! An einem Tag mit ganztägiger Abwesenheit (Urlaub, Krank, Feiertag, Zeitausgleich) wird
+//! nichts erfasst, und die manuellen Entscheidungen greifen nicht – bis die Abwesenheit im
+//! Fenster „Aufzeichnungen“ wieder auf „Keine“ steht.
 
-use crate::day::{self, Activity, Day, Mode, Span, WorkBlock, DAY_END};
+use crate::day::{self, Absence, Activity, Day, Mode, Span, WorkBlock, DAY_END};
 use crate::rules::{self, Settings, Warning};
 use crate::store::{self, Status};
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime};
@@ -142,7 +146,7 @@ impl Tracker {
     /// „Ohne Mac weiterarbeiten“: Ab jetzt zählt die Zeit als Arbeit ohne Mac, auch wenn der Mac
     /// gesperrt wird – bis zum nächsten Entsperren bzw. Aufwachen oder „Zurück am Mac“.
     pub fn go_away(&mut self, now: NaiveDateTime, activity: Activity) -> bool {
-        if self.on_away() || matches!(self.mode(now), Mode::Closed(_)) {
+        if self.on_away() || matches!(self.mode(now), Mode::Closed(_)) || self.absent(now.date()).is_some() {
             return false;
         }
         if let Some(since) = self.running_since.take() {
@@ -182,8 +186,17 @@ impl Tracker {
         self.pause_reason = PauseReason::Manual;
     }
 
+    /// Ganztägige Abwesenheit am Tag `date` (siehe [`Day::locks_entries`]): Dann wird nichts
+    /// erfasst und nichts von Hand eingetragen.
+    pub fn absent(&self, date: NaiveDate) -> Option<Absence> {
+        self.day(date).filter(|d| d.locks_entries()).and_then(|d| d.absence)
+    }
+
     /// Zustand für die Statusdatei und die Anzeige.
     pub fn status(&self, now: NaiveDateTime) -> Status {
+        if self.absent(now.date()).is_some() {
+            return Status::Absent;
+        }
         match self.mode(now) {
             Mode::Closed(_) => Status::Closed,
             Mode::Auto => match self.paused_since {
@@ -213,10 +226,14 @@ impl Tracker {
         self.day(now.date()).map(Day::mode).unwrap_or(Mode::Auto)
     }
 
-    /// Automatische Erfassung starten. Nach Feierabend passiert nichts. Beendet „Ohne Mac
-    /// weiterarbeiten“ (die Zeit bis jetzt zählt als Arbeit ohne Mac).
+    /// Automatische Erfassung starten. Nach Feierabend und an einem ganztägigen
+    /// Abwesenheitstag passiert nichts. Beendet „Ohne Mac weiterarbeiten“ (die Zeit bis jetzt
+    /// zählt als Arbeit ohne Mac).
     pub fn start(&mut self, now: NaiveDateTime) -> bool {
-        if self.running_since.is_some() || matches!(self.mode(now), Mode::Closed(_)) {
+        if self.running_since.is_some()
+            || matches!(self.mode(now), Mode::Closed(_))
+            || self.absent(now.date()).is_some()
+        {
             return false;
         }
         self.end_away(now);
@@ -252,6 +269,12 @@ impl Tracker {
                 let midnight = now.date().and_hms_opt(0, 0, 0).unwrap();
                 Self::commit(&mut self.days, since, midnight);
                 self.running_since = Some(midnight);
+                // Heute ganztägig abwesend: ab Mitternacht wird nichts erfasst.
+                if self.absent(now.date()).is_some() {
+                    self.running_since = None;
+                    self.paused_since = Some(midnight);
+                    self.pause_reason = PauseReason::Manual;
+                }
                 changed = true;
             }
         }
@@ -287,6 +310,9 @@ impl Tracker {
 
     /// Arbeit ohne Mac nachtragen (z. B. eine Pause als Arbeitszeit zählen).
     pub fn add_work(&mut self, date: NaiveDate, from: i64, to: i64, note: &str) {
+        if self.absent(date).is_some() {
+            return;
+        }
         self.day_mut(date).add_work(from, to, note);
         self.cleanup();
     }
@@ -296,6 +322,9 @@ impl Tracker {
     /// Arbeit ohne Mac, endet sie ohne Eintrag; dann liefert die Funktion `true`, und der
     /// Aufrufer startet ggf. die Erfassung.
     pub fn remove_work(&mut self, date: NaiveDate, from: i64, mut to: i64, now: NaiveDateTime) -> bool {
+        if self.absent(date).is_some() {
+            return false;
+        }
         let away = self.on_away()
             && self.paused_since.is_some_and(|since| since.date() == date && (from..=to).contains(&secs(since)));
         if away {
@@ -317,7 +346,7 @@ impl Tracker {
         let s = &self.settings;
         let date = now.date();
         let monday = date - Duration::days(date.weekday().num_days_from_monday() as i64);
-        let (week_work, week_target) = rules::balance(&snap, monday, date, s);
+        let (week_work, week_target) = rules::balance(&snap, monday, date, date, s);
         let mut info = TodayInfo {
             work_secs: 0,
             pause_secs: 0,
@@ -379,6 +408,9 @@ impl Tracker {
     /// Arbeit ohne Mac vor dem neuen Beginn entfällt (die letzte Angabe gilt); zurück kommt,
     /// was entfallen ist. Läuft gerade Arbeit ohne Mac, zählt sie erst ab dem Beginn.
     pub fn set_start(&mut self, now: NaiveDateTime, at: Option<i64>) -> Vec<WorkBlock> {
+        if self.absent(now.date()).is_some() {
+            return Vec::new();
+        }
         let at = at.map(|a| a.min(secs(now)));
         if let (Some(at), true, Some(since)) = (at, self.on_away(), self.paused_since) {
             if since.date() == now.date() && secs(since) < at {
@@ -393,6 +425,9 @@ impl Tracker {
     /// Feierabend um `at` (höchstens jetzt). Stoppt die Erfassung. Arbeit ohne Mac danach
     /// entfällt (die letzte Angabe gilt); zurück kommt, was entfallen ist.
     pub fn close_day(&mut self, now: NaiveDateTime, at: i64) -> Vec<WorkBlock> {
+        if self.absent(now.date()).is_some() {
+            return Vec::new();
+        }
         let t = secs(now);
         if self.on_away() {
             let until = now.date().and_hms_opt(0, 0, 0).unwrap() + Duration::seconds(at.clamp(0, t));
@@ -404,6 +439,9 @@ impl Tracker {
 
     /// Feierabend zurücknehmen. Die Erfassung startet der Aufrufer (falls entsperrt).
     pub fn reopen_day(&mut self, now: NaiveDateTime) {
+        if self.absent(now.date()).is_some() {
+            return;
+        }
         if let Some(d) = self.days.iter_mut().find(|d| d.date == now.date()) {
             d.end = None;
         }
@@ -413,6 +451,18 @@ impl Tracker {
     /// Nach einer Änderung der Datenbank von außen (Fenster „Aufzeichnungen“) neu einlesen.
     /// Die laufende Periode bleibt erhalten; doppelt gespeicherte Zeiten werden zusammengefasst.
     pub fn replace_days(&mut self, days: Vec<Day>, settings: Settings, now: NaiveDateTime) {
+        // Tag im Fenster „Aufzeichnungen“ gelöscht: Was gerade läuft, zählt erst ab jetzt –
+        // sonst brächte das nächste Speichern die laufende Periode bzw. Arbeit ohne Mac seit
+        // ihrem Beginn zurück.
+        let deleted = |since: NaiveDateTime| {
+            self.saved.iter().any(|d| d.date == since.date()) && !days.iter().any(|d| d.date == since.date())
+        };
+        if self.running_since.is_some_and(deleted) {
+            self.running_since = Some(now);
+        }
+        if self.on_away() && self.paused_since.is_some_and(deleted) {
+            self.paused_since = Some(now);
+        }
         self.saved = days.clone();
         self.days = days;
         self.settings = settings;
@@ -425,6 +475,15 @@ impl Tracker {
             if self.running_since.is_some() {
                 self.stop(now, PauseReason::Manual);
             }
+        }
+        // Heute ganztägig abwesend (eingetragen in „Aufzeichnungen“): Was läuft, endet ohne
+        // Eintrag – der Tag nimmt keine Zeiten an.
+        if self.absent(now.date()).is_some()
+            && (self.running_since.is_some_and(|since| since.date() == now.date()) || self.on_away())
+        {
+            self.running_since = None;
+            self.paused_since = Some(now);
+            self.pause_reason = PauseReason::Manual;
         }
     }
 
@@ -451,7 +510,11 @@ impl Tracker {
             day::day_mut(days, s.date()).add_period(secs(s), DAY_END);
             s = (s.date() + Duration::days(1)).and_hms_opt(0, 0, 0).unwrap();
         }
-        day::day_mut(days, s.date()).add_period(secs(s), secs(end));
+        // Endet die Periode genau um Mitternacht, bekommt der neue Tag keinen leeren Abschnitt
+        // (sonst hätte z. B. ein Urlaubstag plötzlich einen Eintrag).
+        if s < end || s == start {
+            day::day_mut(days, s.date()).add_period(secs(s), secs(end));
+        }
     }
 }
 
@@ -579,6 +642,70 @@ mod tests {
         t.replace_days(days, Settings::default(), dt(16, 17, 0));
         assert!(!t.on_away());
         assert_eq!(t.today(dt(16, 17, 0)).work_secs, hm(8, 30));
+    }
+
+    #[test]
+    fn deleted_day_restarts_running_capture() {
+        let mut t = Tracker::new(vec![], Settings::default());
+        t.start(dt(16, 8, 0));
+        // Gespeichert, dann im Fenster „Aufzeichnungen“ alle Einträge von heute gelöscht.
+        let mut db_days = t.snapshot(dt(16, 13, 0));
+        t.replace_days(db_days.clone(), Settings::default(), dt(16, 13, 0));
+        db_days.retain(|d| d.date != dt(16, 0, 0).date());
+        t.replace_days(db_days, Settings::default(), dt(16, 13, 30));
+        assert!(t.is_running(), "die Erfassung läuft weiter");
+        assert_eq!(t.today(dt(16, 14, 0)).work_secs, hm(0, 30), "erst ab dem Löschen");
+        // Ohne Löschen bleibt die laufende Periode, wie sie war.
+        let mut t = Tracker::new(vec![], Settings::default());
+        t.start(dt(16, 8, 0));
+        let days = t.snapshot(dt(16, 13, 0));
+        t.replace_days(days, Settings::default(), dt(16, 13, 0));
+        assert_eq!(t.today(dt(16, 14, 0)).work_secs, hm(6, 0));
+        // Laufende Arbeit ohne Mac zählt nach dem Löschen ebenfalls erst ab jetzt.
+        let mut t = Tracker::new(vec![], Settings::default());
+        t.start(dt(16, 8, 0));
+        assert!(t.go_away(dt(16, 12, 0), Activity::Meeting));
+        let days = t.snapshot(dt(16, 13, 0));
+        t.replace_days(days, Settings::default(), dt(16, 13, 0));
+        t.replace_days(vec![], Settings::default(), dt(16, 13, 30));
+        assert!(t.on_away());
+        assert_eq!(t.today(dt(16, 14, 0)).work_secs, hm(0, 30));
+    }
+
+    #[test]
+    fn full_day_absence_stops_capture() {
+        use crate::day::AbsenceKind;
+        let vacation = Some(Absence::new(AbsenceKind::Vacation, false));
+        let mut off = Day::new(dt(17, 0, 0).date());
+        off.absence = vacation;
+        // Urlaub am Dienstag im Voraus eingetragen; am Montag wird bis in die Nacht erfasst.
+        let mut t = Tracker::new(vec![off.clone()], Settings { frame_to: DAY_END, ..Settings::default() });
+        assert!(t.start(dt(16, 22, 0)));
+        // Um Mitternacht endet die Erfassung: Der Urlaubstag nimmt keine Zeit an.
+        assert!(t.roll_over(dt(17, 0, 5)));
+        assert!(!t.is_running());
+        assert_eq!(t.status(dt(17, 9, 0)), Status::Absent);
+        assert_eq!(t.absent(dt(17, 0, 0).date()), vacation);
+        // Entsperren, Befehle und Nachträge tun nichts.
+        assert!(!t.start(dt(17, 9, 0)));
+        assert!(!t.go_away(dt(17, 9, 0), Activity::Meeting));
+        assert!(t.set_start(dt(17, 9, 0), Some(hm(8, 0))).is_empty());
+        t.close_day(dt(17, 9, 0), hm(9, 0));
+        t.add_work(dt(17, 0, 0).date(), hm(10, 0), hm(11, 0), "Meeting");
+        let tue = t.snapshot(dt(17, 12, 0)).into_iter().find(|d| d.date == dt(17, 0, 0).date()).unwrap();
+        assert_eq!(tue, off, "nur die Abwesenheit");
+        // Halber Tag: Die Erfassung läuft.
+        let mut half = off.clone();
+        half.absence = Some(Absence::new(AbsenceKind::Vacation, true));
+        let mut t = Tracker::new(vec![half], Settings::default());
+        assert!(t.start(dt(17, 9, 0)));
+        assert_ne!(t.status(dt(17, 10, 0)), Status::Absent);
+        // Ganztags in „Aufzeichnungen“ eingetragen, während die Erfassung lief: Sie endet.
+        let mut t = Tracker::new(vec![], Settings::default());
+        assert!(t.start(dt(17, 9, 0)));
+        t.replace_days(vec![off], Settings::default(), dt(17, 9, 30));
+        assert!(!t.is_running());
+        assert_eq!(t.today(dt(17, 10, 0)).work_secs, 0);
     }
 
     #[test]

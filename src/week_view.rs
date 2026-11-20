@@ -13,7 +13,11 @@
 //! Arbeit ohne Mac (Telefonat, Meeting …) ist schraffiert; ein Klick darauf bietet an, sie
 //! wieder zu löschen. Ein Klick auf einen freien Bereich öffnet einen Dialog, um Arbeit ohne
 //! Mac einzutragen (von, bis, Grund): in einer Pause ist die ganze Pause vorgeschlagen, vor
-//! dem Arbeitsbeginn und nach dem Feierabend eine halbe Stunde ab dem Klick.
+//! dem Arbeitsbeginn und nach dem Feierabend eine halbe Stunde ab dem Klick. Über das
+//! Kontextmenü lässt sich für einen Arbeitstag eine Abwesenheit eintragen (Urlaub, Krank,
+//! Feiertag, Zeitausgleich); sie liegt als Band über dem Arbeitszeitrahmen des Tages. Der Tag
+//! in Bearbeitung (in „Tage“ ausgewählt, siehe [`Selection`]) trägt sein Datum auf einer
+//! Pille und einen Rahmen um die Spalte; ein Klick in eine Spalte wählt ihn.
 //!
 //! Arbeitsbeginn und Feierabend lassen sich mit der Maus verschieben: An der Oberkante des
 //! ersten bzw. der Unterkante des letzten Abschnitts erscheint ein Griff. Beim Ziehen rastet
@@ -21,7 +25,7 @@
 //! gezogen, gilt wieder die automatische Erfassung. Esc bricht ab. Arbeitsbeginn und
 //! Feierabend tragen eine türkise Linie, manuell festgelegte kräftiger und mit einem Punkt.
 
-use crate::day::{fmt_clock, secs_of, Activity, Day, Span, DAY_END};
+use crate::day::{fmt_clock, secs_of, Absence, AbsenceKind, Activity, Day, Span, DAY_END};
 use crate::palette;
 use crate::records;
 use crate::rules::{self, Settings, Warning};
@@ -98,6 +102,12 @@ struct Column {
     gaps: Vec<Span>,
     /// Abwesenheit: kurz für den Tageskopf (`½ Urlaub`) und ausgeschrieben.
     absence: Option<(String, String)>,
+    /// Arbeitstag ohne Arbeitszeit und ohne Abwesenheit, der trotzdem sein Soll zählt
+    /// (siehe [`rules::missing_workdays`]): das Soll, das im Saldo fehlt.
+    missing: Option<i64>,
+    /// Ganztägige Abwesenheit: Arbeit ohne Mac lässt sich weder eintragen noch löschen,
+    /// bis die Abwesenheit auf „Keine“ steht (siehe [`Day::locks_entries`]).
+    locked: bool,
     /// Arbeitsbeginn und Feierabend (nur mit Arbeitszeit).
     edges: Option<Edges>,
 }
@@ -235,7 +245,9 @@ fn columns(snap: &Snapshot, monday: NaiveDate) -> Vec<Column> {
 /// neuen Arbeitsbeginn bzw. Feierabend).
 fn column(days: &[Day], snap: &Snapshot, date: NaiveDate) -> Column {
     let s = &snap.settings;
+    let today = snap.now.date();
     let Some(day) = days.iter().find(|d| d.date == date) else {
+        let missing = !rules::missing_workdays(days, date, date, today, s).is_empty();
         return Column {
             date,
             blocks: Vec::new(),
@@ -245,6 +257,8 @@ fn column(days: &[Day], snap: &Snapshot, date: NaiveDate) -> Column {
             manual: Vec::new(),
             gaps: Vec::new(),
             absence: None,
+            missing: missing.then(|| s.daily_target(date)),
+            locked: false,
             edges: None,
         };
     };
@@ -280,7 +294,13 @@ fn column(days: &[Day], snap: &Snapshot, date: NaiveDate) -> Column {
         .collect();
     let gaps = day.pauses(s);
     let absence = day.absence.map(|a| (a.short(), a.label()));
-    Column { date, blocks, work_secs, pause_secs, warnings, manual, gaps, absence, edges }
+    // Einträge, aber keine Arbeitszeit (z. B. nur eine Pause): Das Soll zählt trotzdem.
+    let raw_work = day.record(s).map_or(0, |r| r.work_secs);
+    let missing = (day.absence.is_none() && raw_work <= 0)
+        .then(|| s.counted_target(day, raw_work, today))
+        .filter(|t| *t > 0);
+    let locked = day.locks_entries();
+    Column { date, blocks, work_secs, pause_secs, warnings, manual, gaps, absence, missing, locked, edges }
 }
 
 /// Arbeitsbeginn und Feierabend aus den Abschnitten, die zählen (`work`, in Reihenfolge),
@@ -347,12 +367,21 @@ fn week_summary_parts(snap: &Snapshot, monday: NaiveDate, cols: &[Column]) -> (S
     }
     let head = format!("Woche: {}  ·  Pausen: {}", store::fmt_hm(total), store::fmt_hm(pauses));
     let to = (monday + Duration::days(6)).min(today);
-    let (work, target) = rules::balance(&snap.days, monday, to, &snap.settings);
+    let (work, target) = rules::balance(&snap.days, monday, to, today, &snap.settings);
     // Ohne Arbeitszeit und ohne Soll (z. B. Zeitausgleich) gibt es keinen Saldo.
     if work == 0 && target == 0 {
         return (head, None);
     }
     (format!("{head}  ·  Saldo "), Some(work - target))
+}
+
+/// Tooltip eines Arbeitstags ohne Arbeitszeit und Abwesenheit (`target`: das fehlende Soll).
+fn missing_text(target: i64) -> String {
+    format!(
+        "Keine Arbeitszeit: Das Soll von {} zählt als Minus. Zeiten oder eine Abwesenheit \
+         nachtragen (Rechtsklick).",
+        store::fmt_hm(target)
+    )
 }
 
 /// `Hinweise an 2 Tagen` (leer, wenn es keine gibt).
@@ -695,8 +724,14 @@ thread_local! {
     static ADD_WORK: Cell<Option<AddWork>> = const { Cell::new(None) };
     /// Arbeit ohne Mac löschen (Tag, von, bis) – stellt „Aufzeichnungen“ bereit.
     static REMOVE_WORK: Cell<Option<RemoveWork>> = const { Cell::new(None) };
+    /// Abwesenheit eintragen oder entfernen – stellt „Aufzeichnungen“ bereit.
+    static SET_ABSENCE: Cell<Option<SetAbsence>> = const { Cell::new(None) };
+    /// Alle Einträge eines Tages löschen (nach Rückfrage) – stellt „Aufzeichnungen“ bereit.
+    static CLEAR_DAY: Cell<Option<ClearDay>> = const { Cell::new(None) };
     /// Einen Tag in der Ansicht „Tage“ öffnen – stellt „Aufzeichnungen“ bereit.
     static OPEN_DAY: Cell<Option<OpenDay>> = const { Cell::new(None) };
+    /// Der Tag in Bearbeitung (in „Aufzeichnungen“ ausgewählt) und wie er sich wählen lässt.
+    static SELECTION: Cell<Option<Selection>> = const { Cell::new(None) };
     /// Arbeitsbeginn bzw. Feierabend festlegen (Tag, Grenze, Uhrzeit oder `None` für
     /// automatisch) – stellt „Aufzeichnungen“ bereit.
     static SET_BOUND: Cell<Option<SetBound>> = const { Cell::new(None) };
@@ -718,6 +753,28 @@ type AxKey = (u64, [i64; 4]);
 /// Einen Tag in der Ansicht „Tage“ zeigen.
 pub type OpenDay = fn(NaiveDate);
 
+/// Der Tag in Bearbeitung – geteilt mit der Ansicht „Tage“ (dort zeigt ihn der Inspektor).
+#[derive(Clone, Copy)]
+pub struct Selection {
+    /// Der ausgewählte Tag.
+    pub get: fn() -> Option<NaiveDate>,
+    /// Einen Tag auswählen (Klick in seine Spalte).
+    pub set: fn(NaiveDate),
+}
+
+fn selected_day() -> Option<NaiveDate> {
+    SELECTION.with(|c| c.get()).and_then(|s| (s.get)())
+}
+
+/// Den Tag `date` auswählen und neu zeichnen, wenn er wechselt.
+fn select_day(view: &WeekView, date: NaiveDate) {
+    let Some(sel) = SELECTION.with(|c| c.get()) else { return };
+    if (sel.get)() != Some(date) {
+        (sel.set)(date);
+        view.setNeedsDisplay(true);
+    }
+}
+
 /// Was an einer Stelle des Rasters möglich ist (für Kontextmenü und Doppelklick).
 #[derive(Clone)]
 struct Context {
@@ -728,6 +785,13 @@ struct Context {
     preset: Option<Span>,
     /// Uhrzeit unter dem Zeiger (zum Kopieren).
     time: Option<(Flash, String)>,
+    /// Abwesenheit lässt sich ändern: die eingetragene (`Some(None)`: keine).
+    absence: Option<Option<Absence>>,
+    /// Hat der Tag Einträge außer der Abwesenheit? Dann geht nur ein halber Tag.
+    busy: bool,
+    /// Der Tag lässt sich leeren („Alle Einträge löschen …“): Er hat Einträge außer der
+    /// Abwesenheit.
+    clearable: bool,
     /// Arbeitsbeginn und Feierabend des Tages und welche davon sich hier ändern lassen.
     edges: Option<Edges>,
     bounds: Vec<Bound>,
@@ -742,6 +806,11 @@ pub type AddWork = fn(NaiveDate, i64, i64, Activity);
 /// Arbeit ohne Mac löschen: Tag, von, bis (der eingetragene Block).
 pub type RemoveWork = fn(NaiveDate, i64, i64);
 
+/// Abwesenheit eines Tages eintragen, ändern oder (`None`) entfernen.
+pub type SetAbsence = fn(NaiveDate, Option<Absence>);
+
+/// Alle Einträge eines Tages löschen (fragt vorher nach).
+pub type ClearDay = fn(NaiveDate);
 /// Arbeitsbeginn bzw. Feierabend festlegen: Tag, Grenze, Uhrzeit (`None`: wieder automatisch).
 pub type SetBound = fn(NaiveDate, Bound, Option<i64>);
 
@@ -858,6 +927,24 @@ define_class!(
         fn add_work_here(&self, _sender: Option<&NSMenuItem>) {
             if let Some(Context { date, preset: Some(preset), .. }) = PENDING.with(|p| p.borrow_mut().take()) {
                 show_add_work(date, preset, None);
+            }
+        }
+
+        /// Kontextmenü „Abwesenheit“: Tag des Menüpunkts siehe [`absence_entries`].
+        #[unsafe(method(setAbsence:))]
+        fn set_absence(&self, sender: Option<&NSMenuItem>) {
+            let pending = PENDING.with(|p| p.borrow_mut().take());
+            let choice = sender.and_then(|s| absence_of_tag(s.tag()));
+            if let (Some(ctx), Some(absence), Some(f)) = (pending, choice, SET_ABSENCE.with(|c| c.get())) {
+                f(ctx.date, absence);
+            }
+        }
+
+        /// Kontextmenü: alle Einträge des Tages löschen (nach Rückfrage).
+        #[unsafe(method(clearDay:))]
+        fn clear_day(&self, _sender: Option<&NSMenuItem>) {
+            if let (Some(ctx), Some(f)) = (PENDING.with(|p| p.borrow_mut().take()), CLEAR_DAY.with(|c| c.get())) {
+                f(ctx.date);
             }
         }
 
@@ -1027,6 +1114,10 @@ define_class!(
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             let p = self.convertPoint_fromView(event.locationInWindow(), None);
+            // Ein Klick in eine Tagesspalte macht diesen Tag zum Tag in Bearbeitung.
+            if let Some(ctx) = context_at(self, p) {
+                select_day(self, ctx.date);
+            }
             match event.clickCount() {
                 1 => {
                     if !begin_drag(self, p) {
@@ -1048,6 +1139,7 @@ define_class!(
         fn menu_for_event(&self, event: &NSEvent) -> Option<Retained<NSMenu>> {
             let p = self.convertPoint_fromView(event.locationInWindow(), None);
             context_at(self, p).and_then(|ctx| {
+                select_day(self, ctx.date);
                 let menu = context_menu(&ctx)?;
                 PENDING.with(|c| *c.borrow_mut() = Some(ctx));
                 Some(menu)
@@ -1239,7 +1331,8 @@ fn edge_rects(geo: &Geo, d: &Data) -> Vec<(usize, Bound, NSRect)> {
     let grid = (geo.h0 * 3600, geo.h1 * 3600);
     let mut out = Vec::new();
     for (i, c) in d.cols.iter().enumerate() {
-        let Some(e) = c.edges else { continue };
+        // Ganztägig abwesend: Arbeitsbeginn und Feierabend sind gesperrt (siehe `Day::locks_entries`).
+        let Some(e) = c.edges.filter(|_| !c.locked) else { continue };
         let limit = free_limit(c.date, snap.now);
         let (x, w) = (geo.x(i) + 3.0, geo.col_w(i) - 6.0);
         if drag_limits(&e, Bound::Start, &snap.settings, limit, grid).is_some() {
@@ -1523,7 +1616,7 @@ fn hit_test(view: &WeekView, p: NSPoint) -> Option<Hit> {
         let col = geo.column_at(p.x)?;
         let c = d.cols.get(col)?;
         if editable() {
-            if c.manual.iter().any(|m| contains(geo.span_rect(col, m.span), p)) {
+            if !c.locked && c.manual.iter().any(|m| contains(geo.span_rect(col, m.span), p)) {
                 return Some(Hit::Work);
             }
             let snap = d.snap.as_ref()?;
@@ -1548,6 +1641,9 @@ fn editable() -> bool {
 /// Mindestdauer `min_work`, wenn sie länger ist) ab dem Klick, auf 5 Minuten abgerundet.
 /// `None` auf einem Abschnitt und in der Zukunft.
 fn free_preset(c: &Column, at: i64, now: NaiveDateTime, min_work: i64) -> Option<Span> {
+    if c.locked {
+        return None;
+    }
     let limit = free_limit(c.date, now)?;
     if !(0..limit).contains(&at) || c.blocks.iter().any(|b| (b.from..b.to).contains(&at)) {
         return None;
@@ -1572,7 +1668,7 @@ fn free_limit(date: NaiveDate, now: NaiveDateTime) -> Option<i64> {
 /// Freie Bereiche einer Spalte (vor dem Arbeitsbeginn, Pausen, nach dem Feierabend), in
 /// denen ein Klick Arbeit ohne Mac einträgt.
 fn free_spans(c: &Column, now: NaiveDateTime) -> Vec<Span> {
-    let Some(limit) = free_limit(c.date, now) else { return Vec::new() };
+    let Some(limit) = free_limit(c.date, now).filter(|_| !c.locked) else { return Vec::new() };
     let mut blocks: Vec<Span> = c.blocks.iter().map(|b| Span::new(b.from, b.to)).collect();
     blocks.sort_by_key(|b| b.from);
     let mut out = Vec::new();
@@ -1730,7 +1826,29 @@ fn context_at(view: &WeekView, p: NSPoint) -> Option<Context> {
             let flash = Flash { date: c.date, from: bx.block.from, kind: bx.block.kind, part: piece.part?, generation: 0 };
             Some((flash, piece.text.clone()))
         });
-        let mut ctx = Context { date: c.date, work: None, preset: None, time, edges: c.edges, bounds: Vec::new() };
+        let day = d.snap.as_ref().and_then(|snap| snap.days.iter().find(|x| x.date == c.date));
+        let absence = SET_ABSENCE.with(|c| c.get()).and_then(|_| {
+            let snap = d.snap.as_ref()?;
+            let current = day.and_then(|x| x.absence);
+            // An freien Tagen gibt es kein Soll – höchstens eine Abwesenheit zum Entfernen.
+            (snap.settings.is_workday(c.date) || current.is_some()).then_some(current)
+        });
+        // Heute zählen für die Abwesenheit nur Einträge von Hand (siehe `Day::accepts_absence`).
+        let today = d.snap.as_ref().is_some_and(|s| s.now.date() == c.date);
+        let busy = day.is_some_and(|x| x.blocks_full_absence(today));
+        // Nur mit Einträgen außer der Abwesenheit – die allein entfernt „Abwesenheit → Keine“.
+        let clearable = CLEAR_DAY.with(|c| c.get()).is_some() && day.is_some_and(Day::has_entries);
+        let mut ctx = Context {
+            date: c.date,
+            work: None,
+            preset: None,
+            time,
+            absence,
+            busy,
+            clearable,
+            edges: c.edges,
+            bounds: Vec::new(),
+        };
         // Arbeitsbeginn auf dem ersten Abschnitt, Feierabend auf dem letzten (oder an der Kante).
         if bounds_editable() {
             let zones = edge_rects(&geo, &d);
@@ -1746,7 +1864,7 @@ fn context_at(view: &WeekView, p: NSPoint) -> Option<Context> {
             }
         }
         if editable() {
-            ctx.work = c.manual.iter().find(|m| contains(geo.span_rect(col, m.span), p)).map(|m| (m.block, m.note.clone()));
+            ctx.work = c.manual.iter().filter(|_| !c.locked).find(|m| contains(geo.span_rect(col, m.span), p)).map(|m| (m.block, m.note.clone()));
             if ctx.work.is_none() {
                 let snap = d.snap.as_ref()?;
                 ctx.preset = geo.secs_at(p.y).and_then(|at| free_preset(c, at, snap.now, snap.settings.min_work));
@@ -1786,6 +1904,13 @@ fn context_entries(ctx: &Context, can_open: bool) -> Vec<(String, Option<Sel>)> 
     if ctx.preset.is_some() {
         out.push(("Arbeit ohne Mac eintragen …".to_string(), Some(sel!(addWorkHere:))));
     }
+    if ctx.absence.is_some() {
+        // Wird zum Untermenü mit den Arten (siehe `context_menu`).
+        out.push((ABSENCE_MENU.to_string(), Some(sel!(setAbsence:))));
+    }
+    if ctx.clearable {
+        out.push(("Alle Einträge löschen …".to_string(), Some(sel!(clearDay:))));
+    }
     if let Some((block, note)) = &ctx.work {
         if !out.is_empty() {
             out.push((String::new(), None));
@@ -1818,6 +1943,54 @@ fn context_entries(ctx: &Context, can_open: bool) -> Vec<(String, Option<Sel>)> 
     all
 }
 
+/// Titel des Untermenüs zur Abwesenheit.
+const ABSENCE_MENU: &str = "Abwesenheit";
+
+/// Punkt im Untermenü „Abwesenheit“.
+#[derive(Clone, Debug, PartialEq)]
+struct AbsenceItem {
+    /// Leer = Trennlinie.
+    title: String,
+    /// Siehe [`absence_of_tag`] (negativ: nur Anzeige).
+    tag: isize,
+    /// Die eingetragene Abwesenheit (Häkchen).
+    checked: bool,
+    enabled: bool,
+}
+
+/// Hinweis im Untermenü, wenn der Tag Einträge hat.
+const ABSENCE_BLOCKED: &str = "Ganztags erst nach „Alle Einträge löschen“";
+
+/// Punkte im Untermenü „Abwesenheit“ (`busy`: Der Tag hat andere Einträge – dann gehen
+/// ganze Tage erst, wenn sie gelöscht sind, siehe [`Day::accepts_absence`]).
+fn absence_entries(current: Option<Absence>, busy: bool) -> Vec<AbsenceItem> {
+    let item = |title: String, tag: isize, checked: bool, enabled: bool| AbsenceItem { title, tag, checked, enabled };
+    let mut out = vec![item("Keine".to_string(), 0, current.is_none(), true), item(String::new(), -1, false, false)];
+    for (i, kind) in AbsenceKind::ALL.iter().enumerate() {
+        // Halbe Tage gibt es bei Urlaub, Krankheit und Feiertag.
+        let halves: &[bool] = if kind.reduces_target() { &[false, true] } else { &[false] };
+        for &half in halves {
+            let a = Absence::new(*kind, half);
+            let checked = current == Some(a);
+            out.push(item(a.label(), 1 + 2 * i as isize + half as isize, checked, checked || half || !busy));
+        }
+    }
+    if busy {
+        out.push(item(String::new(), -1, false, false));
+        out.push(item(ABSENCE_BLOCKED.to_string(), -1, false, false));
+    }
+    out
+}
+
+/// Wahl im Untermenü „Abwesenheit“ (`Some(None)`: keine).
+fn absence_of_tag(tag: isize) -> Option<Option<Absence>> {
+    if tag == 0 {
+        return Some(None);
+    }
+    let kind = AbsenceKind::ALL.get(usize::try_from((tag - 1) / 2).ok()?)?;
+    (tag > 0).then(|| Some(Absence::new(*kind, (tag - 1) % 2 == 1)))
+}
+
 /// Kontextmenü für `ctx` (`None`, wenn es an der Stelle nichts zu tun gibt).
 fn context_menu(ctx: &Context) -> Option<Retained<NSMenu>> {
     let controller = UI.with(|u| u.borrow().as_ref().map(|u| u._controller.clone()))?;
@@ -1837,6 +2010,29 @@ fn context_menu(ctx: &Context) -> Option<Retained<NSMenu>> {
             NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &ns(&title), action, &ns(""))
         };
         match action {
+            Some(a) if a == sel!(setAbsence:) => {
+                let sub = NSMenu::new(mtm);
+                sub.setAutoenablesItems(false);
+                for e in absence_entries(ctx.absence.flatten(), ctx.busy) {
+                    if e.title.is_empty() {
+                        sub.addItem(&NSMenuItem::separatorItem(mtm));
+                        continue;
+                    }
+                    let action = (e.tag >= 0).then_some(a);
+                    let choice = unsafe {
+                        NSMenuItem::initWithTitle_action_keyEquivalent(NSMenuItem::alloc(mtm), &ns(&e.title), action, &ns(""))
+                    };
+                    if action.is_some() {
+                        unsafe { choice.setTarget(Some(&controller)) };
+                    }
+                    choice.setTag(e.tag);
+                    choice.setEnabled(e.enabled);
+                    choice.setState(if e.checked { NSControlStateValueOn } else { NSControlStateValueOff });
+                    sub.addItem(&choice);
+                }
+                unsafe { item.setAction(None) };
+                item.setSubmenu(Some(&sub));
+            }
             Some(_) => unsafe { item.setTarget(Some(&controller)) },
             None => item.setEnabled(false),
         }
@@ -1904,6 +2100,9 @@ fn ax_items(cols: &[Column]) -> Vec<(usize, AxPart, String)> {
         };
         if let Some((_, absence)) = &c.absence {
             add_sentence(&mut head, absence);
+        }
+        if let Some(target) = c.missing {
+            add_sentence(&mut head, &format!("Nichts erfasst, Saldo minus {}", spoken_dur(target)));
         }
         for w in &c.warnings {
             add_sentence(&mut head, &format!("Hinweis: {w}"));
@@ -2067,7 +2266,11 @@ fn clickable_rects(view: &WeekView) -> Vec<NSRect> {
             }
             let geo = &geo;
             out.extend(
-                d.cols.iter().enumerate().flat_map(|(i, c)| c.manual.iter().map(move |m| geo.span_rect(i, m.span))),
+                d.cols
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, c)| !c.locked)
+                    .flat_map(|(i, c)| c.manual.iter().map(move |m| geo.span_rect(i, m.span))),
             );
         }
         out
@@ -2384,11 +2587,24 @@ fn draw(
     hline(0.0, geo.w, HEADER_H - 1.0, &separator);
     let icon = warning_image(11.0);
     let cup = pause_image(9.0, &secondary);
+    let selected = selected_day();
+    let on_accent = NSColor::whiteColor();
+    let magenta = palette::selection();
     for (i, c) in d.cols.iter().enumerate() {
         let x = geo.x(i);
         let is_today = Some(c.date) == today;
+        let is_selected = Some(c.date) == selected;
         let warn = !c.warnings.is_empty();
-        let color = if is_today { &accent } else if is_workday(c.date) { &label } else { &secondary };
+        // Tag in Bearbeitung: das Datum weiß auf einer Pille in Magenta.
+        let color = if is_selected {
+            &on_accent
+        } else if is_today {
+            &accent
+        } else if is_workday(c.date) {
+            &label
+        } else {
+            &secondary
+        };
         let title = format!("{} {}", WEEKDAYS_SHORT[i], c.date.format("%d.%m."));
         let a = attrs(&font(12.0, if is_today { semibold } else { medium }), color, NSTextAlignment::Left);
         let tw = text_width(&title, &a);
@@ -2396,20 +2612,40 @@ fn draw(
             (Some(img), true) => img.size().width + 4.0,
             _ => 0.0,
         };
-        let x0 = (x + (geo.col_w(i) - tw - icon_w) / 2.0).max(x + 2.0).round();
+        // Die Pille ragt links und rechts über das Datum hinaus; das Warnschild steht davor –
+        // mit demselben Abstand wie sonst zum Datum.
+        let pad = if is_selected { 7.0 } else { 0.0 };
+        let x0 = (x + (geo.col_w(i) - icon_w - tw - 2.0 * pad) / 2.0).max(x + 2.0).round();
         if let (Some(img), true) = (&icon, warn) {
             let sz = img.size();
             img.drawInRect(NSRect::new(NSPoint::new(x0, 7.0 + (15.0 - sz.height) / 2.0), sz));
         }
-        let title_rect = NSRect::new(NSPoint::new(x0 + icon_w, 7.0), NSSize::new(geo.x(i + 1) - 2.0 - x0 - icon_w, 16.0));
+        let text_x = x0 + icon_w + pad;
+        let title_rect = NSRect::new(NSPoint::new(text_x, 7.0), NSSize::new(geo.x(i + 1) - 2.0 - text_x, 16.0));
+        if is_selected {
+            let pill = NSRect::new(
+                NSPoint::new(x0 + icon_w, 5.0),
+                NSSize::new((tw + 2.0 * pad).min(geo.x(i + 1) - 2.0 - x0 - icon_w), 19.0),
+            );
+            round_fill(pill, 9.5, &magenta);
+        }
         text_in(&title, title_rect, &a);
-        // Ohne Arbeitszeit steht dort die Abwesenheit (sonst ein Strich).
-        let total = match (&c.absence, c.work_secs > 0) {
-            (_, true) => store::fmt_hm(c.work_secs),
-            (Some((short, _)), false) => short.clone(),
-            (None, false) => "–".to_string(),
+        // Ohne Arbeitszeit steht dort die Abwesenheit, an einem Arbeitstag ohne Eintrag das
+        // fehlende Soll in Rot (sonst ein Strich).
+        let total = match (&c.absence, c.work_secs > 0, c.missing) {
+            (_, true, _) => store::fmt_hm(c.work_secs),
+            (Some((short, _)), false, _) => short.clone(),
+            (None, false, Some(target)) => rules::fmt_balance(-target),
+            (None, false, None) => "–".to_string(),
         };
-        let total_color = if warn { &orange } else { &secondary };
+        let minus = palette::balance(-c.missing.unwrap_or(0));
+        let total_color = if warn {
+            &orange
+        } else if c.work_secs == 0 && c.absence.is_none() && c.missing.is_some() {
+            &minus
+        } else {
+            &secondary
+        };
         let total_rect = NSRect::new(NSPoint::new(x + 2.0, 24.0), NSSize::new(geo.col_w(i) - 4.0, 15.0));
         // Daneben die Pausen mit Tasse (wie „Pausen heute“ im Menü) – nur wenn es Platz hat.
         let a = attrs(&digits(11.0, regular), total_color, NSTextAlignment::Left);
@@ -2430,6 +2666,32 @@ fn draw(
             text_in(&pause, NSRect::new(NSPoint::new(px, 24.0), NSSize::new(pw, 15.0)), &pa);
         } else {
             text_in(&total, total_rect, &attrs(&digits(11.0, regular), total_color, NSTextAlignment::Center));
+        }
+    }
+
+    // Abwesenheit: ein Band über den Arbeitszeitrahmen des Tages, mit gestricheltem Rand und
+    // der Art oben; Abschnitte, an denen trotzdem gearbeitet wurde, liegen darüber.
+    if let Some(s) = &d.snap {
+        let teal = palette::absence();
+        let band_attrs = attrs(&font(11.0, semibold), &teal, NSTextAlignment::Center);
+        for (i, c) in d.cols.iter().enumerate() {
+            let Some((short, long)) = &c.absence else { continue };
+            let (from, to) = (s.settings.frame_from.max(geo.h0 * 3600), s.settings.frame_to.min(geo.h1 * 3600));
+            if to <= from {
+                continue;
+            }
+            let r = geo.span_rect(i, Span::new(from, to));
+            round_fill(r, 4.0, &teal.colorWithAlphaComponent(0.12));
+            let border = NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(inset(r, 0.5, 0.5), 4.0, 4.0);
+            border.setLineWidth(1.0);
+            let dash: [f64; 2] = [4.0, 3.0];
+            unsafe { border.setLineDash_count_phase(dash.as_ptr(), 2, 0.0) };
+            teal.colorWithAlphaComponent(0.6).setStroke();
+            border.stroke();
+            // Ausgeschrieben, wenn es passt („Urlaub (halber Tag)“), sonst kurz („½ Urlaub“).
+            let room = r.size.width - 8.0;
+            let text = if text_width(long, &band_attrs) <= room { long } else { short };
+            text_in(text, NSRect::new(NSPoint::new(r.origin.x + 4.0, r.origin.y + 6.0), NSSize::new(room, 15.0)), &band_attrs);
         }
     }
 
@@ -2606,8 +2868,9 @@ fn draw(
         }
     }
 
-    // Leere Woche
-    if d.cols.iter().all(|c| c.blocks.is_empty()) {
+    // Leere Woche – außer es gibt Abwesenheiten: Ihre Bänder sagen schon, warum (der Hinweis
+    // läge sonst quer über ihnen).
+    if d.cols.iter().all(|c| c.blocks.is_empty() && c.absence.is_none()) {
         let a = attrs(&font(13.0, regular), &secondary, NSTextAlignment::Center);
         let y = (grid_top + grid_bottom) / 2.0 - 9.0;
         text_in(
@@ -2615,6 +2878,18 @@ fn draw(
             NSRect::new(NSPoint::new(GUTTER_W, y), NSSize::new(geo.w - GUTTER_W, 18.0)),
             &a,
         );
+    }
+
+    // Tag in Bearbeitung: ein gestrichelter Rahmen in Magenta um die ganze Spalte (über den
+    // Abschnitten) – anders als das türkise Band der Abwesenheit auch um den Tageskopf.
+    if let Some(i) = d.cols.iter().position(|c| Some(c.date) == selected) {
+        let r = NSRect::new(NSPoint::new(geo.x(i), 0.0), NSSize::new(geo.col_w(i), grid_bottom + GRID_PAD_BOTTOM));
+        magenta.setStroke();
+        let frame = NSBezierPath::bezierPathWithRect(inset(r, 0.75, 0.75));
+        frame.setLineWidth(1.5);
+        let dash: [f64; 2] = [5.0, 3.0];
+        unsafe { frame.setLineDash_count_phase(dash.as_ptr(), 2, 0.0) };
+        frame.stroke();
     }
 
     // Rückmeldung „… kopiert“ als Sprechblase über der Uhrzeit (zuletzt, damit obenauf).
@@ -2652,6 +2927,12 @@ fn update_tooltips(view: &WeekView) {
             }
             if let Some((_, absence)) = &c.absence {
                 text.push_str(&if text.is_empty() { format!("{}\n{absence}", fmt_day(c.date)) } else { format!("\n{absence}") });
+                if c.locked && editable() {
+                    text.push_str("\nAndere Einträge erst, wenn die Abwesenheit auf „Keine“ steht (Rechtsklick).");
+                }
+            }
+            if let Some(target) = c.missing {
+                text.push_str(&format!("{}\n{}", fmt_day(c.date), missing_text(target)));
             }
             if !c.warnings.is_empty() {
                 text.push_str(&if text.is_empty() { format!("Hinweise für {}:", fmt_day(c.date)) } else { "\n\nHinweise:".to_string() });
@@ -2677,7 +2958,7 @@ fn update_tooltips(view: &WeekView) {
                     text.push_str(&format!("\n{n}"));
                 }
                 text.push_str("\nKlick auf eine Uhrzeit kopiert sie. Rechtsklick: alle Möglichkeiten.");
-                if let (Some(e), true, Kind::Work) = (c.edges, bounds_editable(), b.kind) {
+                if let (Some(e), true, Kind::Work) = (c.edges, bounds_editable() && !c.locked, b.kind) {
                     if b.from == e.start {
                         text.push_str("\nOberkante ziehen: Arbeitsbeginn verschieben.");
                     }
@@ -2685,14 +2966,14 @@ fn update_tooltips(view: &WeekView) {
                         text.push_str("\nUnterkante ziehen: Feierabend verschieben.");
                     }
                 }
-                if editable() && c.manual.iter().any(|m| m.span.from < b.to && m.span.to > b.from) {
+                if editable() && !c.locked && c.manual.iter().any(|m| m.span.from < b.to && m.span.to > b.from) {
                     text.push_str("\nKlick auf die Schraffur: Arbeit ohne Mac löschen.");
                 }
                 out.push((geo.block_rect(i, b), text));
             }
         }
         if editable() {
-            for (i, gap, r) in gap_rects(&geo, &d) {
+            for (i, gap, r) in gap_rects(&geo, &d).into_iter().filter(|(i, ..)| !d.cols[*i].locked) {
                 let text = format!(
                     "{}\nPause {}\nKlick: als Arbeit ohne Mac eintragen (z. B. Telefonat oder Meeting)",
                     fmt_day(d.cols[i].date),
@@ -2906,11 +3187,25 @@ pub fn set_open_day(open_day: Option<OpenDay>) {
     OPEN_DAY.with(|c| c.set(open_day));
 }
 
-/// Wie sich Arbeit ohne Mac eintragen und löschen und Arbeitsbeginn und Feierabend
-/// festlegen lassen (ohne sie nur ansehen, etwa für Bildschirmfotos).
-pub fn set_actions(add_work: Option<AddWork>, remove_work: Option<RemoveWork>, set_bound: Option<SetBound>) {
+/// Wie die Wochenansicht den Tag in Bearbeitung erfährt und wählt (`None`: keine Markierung).
+pub fn set_selection(selection: Option<Selection>) {
+    SELECTION.with(|c| c.set(selection));
+}
+
+/// Wie sich Arbeit ohne Mac eintragen und löschen, Arbeitsbeginn und Feierabend festlegen,
+/// die Abwesenheit wählen und ein Tag leeren lassen (ohne sie nur ansehen, etwa für
+/// Bildschirmfotos).
+pub fn set_actions(
+    add_work: Option<AddWork>,
+    remove_work: Option<RemoveWork>,
+    set_bound: Option<SetBound>,
+    set_absence: Option<SetAbsence>,
+    clear_day: Option<ClearDay>,
+) {
     ADD_WORK.with(|c| c.set(add_work));
     REMOVE_WORK.with(|c| c.set(remove_work));
+    SET_ABSENCE.with(|c| c.set(set_absence));
+    CLEAR_DAY.with(|c| c.set(clear_day));
     SET_BOUND.with(|c| c.set(set_bound));
 }
 
@@ -3169,7 +3464,17 @@ mod tests {
             context_entries(ctx, can_open).into_iter().map(|(t, _)| t).collect()
         };
         // Auf einem Abschnitt neben der Uhrzeit: nur der Tag.
-        let plain = Context { date: d, work: None, preset: None, time: None, edges: None, bounds: Vec::new() };
+        let plain = Context {
+            date: d,
+            work: None,
+            preset: None,
+            time: None,
+            absence: None,
+            busy: false,
+            clearable: false,
+            edges: None,
+            bounds: Vec::new(),
+        };
         assert_eq!(titles(&plain, true), ["Di, 17.11.2026", "", "Tag bearbeiten"]);
         // Ohne Fenster „Aufzeichnungen“ bzw. in der Zukunft gibt es dort nichts zu tun.
         assert!(context_entries(&plain, false).is_empty());
@@ -3185,6 +3490,35 @@ mod tests {
         let entries = context_entries(&work, false);
         assert_eq!(entries.len(), 4, "ohne „Tag bearbeiten“ keine zweite Trennlinie");
         assert!(entries[2].1.is_none() && entries[3].1.is_some(), "Zeitraum ist nur Anzeige");
+        // Abwesenheit als Untermenü – auch für künftige Tage, an denen sonst nichts geht.
+        let off = Context { absence: Some(None), ..plain.clone() };
+        assert_eq!(titles(&off, false), ["Di, 17.11.2026", "", "Abwesenheit"]);
+        assert_eq!(titles(&off, true), ["Di, 17.11.2026", "", "Tag bearbeiten", "Abwesenheit"]);
+        // Ein Tag mit Einträgen lässt sich leeren.
+        let full = Context { absence: Some(None), busy: true, clearable: true, ..plain.clone() };
+        assert_eq!(titles(&full, true), ["Di, 17.11.2026", "", "Tag bearbeiten", "Abwesenheit", "Alle Einträge löschen …"]);
+        let half = Absence::new(AbsenceKind::Vacation, true);
+        let subs = absence_entries(Some(half), false);
+        let names: Vec<&str> = subs.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(
+            names,
+            ["Keine", "", "Urlaub", "Urlaub (halber Tag)", "Krank", "Krank (halber Tag)", "Feiertag", "Feiertag (halber Tag)", "Zeitausgleich"]
+        );
+        assert_eq!(subs.iter().filter(|e| e.checked).map(|e| e.title.as_str()).collect::<Vec<_>>(), ["Urlaub (halber Tag)"]);
+        assert!(subs.iter().all(|e| e.enabled || e.title.is_empty()), "leerer Tag: alles wählbar");
+        assert!(absence_entries(None, false)[0].checked, "„Keine“ abgehakt");
+        // Jeder Punkt führt zu genau seiner Abwesenheit.
+        for e in subs.iter().filter(|e| !e.title.is_empty()) {
+            let choice = absence_of_tag(e.tag).unwrap();
+            assert_eq!(choice.map_or("Keine".to_string(), Absence::label), e.title);
+        }
+        // Mit Einträgen: nur „Keine“ und halbe Tage, dazu der Hinweis.
+        let busy = absence_entries(None, true);
+        let enabled: Vec<&str> = busy.iter().filter(|e| e.enabled).map(|e| e.title.as_str()).collect();
+        assert_eq!(enabled, ["Keine", "Urlaub (halber Tag)", "Krank (halber Tag)", "Feiertag (halber Tag)"]);
+        assert_eq!(busy.last().map(|e| (e.title.as_str(), e.tag, e.enabled)), Some((ABSENCE_BLOCKED, -1, false)));
+        assert_eq!(absence_of_tag(-1), None);
+        assert_eq!(absence_of_tag(99), None);
         // Auf dem einzigen Abschnitt: Arbeitsbeginn (manuell, also auch zurücksetzen) und Feierabend.
         let e = Edges {
             start: h(7, 30),
@@ -3387,6 +3721,77 @@ mod tests {
         assert_eq!(ax_items(&cols)[3].2, "Donnerstag, 19. November: keine Arbeitszeit. Urlaub (halber Tag)");
         assert_eq!(spoken_dur(h(0, 5)), "5 Min.");
         assert_eq!(spoken("KW 47  ·  16. – 22. November 2026"), "KW 47, 16. – 22. November 2026");
+    }
+
+    #[test]
+    fn workdays_without_entries_show_the_missing_target() {
+        // Di gearbeitet, Mi nur eine Pause, Do Urlaub, Fr nichts; Stand: Montag darauf.
+        let mut tue = Day::new(date(2026, 11, 17));
+        tue.add_period(h(8, 0), h(16, 0));
+        let mut wed = Day::new(date(2026, 11, 18));
+        wed.add_break(h(12, 0), h(12, 30));
+        let mut thu = Day::new(date(2026, 11, 19));
+        thu.absence = Some(Absence::new(AbsenceKind::Vacation, false));
+        let snapshot = snap(vec![tue, wed, thu], date(2026, 11, 23).and_hms_opt(9, 0, 0).unwrap(), false);
+        let cols = columns(&snapshot, date(2026, 11, 16));
+        let missing: Vec<Option<i64>> = cols.iter().map(|c| c.missing).collect();
+        let full = h(7, 48);
+        // Mo liegt vor dem ersten erfassten Tag, Sa und So sind frei.
+        assert_eq!(missing, [None, None, Some(full), None, Some(full), None, None]);
+        assert_eq!(ax_items(&cols).iter().find(|(c, ..)| *c == 4).map(|(.., t)| t.as_str()), Some("Freitag, 20. November: keine Arbeitszeit. Nichts erfasst, Saldo minus 7 Std. 48 Min."));
+        // Der Wochensaldo zählt genau diese Tage: 8:00 − 3 × 7:48.
+        assert_eq!(week_summary(&snapshot, date(2026, 11, 16), &cols), "Woche: 8:00 h  ·  Pausen: 0:00 h  ·  Saldo −15:24 h");
+        // Heute zählt noch nicht.
+        let cols = columns(&snap(snapshot.days.clone(), date(2026, 11, 20).and_hms_opt(9, 0, 0).unwrap(), false), date(2026, 11, 16));
+        assert_eq!(cols[4].missing, None);
+    }
+
+    #[test]
+    fn full_day_absence_locks_the_column() {
+        // Ganzer Urlaubstag (mit Arbeit ohne Mac aus der Zeit davor) und ein halber.
+        let mut full = Day::new(date(2026, 11, 17));
+        full.add_work(h(9, 0), h(10, 0), "Meeting");
+        full.absence = Some(Absence::new(AbsenceKind::Vacation, false));
+        let mut half = Day::new(date(2026, 11, 18));
+        half.add_period(h(8, 0), h(12, 0));
+        half.absence = Some(Absence::new(AbsenceKind::Vacation, true));
+        let now = date(2026, 11, 20).and_hms_opt(9, 0, 0).unwrap();
+        let cols = columns(&snap(vec![full, half], now, false), date(2026, 11, 16));
+        assert!(cols[1].locked && !cols[2].locked && !cols[0].locked);
+        // Gesperrt: kein Vorschlag für Arbeit ohne Mac, keine freien Bereiche.
+        assert_eq!(free_preset(&cols[1], h(14, 0), now, 15 * 60), None);
+        assert!(free_spans(&cols[1], now).is_empty());
+        assert!(free_preset(&cols[2], h(14, 0), now, 15 * 60).is_some());
+        assert!(!free_spans(&cols[2], now).is_empty());
+        // Auch Arbeitsbeginn und Feierabend lassen sich nur am halben Tag ziehen.
+        let mut data = Data {
+            snap: Some(snap(vec![full_with_work(), half_with_work()], now, false)),
+            monday: date(2026, 11, 16),
+            cols: Vec::new(),
+            hours: (7, 22),
+            weights: [1.0; 7],
+            full_frame: false,
+        };
+        data.rebuild();
+        assert!(data.cols[1].locked && data.cols[1].edges.is_some());
+        let geo = Geo::new(NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(900.0, 700.0)), &data);
+        let cols_with_edges: Vec<usize> = edge_rects(&geo, &data).into_iter().map(|(i, ..)| i).collect();
+        assert_eq!(cols_with_edges, [2, 2], "nur der halbe Tag, Beginn und Feierabend");
+    }
+
+    /// Ganzer Urlaubstag, an dem trotzdem Zeit erfasst ist (aus der Zeit vor der Sperre).
+    fn full_with_work() -> Day {
+        let mut d = Day::new(date(2026, 11, 17));
+        d.add_period(h(8, 0), h(12, 0));
+        d.absence = Some(Absence::new(AbsenceKind::Vacation, false));
+        d
+    }
+
+    fn half_with_work() -> Day {
+        let mut d = Day::new(date(2026, 11, 18));
+        d.add_period(h(8, 0), h(12, 0));
+        d.absence = Some(Absence::new(AbsenceKind::Vacation, true));
+        d
     }
 
     #[test]

@@ -1,5 +1,6 @@
 //! Farben, die in Menü und Fenstern dasselbe bedeuten: grün = im Plus bzw. läuft, rot = im
-//! Minus bzw. Fehler, orange = Pause bzw. Hinweis, indigo = Feierabend.
+//! Minus bzw. Fehler, orange = Pause bzw. Hinweis, indigo = Feierabend, türkis = Abwesenheit,
+//! magenta = Tag in Bearbeitung (Wochenansicht).
 //!
 //! Die Systemfarben allein sind auf hellem Grund zu kontrastarm; deshalb nimmt jede Farbe im
 //! hellen Erscheinungsbild einen dunkleren Ton und im dunklen den hellen Systemton.
@@ -38,6 +39,21 @@ pub fn orange() -> Retained<NSColor> {
 /// beim Überfahren mit der Maus lesbar bleibt.
 pub fn indigo() -> Retained<NSColor> {
     adaptive((0.30, 0.24, 0.78), NSColor::systemIndigoColor)
+}
+
+/// Abwesenheit (Urlaub, Krank, Feiertag, Zeitausgleich) in der Wochenansicht.
+pub fn absence() -> Retained<NSColor> {
+    adaptive((0.0, 0.45, 0.52), NSColor::systemTealColor)
+}
+
+/// Tag in Bearbeitung in der Wochenansicht: hebt sich von Blau (Arbeit, heute), Türkis
+/// (Abwesenheit), Orange und Rot ab.
+pub fn selection() -> Retained<NSColor> {
+    // Ein echtes Magenta: Das Pink des Systems wirkt im Dunkeln rötlich, nah am Minus.
+    fn dark() -> Retained<NSColor> {
+        NSColor::colorWithSRGBRed_green_blue_alpha(0.89, 0.42, 0.85, 1.0)
+    }
+    adaptive((0.66, 0.13, 0.58), dark)
 }
 
 pub fn red() -> Retained<NSColor> {

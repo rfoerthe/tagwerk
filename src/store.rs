@@ -192,6 +192,7 @@ impl Db {
     }
 
     /// Alle Tage von `from` bis einschließlich `to`.
+    #[cfg(test)]
     pub fn load_range(&self, from: NaiveDate, to: NaiveDate) -> Result<Vec<Day>> {
         load_between(&self.conn, &date_key(from), &date_key(to))
     }
@@ -730,9 +731,9 @@ pub fn write_export(
 ) -> Result<()> {
     match format {
         ExportFormat::Markdown => fs::write(path, export_markdown(days, from, to, now, settings))?,
-        ExportFormat::Csv => fs::write(path, export_csv(&Report::new(days, from, to, settings)))?,
+        ExportFormat::Csv => fs::write(path, export_csv(&Report::new(days, from, to, now.date(), settings)))?,
         #[cfg(target_os = "macos")]
-        ExportFormat::Pdf => crate::pdf::write(&Report::new(days, from, to, settings), settings, now, path)?,
+        ExportFormat::Pdf => crate::pdf::write(&Report::new(days, from, to, now.date(), settings), settings, now, path)?,
         #[cfg(not(target_os = "macos"))]
         ExportFormat::Pdf => return Err("PDF gibt es nur unter macOS.".into()),
     }
@@ -766,9 +767,10 @@ pub struct Report {
 }
 
 impl Report {
-    /// `days` darf auch den Tag vor `from` enthalten (für die Ruhezeit).
-    pub fn new(days: &[Day], from: NaiveDate, to: NaiveDate, settings: &Settings) -> Self {
-        let rows = days
+    /// `days`: alle Tage (für die Ruhezeit am ersten Tag und die Arbeitstage ohne Eintrag,
+    /// die ab dem ersten erfassten Tag ins Soll zählen), `today`: heute.
+    pub fn new(days: &[Day], from: NaiveDate, to: NaiveDate, today: NaiveDate, settings: &Settings) -> Self {
+        let mut rows: Vec<ReportDay> = days
             .iter()
             .filter(|d| d.date >= from && d.date <= to)
             .filter_map(|d| {
@@ -779,13 +781,26 @@ impl Report {
                     last_end: r.last_end,
                     work: r.shown_work_secs,
                     pause: r.shown_pause_secs,
-                    target: settings.counted_target(d, r.work_secs),
+                    target: settings.counted_target(d, r.work_secs, today),
                     absence: d.absence.map(Absence::label).unwrap_or_default(),
                     corrected: d.has_corrections(),
                     warnings: rules::day_warnings(days, d.date, settings).iter().map(rules::Warning::text).collect(),
                 })
             })
             .collect();
+        // Arbeitstage ohne Eintrag: keine Arbeitszeit, aber das Soll.
+        rows.extend(rules::missing_workdays(days, from, to, today, settings).into_iter().map(|date| ReportDay {
+            date,
+            first_start: 0,
+            last_end: 0,
+            work: 0,
+            pause: 0,
+            target: settings.daily_target(date),
+            absence: String::new(),
+            corrected: false,
+            warnings: Vec::new(),
+        }));
+        rows.sort_by_key(|d| d.date);
         Self { from, to, days: rows }
     }
 
@@ -873,9 +888,25 @@ pub fn export_markdown(
     s.push_str("| Datum | Beginn | Ende | Arbeitszeit | Pausenzeit | Saldo |\n");
     s.push_str("|:------|:------:|:----:|------------:|-----------:|------:|\n");
     let (mut work, mut pause, mut target, mut count) = (0, 0, 0, 0);
+    // Arbeitstage ohne Eintrag stehen mit ihrem Soll dazwischen.
+    let mut missing = rules::missing_workdays(all, from, to, now.date(), settings).into_iter().peekable();
+    let mut add_missing = |s: &mut String, target: &mut i64, before: Option<NaiveDate>| {
+        while let Some(date) = missing.next_if(|m| before.is_none_or(|b| *m < b)) {
+            let day_target = settings.daily_target(date);
+            *target += day_target;
+            s.push_str(&format!(
+                "| {} | – | – | {} | {} | {} |\n",
+                fmt_date(date),
+                fmt_hms(0),
+                fmt_hms(0),
+                rules::fmt_balance(-day_target)
+            ));
+        }
+    };
     for d in &days {
         let Some(r) = d.record(settings) else { continue };
-        let day_target = settings.counted_target(d, r.work_secs);
+        add_missing(&mut s, &mut target, Some(d.date));
+        let day_target = settings.counted_target(d, r.work_secs, now.date());
         work += r.work_secs;
         pause += r.pause_secs();
         target += day_target;
@@ -892,6 +923,7 @@ pub fn export_markdown(
             rules::fmt_balance(r.work_secs - day_target),
         ));
     }
+    add_missing(&mut s, &mut target, None);
     let label = if count == 1 { "Arbeitstag" } else { "Arbeitstage" };
     s.push_str(&format!(
         "| **Summe: {count} {label}** | | | **{}** | **{}** | **{}** |\n",
@@ -900,7 +932,7 @@ pub fn export_markdown(
         rules::fmt_balance(work - target)
     ));
     s.push_str(&format!(
-        "\nSoll: {} ({} Std./Woche, nur Tage mit Arbeitszeit, {}).\n",
+        "\nSoll: {} ({} Std./Woche, {}; Arbeitstage bis gestern auch ohne Eintrag).\n",
         fmt_hm(target),
         rules::fmt_hours(settings.weekly_target),
         settings.workdays_text()
@@ -981,6 +1013,8 @@ pub enum Status {
     /// Außerhalb des Arbeitszeitrahmens: es wird nichts gezählt.
     Outside,
     Closed,
+    /// Heute ganztägig abwesend (Urlaub, Krank …): es wird nichts erfasst.
+    Absent,
 }
 
 const STATUS_TIME: &str = "%Y-%m-%dT%H:%M:%S";
@@ -994,6 +1028,7 @@ impl Status {
             Status::Away(since, a) => format!("away {} {}", since.format(STATUS_TIME), a.key()),
             Status::Outside => "outside".into(),
             Status::Closed => "closed".into(),
+            Status::Absent => "absent".into(),
         }
     }
 
@@ -1009,6 +1044,7 @@ impl Status {
             }
             "outside" => Some(Status::Outside),
             "closed" => Some(Status::Closed),
+            "absent" => Some(Status::Absent),
             _ => None,
         }
     }
@@ -1043,6 +1079,7 @@ mod tests {
             Status::Away(since, Activity::Other),
             Status::Outside,
             Status::Closed,
+            Status::Absent,
         ] {
             assert_eq!(Status::parse(&st.to_line()), Some(st));
         }
@@ -1223,12 +1260,15 @@ mod tests {
         assert_eq!(version, SCHEMA_VERSION);
 
         // Markdown: Die Abwesenheit steht bei den Korrekturen und kommt beim Einlesen zurück.
-        let md = export_markdown(&days, date(16), date(22), now(), &st());
+        let evening = date(18).and_hms_opt(18, 0, 0).unwrap();
+        let md = export_markdown(&days, date(16), date(22), evening, &st());
         assert!(md.contains("| Mo, 16.11.2026 | Abwesenheit | – | – | Urlaub (halber Tag) |"), "{md}");
         assert!(md.contains("| Mi, 18.11.2026 | Abwesenheit | – | – | Zeitausgleich |"), "{md}");
         assert_eq!(parse_file(&md), days);
-        // Halbes Soll am Montag, volles am Mittwoch: 4:00 − (3:54 + 7:48).
-        assert!(md.contains("| **Summe: 1 Arbeitstag** | | | **04:00:00** | **00:00:00** | **−7:42 h** |"), "{md}");
+        // Halbes Soll am Montag, volles am Dienstag ohne Eintrag und am Mittwoch:
+        // 4:00 − (3:54 + 7:48 + 7:48).
+        assert!(md.contains("| Di, 17.11.2026 | – | – | 00:00:00 | 00:00:00 | −7:48 h |"), "{md}");
+        assert!(md.contains("| **Summe: 1 Arbeitstag** | | | **04:00:00** | **00:00:00** | **−15:30 h** |"), "{md}");
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1242,7 +1282,8 @@ mod tests {
         let mut sat = Day::new(date(21));
         sat.add_period(h(10, 0), h(11, 0));
         let days = vec![mon, sat];
-        let report = Report::new(&days, date(16), date(22), &st());
+        // Stand Dienstag: Der Dienstag zählt erst mit Arbeitszeit.
+        let report = Report::new(&days, date(16), date(22), date(17), &st());
         assert_eq!(report.totals(), (h(8, 30) + h(1, 0), h(1, 0), h(7, 48), 2));
         let csv = export_csv(&report);
         let lines: Vec<&str> = csv.trim_start_matches('\u{feff}').split("\r\n").collect();
@@ -1254,10 +1295,17 @@ mod tests {
         assert_eq!(lines[1], "16.11.2026;Mo;08:00;17:30;8:30;8,50;1:00;7:48;+0:42;;ja;");
         assert_eq!(lines[2], "21.11.2026;Sa;10:00;11:00;1:00;1,00;0:00;0:00;+1:00;;nein;Arbeit am Wochenende – zählt ohne Soll als Mehrarbeit");
         assert_eq!(lines.len(), 4, "Zeilenende nach der letzten Zeile");
+        // Eine Woche später: Di bis Fr ohne Eintrag stehen mit ihrem Soll dazwischen.
+        let later = Report::new(&days, date(16), date(22), date(30), &st());
+        assert_eq!(later.totals(), (h(9, 30), h(1, 0), 5 * h(7, 48), 2));
+        let lines: Vec<String> = export_csv(&later).split("\r\n").map(str::to_string).collect();
+        assert_eq!(lines.len(), 8);
+        assert_eq!(lines[2], "17.11.2026;Di;;;0:00;0,00;0:00;7:48;-7:48;;nein;");
+        assert!(lines[6].starts_with("21.11.2026;Sa;10:00"));
         // Zeitausgleich ohne Arbeitszeit: keine Uhrzeiten, das volle Soll als Minus.
         let mut off = Day::new(date(18));
         off.absence = Some(Absence::new(AbsenceKind::TimeOff, false));
-        let csv = export_csv(&Report::new(&[off], date(16), date(22), &st()));
+        let csv = export_csv(&Report::new(&[off], date(16), date(22), date(18), &st()));
         assert!(csv.contains("18.11.2026;Mi;;;0:00;0,00;0:00;7:48;-7:48;Zeitausgleich;ja;\r\n"), "{csv}");
         // Ein Hinweis mit Semikolon wird in Anführungszeichen gesetzt.
         let quoted = Report { days: vec![ReportDay { warnings: vec!["a; b \"c\"".to_string()], ..report.days[0].clone() }], ..report };
