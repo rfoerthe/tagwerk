@@ -6,6 +6,17 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt
+- Wochenansicht: Arbeitsbeginn und Feierabend lassen sich mit der Maus verschieben. An der
+  Oberkante des ersten bzw. der Unterkante des letzten Abschnitts erscheint ein Griff;
+  beim Ziehen zeigt ein Schild die neue Uhrzeit und die Abweichung, der Tageskopf rechnet
+  mit, und Arbeit ohne Mac, die entfiele, ist gestrichelt. Die Zeit rastet auf 5 Minuten
+  ein (mit ⌥ auf die Minute) und am erfassten Wert, der den manuellen Wert wieder
+  aufhebt. Esc bricht ab, ⌘Z nimmt die Änderung zurück. Arbeitsbeginn und Feierabend
+  tragen eine türkise Linie, manuell festgelegte kräftiger und mit einem Punkt. Ohne Maus
+  geht dasselbe über das Kontextmenü (ändern mit Uhrzeit-Feld, zurücksetzen) und für
+  VoiceOver über Aktionen am Abschnitt.
+
 ### Geändert
 - Ein manueller Feierabend zählt ab dem letzten Sperren davor, ein manueller Arbeitsbeginn
   bis zum ersten Entsperren danach – auch wenn der Mac nach dem Feierabend bzw. vor dem
