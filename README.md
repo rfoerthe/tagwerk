@@ -213,6 +213,10 @@ zu „Woche“ zeigt die Woche des ausgewählten Tags. In der Menüleisten-App e
   ganztags nur an einem Tag ohne andere Einträge) oder alle Einträge des Tages löschen.
 - Eine Abwesenheit liegt als türkises, gestricheltes Band über dem Arbeitszeitrahmen des
   Tages, mit ihrer Art oben; Abschnitte, an denen trotzdem gearbeitet wurde, darüber.
+- Der Tag in Bearbeitung – derselbe, den in „Tage“ der Inspektor zeigt – trägt sein Datum
+  weiß auf einer Pille in Magenta, ein gestrichelter Rahmen in Magenta umfasst seine Spalte. Ein Klick oder
+  Rechtsklick in eine Tagesspalte wählt den Tag; beim Wechsel zu „Tage“ steht er dort im
+  Inspektor. Heute bleibt davon unabhängig blau getönt.
 - Ein vergangener Arbeitstag ohne Arbeitszeit und ohne Abwesenheit zeigt im Tageskopf sein
   fehlendes Soll in Rot (z. B. „−7:48 h“) – so sieht man, woher ein Minus im Wochensaldo kommt.
 - Für VoiceOver ist die Woche eine Gruppe mit einem Element je Tag (Arbeitszeit, Pausen,

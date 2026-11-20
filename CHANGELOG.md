@@ -20,6 +20,9 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   Voraus. Sie liegt als türkises, gestricheltes Band über dem Arbeitszeitrahmen des Tages
   und lässt sich mit ⌘Z widerrufen. Ebenfalls per Rechtsklick: „Alle Einträge löschen …“
   (mit derselben Rückfrage wie im Inspektor).
+- Wochenansicht: Der Tag in Bearbeitung (in „Tage“ ausgewählt) ist markiert – Datum auf
+  einer Pille in Magenta, gestrichelter Rahmen in Magenta um die Spalte. Ein Klick oder Rechtsklick in eine
+  Tagesspalte wählt den Tag, auch für den Inspektor in „Tage“.
 - „Aufzeichnungen“: Ein Doppelklick auf eine Zeile der Liste oder ein Rechtsklick („In der
   Wochenansicht zeigen“) springt in die Woche des Tags bzw. der Wochenzeile.
 - „Aufzeichnungen“: Vergangene Arbeitstage ganz ohne Eintrag erscheinen in der Liste (mit

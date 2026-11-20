@@ -2531,6 +2531,26 @@ fn filter_menu(target: &Controller) -> Retained<NSMenu> {
 }
 
 /// Einen Tag in der Ansicht „Tage“ zeigen.
+/// Der Tag in Bearbeitung (für die Wochenansicht).
+fn selected_day() -> Option<NaiveDate> {
+    MODEL.with(|m| m.try_borrow().ok().and_then(|m| m.selected))
+}
+
+/// Klick in eine Tagesspalte der Wochenansicht: Der Tag wird ausgewählt – auch in der
+/// Tabelle, sodass „Tage“ ihn beim Zurückwechseln zeigt.
+fn select_day(date: NaiveDate) {
+    let row = model(|m| {
+        m.selected = Some(date);
+        m.row_of(date)
+    });
+    let ui = ui();
+    match row {
+        Some(r) => ui.table.selectRowIndexes_byExtendingSelection(&NSIndexSet::indexSetWithIndex(r), false),
+        None => unsafe { ui.table.deselectAll(None) },
+    }
+    refresh_inspector(true);
+}
+
 fn open_day(date: NaiveDate) {
     set_mode(Mode::Days, true);
     go_to(date);
@@ -3629,6 +3649,7 @@ pub fn show(status: Status, embed: Embed) {
     let ui = build(false);
     week_view::set_actions(Some(week_add_work), Some(week_remove_work), Some(week_set_absence), Some(confirm_clear_day));
     week_view::set_open_day(Some(open_day));
+    week_view::set_selection(Some(week_view::Selection { get: selected_day, set: select_day }));
     model(|m| m.status = Some(status));
     reload();
     let today = now().date();
@@ -3719,6 +3740,8 @@ pub fn run(screenshot: Option<PathBuf>, week: bool) -> Result<(), String> {
         week_view::set_actions(Some(week_add_work), Some(week_remove_work), Some(week_set_absence), Some(confirm_clear_day));
         week_view::set_open_day(Some(open_day));
     }
+    // Den Tag in Bearbeitung zeigt die Woche auch auf Bildschirmfotos.
+    week_view::set_selection(Some(week_view::Selection { get: selected_day, set: select_day }));
     let mode = match (shot, week) {
         (_, true) => Mode::Week,
         (true, false) => Mode::Days,

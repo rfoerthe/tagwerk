@@ -15,7 +15,9 @@
 //! Mac einzutragen (von, bis, Grund): in einer Pause ist die ganze Pause vorgeschlagen, vor
 //! dem Arbeitsbeginn und nach dem Feierabend eine halbe Stunde ab dem Klick. Über das
 //! Kontextmenü lässt sich für einen Arbeitstag eine Abwesenheit eintragen (Urlaub, Krank,
-//! Feiertag, Zeitausgleich); sie liegt als Band über dem Arbeitszeitrahmen des Tages.
+//! Feiertag, Zeitausgleich); sie liegt als Band über dem Arbeitszeitrahmen des Tages. Der Tag
+//! in Bearbeitung (in „Tage“ ausgewählt, siehe [`Selection`]) trägt sein Datum auf einer
+//! Pille und einen Rahmen um die Spalte; ein Klick in eine Spalte wählt ihn.
 
 use crate::day::{fmt_clock, secs_of, Absence, AbsenceKind, Activity, Day, Span, DAY_END};
 use crate::palette;
@@ -655,6 +657,8 @@ thread_local! {
     static CLEAR_DAY: Cell<Option<ClearDay>> = const { Cell::new(None) };
     /// Einen Tag in der Ansicht „Tage“ öffnen – stellt „Aufzeichnungen“ bereit.
     static OPEN_DAY: Cell<Option<OpenDay>> = const { Cell::new(None) };
+    /// Der Tag in Bearbeitung (in „Aufzeichnungen“ ausgewählt) und wie er sich wählen lässt.
+    static SELECTION: Cell<Option<Selection>> = const { Cell::new(None) };
     /// Worauf sich das gerade offene Kontextmenü bezieht.
     static PENDING: RefCell<Option<Context>> = const { RefCell::new(None) };
     /// Zähler für den Stand der Anzeige (für die Elemente der Bedienungshilfen).
@@ -668,6 +672,28 @@ type AxKey = (u64, [i64; 4]);
 
 /// Einen Tag in der Ansicht „Tage“ zeigen.
 pub type OpenDay = fn(NaiveDate);
+
+/// Der Tag in Bearbeitung – geteilt mit der Ansicht „Tage“ (dort zeigt ihn der Inspektor).
+#[derive(Clone, Copy)]
+pub struct Selection {
+    /// Der ausgewählte Tag.
+    pub get: fn() -> Option<NaiveDate>,
+    /// Einen Tag auswählen (Klick in seine Spalte).
+    pub set: fn(NaiveDate),
+}
+
+fn selected_day() -> Option<NaiveDate> {
+    SELECTION.with(|c| c.get()).and_then(|s| (s.get)())
+}
+
+/// Den Tag `date` auswählen und neu zeichnen, wenn er wechselt.
+fn select_day(view: &WeekView, date: NaiveDate) {
+    let Some(sel) = SELECTION.with(|c| c.get()) else { return };
+    if (sel.get)() != Some(date) {
+        (sel.set)(date);
+        view.setNeedsDisplay(true);
+    }
+}
 
 /// Was an einer Stelle des Rasters möglich ist (für Kontextmenü und Doppelklick).
 #[derive(Clone)]
@@ -906,6 +932,10 @@ define_class!(
         #[unsafe(method(mouseDown:))]
         fn mouse_down(&self, event: &NSEvent) {
             let p = self.convertPoint_fromView(event.locationInWindow(), None);
+            // Ein Klick in eine Tagesspalte macht diesen Tag zum Tag in Bearbeitung.
+            if let Some(ctx) = context_at(self, p) {
+                select_day(self, ctx.date);
+            }
             match event.clickCount() {
                 1 => match hit_test(self, p) {
                     Some(Hit::Time { flash, text, .. }) => copy_time(self, flash, &text),
@@ -933,6 +963,7 @@ define_class!(
         fn menu_for_event(&self, event: &NSEvent) -> Option<Retained<NSMenu>> {
             let p = self.convertPoint_fromView(event.locationInWindow(), None);
             context_at(self, p).and_then(|ctx| {
+                select_day(self, ctx.date);
                 let menu = context_menu(&ctx)?;
                 PENDING.with(|c| *c.borrow_mut() = Some(ctx));
                 Some(menu)
@@ -1854,11 +1885,24 @@ fn draw(bounds: NSRect, d: &Data, flash: Option<&Flash>, hover: Option<(NaiveDat
     hline(0.0, geo.w, HEADER_H - 1.0, &separator);
     let icon = warning_image(11.0);
     let cup = pause_image(9.0, &secondary);
+    let selected = selected_day();
+    let on_accent = NSColor::whiteColor();
+    let magenta = palette::selection();
     for (i, c) in d.cols.iter().enumerate() {
         let x = geo.x(i);
         let is_today = Some(c.date) == today;
+        let is_selected = Some(c.date) == selected;
         let warn = !c.warnings.is_empty();
-        let color = if is_today { &accent } else if is_workday(c.date) { &label } else { &secondary };
+        // Tag in Bearbeitung: das Datum weiß auf einer Pille in Magenta.
+        let color = if is_selected {
+            &on_accent
+        } else if is_today {
+            &accent
+        } else if is_workday(c.date) {
+            &label
+        } else {
+            &secondary
+        };
         let title = format!("{} {}", WEEKDAYS_SHORT[i], c.date.format("%d.%m."));
         let a = attrs(&font(12.0, if is_today { semibold } else { medium }), color, NSTextAlignment::Left);
         let tw = text_width(&title, &a);
@@ -1866,12 +1910,23 @@ fn draw(bounds: NSRect, d: &Data, flash: Option<&Flash>, hover: Option<(NaiveDat
             (Some(img), true) => img.size().width + 4.0,
             _ => 0.0,
         };
-        let x0 = (x + (geo.col_w(i) - tw - icon_w) / 2.0).max(x + 2.0).round();
+        // Die Pille ragt links und rechts über das Datum hinaus; das Warnschild steht davor –
+        // mit demselben Abstand wie sonst zum Datum.
+        let pad = if is_selected { 7.0 } else { 0.0 };
+        let x0 = (x + (geo.col_w(i) - icon_w - tw - 2.0 * pad) / 2.0).max(x + 2.0).round();
         if let (Some(img), true) = (&icon, warn) {
             let sz = img.size();
             img.drawInRect(NSRect::new(NSPoint::new(x0, 7.0 + (15.0 - sz.height) / 2.0), sz));
         }
-        let title_rect = NSRect::new(NSPoint::new(x0 + icon_w, 7.0), NSSize::new(geo.x(i + 1) - 2.0 - x0 - icon_w, 16.0));
+        let text_x = x0 + icon_w + pad;
+        let title_rect = NSRect::new(NSPoint::new(text_x, 7.0), NSSize::new(geo.x(i + 1) - 2.0 - text_x, 16.0));
+        if is_selected {
+            let pill = NSRect::new(
+                NSPoint::new(x0 + icon_w, 5.0),
+                NSSize::new((tw + 2.0 * pad).min(geo.x(i + 1) - 2.0 - x0 - icon_w), 19.0),
+            );
+            round_fill(pill, 9.5, &magenta);
+        }
         text_in(&title, title_rect, &a);
         // Ohne Arbeitszeit steht dort die Abwesenheit, an einem Arbeitstag ohne Eintrag das
         // fehlende Soll in Rot (sonst ein Strich).
@@ -2033,6 +2088,18 @@ fn draw(bounds: NSRect, d: &Data, flash: Option<&Flash>, hover: Option<(NaiveDat
             NSRect::new(NSPoint::new(GUTTER_W, y), NSSize::new(geo.w - GUTTER_W, 18.0)),
             &a,
         );
+    }
+
+    // Tag in Bearbeitung: ein gestrichelter Rahmen in Magenta um die ganze Spalte (über den
+    // Abschnitten) – anders als das türkise Band der Abwesenheit auch um den Tageskopf.
+    if let Some(i) = d.cols.iter().position(|c| Some(c.date) == selected) {
+        let r = NSRect::new(NSPoint::new(geo.x(i), 0.0), NSSize::new(geo.col_w(i), grid_bottom + GRID_PAD_BOTTOM));
+        magenta.setStroke();
+        let frame = NSBezierPath::bezierPathWithRect(inset(r, 0.75, 0.75));
+        frame.setLineWidth(1.5);
+        let dash: [f64; 2] = [5.0, 3.0];
+        unsafe { frame.setLineDash_count_phase(dash.as_ptr(), 2, 0.0) };
+        frame.stroke();
     }
 
     // Rückmeldung „… kopiert“ als Sprechblase über der Uhrzeit (zuletzt, damit obenauf).
@@ -2322,6 +2389,11 @@ pub fn container() -> Retained<NSView> {
 /// Wie die Wochenansicht einen Tag in der Ansicht „Tage“ öffnet (`None`: gar nicht).
 pub fn set_open_day(open_day: Option<OpenDay>) {
     OPEN_DAY.with(|c| c.set(open_day));
+}
+
+/// Wie die Wochenansicht den Tag in Bearbeitung erfährt und wählt (`None`: keine Markierung).
+pub fn set_selection(selection: Option<Selection>) {
+    SELECTION.with(|c| c.set(selection));
 }
 
 pub fn set_actions(
