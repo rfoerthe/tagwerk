@@ -36,7 +36,7 @@ zur Arbeitszeit. Arbeitsbeginn, Pausen und Feierabend lassen sich jederzeit von 
 festlegen oder korrigieren.
 
 - 🔒 **Kein Starten, kein Stoppen** – Sperren, Entsperren, Ruhezustand und Benutzerwechsel werden automatisch erkannt.
-- ⚖️ **Regeln im Blick** – Pausen, Ruhezeit und Höchstarbeitszeit nach Arbeitszeitgesetz werden geprüft.
+- ⚖️ **Regeln im Blick** – Pausen, Ruhezeit und Höchstarbeitszeit nach [Arbeitszeitgesetz](https://www.gesetze-im-internet.de/arbzg/BJNR117100994.html) werden geprüft.
 - 📊 **Soll, Saldo und Zeitkonto** – je Tag, Woche und Monat, auf Basis deiner Regelwochenarbeitszeit und deiner Arbeitstage; das Zeitkonto zählt fortlaufend.
 - 🗓️ **Wochenansicht** – jede Kalenderwoche übersichtlich wie in einem Kalender, direkt im Fenster „Aufzeichnungen“.
 - 🏠 **Lokal und privat** – alle Daten liegen in einer SQLite-Datenbank auf deinem Mac, nichts verlässt das Gerät.
@@ -310,9 +310,10 @@ Perioden.
 
 ## Regeln
 
-Tagwerk berücksichtigt die folgenden Regeln aus dem Arbeitszeitgesetz und einer fiktiven Betriebsvereinbarung. Verstöße werden in der Menüleiste, in der Tabelle, im Inspektor,
-in der Wochenansicht und im Export angezeigt – die Arbeitszeit selbst wird dadurch nicht
-verändert.
+Tagwerk wendet die folgenden Regeln an. Sie stammen teils aus dem Arbeitszeitgesetz
+(ArbZG), teils aus einer fiktiven Betriebsvereinbarung. Verstöße zeigt Tagwerk in der
+Menüleiste, in der Tabelle, im Inspektor, in der Wochenansicht und im Export an. Die
+erfasste Arbeitszeit ändern sie nicht.
 
 | Regel                | Inhalt                                                                  |
 |----------------------|-------------------------------------------------------------------------|
