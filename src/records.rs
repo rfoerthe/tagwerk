@@ -430,8 +430,9 @@ impl Filter {
 }
 
 /// Die manuellen Korrekturen eines Tages – alles, was sich im Fenster ändern lässt. Die
-/// automatisch erfassten Perioden gehören nicht dazu: Widerrufen stellt nur Korrekturen
-/// wieder her und lässt inzwischen erfasste Zeit stehen.
+/// automatisch erfassten Perioden gehören nur nach „Alle Einträge löschen“ dazu
+/// ([`Corrections::whole`]): Sonst stellt Widerrufen nur Korrekturen wieder her und lässt
+/// inzwischen erfasste Zeit stehen.
 #[derive(Clone, Debug, Default, PartialEq)]
 struct Corrections {
     start: Option<i64>,
@@ -439,6 +440,8 @@ struct Corrections {
     breaks: Vec<Break>,
     work: Vec<WorkBlock>,
     absence: Option<Absence>,
+    /// Automatisch erfasste Zeiten (`None`: bleiben unberührt).
+    periods: Option<Vec<Span>>,
 }
 
 impl Corrections {
@@ -449,7 +452,13 @@ impl Corrections {
             breaks: day.breaks.clone(),
             work: day.work.clone(),
             absence: day.absence,
+            periods: None,
         }
+    }
+
+    /// Der ganze Tag samt automatisch erfasster Zeiten.
+    fn whole(day: &Day) -> Self {
+        Self { periods: Some(day.periods.clone()), ..Self::of(day) }
     }
 
     fn apply(&self, day: &mut Day) {
@@ -458,6 +467,9 @@ impl Corrections {
         day.breaks = self.breaks.clone();
         day.work = self.work.clone();
         day.absence = self.absence;
+        if let Some(periods) = &self.periods {
+            day.periods = periods.clone();
+        }
     }
 }
 
@@ -1030,6 +1042,12 @@ define_class!(
             }
         }
 
+        /// „Alle Einträge löschen …“ im Inspektor: erst nachfragen.
+        #[unsafe(method(clearDay:))]
+        fn clear_day(&self, _sender: Option<&AnyObject>) {
+            confirm_clear_day();
+        }
+
         #[unsafe(method(exportPreset:))]
         fn export_preset(&self, sender: Option<&NSPopUpButton>) {
             let tag = sender.map(|p| p.selectedTag()).unwrap_or(PRESET_4W);
@@ -1448,6 +1466,8 @@ enum Edit {
     CutWork(i64, i64),
     /// Abwesenheit eintragen, ändern oder (`None`) entfernen.
     SetAbsence(Option<Absence>),
+    /// Alle Einträge des Tages löschen – manuelle wie automatisch erfasste.
+    ClearDay,
 }
 
 impl Edit {
@@ -1461,6 +1481,7 @@ impl Edit {
             Edit::AddWork(..) => "Arbeit ohne Mac eintragen",
             Edit::RemoveWork(_) | Edit::CutWork(..) => "Arbeit ohne Mac entfernen",
             Edit::SetAbsence(_) => "Abwesenheit ändern",
+            Edit::ClearDay => "Alle Einträge löschen",
         }
     }
 }
@@ -1480,12 +1501,14 @@ fn save(date: NaiveDate, edit: Edit, rebuild: bool) -> Result<(), String> {
         Edit::SetEnd(_) => Some(Bound::End),
         _ => None,
     };
+    // Löschen trifft auch die erfassten Zeiten – Widerrufen muss sie zurückbringen.
+    let snapshot = if matches!(edit, Edit::ClearDay) { Corrections::whole } else { Corrections::of };
     // Die Korrekturen davor und danach, wie sie in der Datenbank stehen.
     let mut change = None;
     let result = model(|m| {
         let db = m.db.as_mut()?;
         Some(db.edit_day(date, now(), |d| {
-            let before = Corrections::of(d);
+            let before = snapshot(d);
             match edit {
                 // Arbeit ohne Mac davor bzw. danach entfällt: die letzte Angabe gilt.
                 Edit::SetStart(s) => {
@@ -1508,8 +1531,9 @@ fn save(date: NaiveDate, edit: Edit, rebuild: bool) -> Result<(), String> {
                 }
                 Edit::CutWork(from, to) => d.cut_work(from, to),
                 Edit::SetAbsence(a) => d.absence = a,
+                Edit::ClearDay => *d = Day::new(date),
             }
-            change = Some((before, Corrections::of(d)));
+            change = Some((before, snapshot(d)));
         }))
     });
     match result {
@@ -1647,7 +1671,8 @@ fn step_history(redo: bool) {
     let result = model(|m| {
         let db = m.db.as_mut()?;
         Some(db.edit_day(step.date, now(), |d| {
-            current = Some(Corrections::of(d));
+            // Nach „Alle Einträge löschen“ in beide Richtungen samt erfasster Zeiten.
+            current = Some(if step.before.periods.is_some() { Corrections::whole(d) } else { Corrections::of(d) });
             step.before.apply(d);
         }))
     });
@@ -2128,6 +2153,23 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         stack.addArrangedSubview(&row);
     }
 
+    // Ganz unten, abgesetzt: den Tag leeren (nur, wenn es etwas zu löschen gibt).
+    if day.as_ref().is_some_and(|d| !d.is_empty()) {
+        if let Some(last) = stack.arrangedSubviews().lastObject() {
+            stack.setCustomSpacing_afterView(18.0, &last);
+        }
+        let sep = separator();
+        stack.addArrangedSubview(&sep);
+        pin_width(&sep, stack, 40.0);
+        stack.setCustomSpacing_afterView(14.0, &sep);
+        let clear = button("Alle Einträge löschen …", sel!(clearDay:), target);
+        clear.setHasDestructiveAction(true);
+        clear.setToolTip(Some(&ns(
+            "Löscht die automatisch erfassten Zeiten und alle manuellen Einträge dieses Tages.",
+        )));
+        stack.addArrangedSubview(&clear);
+    }
+
     model(|m| {
         m.built = Some((date, day, settings));
         m.inspector = Some(Inspector {
@@ -2149,6 +2191,78 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
             work_error,
         });
     });
+}
+
+/// „Alle Einträge löschen …“: Rückfrage als Sheet, dann den Tag im Inspektor leeren.
+fn confirm_clear_day() {
+    let window = ui().window;
+    if window.attachedSheet().is_some() {
+        return;
+    }
+    let Some((date, day)) = model(|m| {
+        let date = m.inspector.as_ref()?.date;
+        Some((date, m.day(date)?.clone()))
+    }) else {
+        return;
+    };
+    let alert = NSAlert::new(mtm());
+    alert.setAlertStyle(NSAlertStyle::Warning);
+    alert.setMessageText(&ns(&format!("Alle Einträge vom {} löschen?", fmt_date_long(date))));
+    alert.setInformativeText(&ns(&clear_day_text(&day, date == now().date())));
+    let delete = alert.addButtonWithTitle(&ns("Löschen"));
+    delete.setHasDestructiveAction(true);
+    // Return bestätigt nicht versehentlich: Standard ist „Abbrechen“.
+    delete.setKeyEquivalent(&ns(""));
+    let cancel = alert.addButtonWithTitle(&ns("Abbrechen"));
+    cancel.setKeyEquivalent(&ns("\r"));
+    let handler = RcBlock::new(move |response: NSModalResponse| {
+        if response != NSAlertFirstButtonReturn {
+            return;
+        }
+        if let Err(e) = save(date, Edit::ClearDay, true) {
+            // Erst wenn dieses Sheet geschlossen ist.
+            let block = RcBlock::new(move |_timer| {
+                show_info_sheet(&ui().window, "Löschen fehlgeschlagen", &e);
+            });
+            unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.0, false, &block) };
+        }
+    });
+    alert.beginSheetModalForWindow_completionHandler(&window, Some(&handler));
+}
+
+/// Erklärung im Sheet „Alle Einträge löschen“: was an diesem Tag wegfällt.
+fn clear_day_text(day: &Day, is_today: bool) -> String {
+    let count = |n: usize, one: &str, many: &str| if n == 1 { format!("1 {one}") } else { format!("{n} {many}") };
+    let mut parts = Vec::new();
+    if !day.periods.is_empty() {
+        parts.push(count(day.periods.len(), "automatisch erfasste Zeit", "automatisch erfasste Zeiten"));
+    }
+    if day.start.is_some() {
+        parts.push("den festgelegten Arbeitsbeginn".to_string());
+    }
+    if !day.breaks.is_empty() {
+        parts.push(count(day.breaks.len(), "eingetragene Pause", "eingetragene Pausen"));
+    }
+    if !day.work.is_empty() {
+        parts.push(count(day.work.len(), "Eintrag Arbeit ohne Mac", "Einträge Arbeit ohne Mac"));
+    }
+    if day.end.is_some() {
+        parts.push("den festgelegten Feierabend".to_string());
+    }
+    if let Some(a) = day.absence {
+        parts.push(format!("die Abwesenheit „{}“", a.label()));
+    }
+    let list = match parts.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} und {last}", rest.join(", ")),
+        None => "nichts".to_string(),
+    };
+    let mut text = format!("Das betrifft {list}.");
+    if is_today {
+        text.push_str(" Die automatische Erfassung läuft danach ab jetzt weiter.");
+    }
+    text.push_str(" ⌘Z nimmt das zurück.");
+    text
 }
 
 /// Springt zu einem Tag (auch einem ohne Aufzeichnung).
@@ -3428,6 +3542,39 @@ mod tests {
         assert_eq!(Corrections::of(&day), before);
         assert_eq!(day.periods.len(), 2, "erfasste Zeit bleibt");
         assert!(day.work.is_empty());
+    }
+
+    #[test]
+    fn whole_day_restores_recorded_periods() {
+        let mut day = Day::new(date(17));
+        day.add_period(8 * 3600, 12 * 3600);
+        day.add_break(10 * 3600, 10 * 3600 + 1800);
+        day.absence = Some(Absence::new(AbsenceKind::Vacation, true));
+        let before = Corrections::whole(&day);
+        let mut cleared = Day::new(date(17));
+        before.apply(&mut cleared);
+        assert_eq!(cleared, day, "Widerrufen bringt den ganzen Tag zurück");
+        // Wiederholen löscht wieder alles – auch die erfassten Zeiten.
+        Corrections::whole(&Day::new(date(17))).apply(&mut cleared);
+        assert!(cleared.is_empty());
+    }
+
+    #[test]
+    fn clear_day_text_lists_entries() {
+        let mut day = Day::new(date(17));
+        day.add_period(8 * 3600, 12 * 3600);
+        day.add_period(13 * 3600, 17 * 3600);
+        assert_eq!(clear_day_text(&day, false), "Das betrifft 2 automatisch erfasste Zeiten. ⌘Z nimmt das zurück.");
+        day.start = Some(7 * 3600);
+        day.add_break(10 * 3600, 10 * 3600 + 1800);
+        day.add_work(12 * 3600, 13 * 3600, "Meeting");
+        day.absence = Some(Absence::new(AbsenceKind::Vacation, true));
+        assert_eq!(
+            clear_day_text(&day, true),
+            "Das betrifft 2 automatisch erfasste Zeiten, den festgelegten Arbeitsbeginn, 1 eingetragene Pause, \
+             1 Eintrag Arbeit ohne Mac und die Abwesenheit „Urlaub (halber Tag)“. \
+             Die automatische Erfassung läuft danach ab jetzt weiter. ⌘Z nimmt das zurück."
+        );
     }
 
     #[test]

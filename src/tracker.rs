@@ -413,6 +413,18 @@ impl Tracker {
     /// Nach einer Änderung der Datenbank von außen (Fenster „Aufzeichnungen“) neu einlesen.
     /// Die laufende Periode bleibt erhalten; doppelt gespeicherte Zeiten werden zusammengefasst.
     pub fn replace_days(&mut self, days: Vec<Day>, settings: Settings, now: NaiveDateTime) {
+        // Tag im Fenster „Aufzeichnungen“ gelöscht: Was gerade läuft, zählt erst ab jetzt –
+        // sonst brächte das nächste Speichern die laufende Periode bzw. Arbeit ohne Mac seit
+        // ihrem Beginn zurück.
+        let deleted = |since: NaiveDateTime| {
+            self.saved.iter().any(|d| d.date == since.date()) && !days.iter().any(|d| d.date == since.date())
+        };
+        if self.running_since.is_some_and(deleted) {
+            self.running_since = Some(now);
+        }
+        if self.on_away() && self.paused_since.is_some_and(deleted) {
+            self.paused_since = Some(now);
+        }
         self.saved = days.clone();
         self.days = days;
         self.settings = settings;
@@ -579,6 +591,34 @@ mod tests {
         t.replace_days(days, Settings::default(), dt(16, 17, 0));
         assert!(!t.on_away());
         assert_eq!(t.today(dt(16, 17, 0)).work_secs, hm(8, 30));
+    }
+
+    #[test]
+    fn deleted_day_restarts_running_capture() {
+        let mut t = Tracker::new(vec![], Settings::default());
+        t.start(dt(16, 8, 0));
+        // Gespeichert, dann im Fenster „Aufzeichnungen“ alle Einträge von heute gelöscht.
+        let mut db_days = t.snapshot(dt(16, 13, 0));
+        t.replace_days(db_days.clone(), Settings::default(), dt(16, 13, 0));
+        db_days.retain(|d| d.date != dt(16, 0, 0).date());
+        t.replace_days(db_days, Settings::default(), dt(16, 13, 30));
+        assert!(t.is_running(), "die Erfassung läuft weiter");
+        assert_eq!(t.today(dt(16, 14, 0)).work_secs, hm(0, 30), "erst ab dem Löschen");
+        // Ohne Löschen bleibt die laufende Periode, wie sie war.
+        let mut t = Tracker::new(vec![], Settings::default());
+        t.start(dt(16, 8, 0));
+        let days = t.snapshot(dt(16, 13, 0));
+        t.replace_days(days, Settings::default(), dt(16, 13, 0));
+        assert_eq!(t.today(dt(16, 14, 0)).work_secs, hm(6, 0));
+        // Laufende Arbeit ohne Mac zählt nach dem Löschen ebenfalls erst ab jetzt.
+        let mut t = Tracker::new(vec![], Settings::default());
+        t.start(dt(16, 8, 0));
+        assert!(t.go_away(dt(16, 12, 0), Activity::Meeting));
+        let days = t.snapshot(dt(16, 13, 0));
+        t.replace_days(days, Settings::default(), dt(16, 13, 0));
+        t.replace_days(vec![], Settings::default(), dt(16, 13, 30));
+        assert!(t.on_away());
+        assert_eq!(t.today(dt(16, 14, 0)).work_secs, hm(0, 30));
     }
 
     #[test]

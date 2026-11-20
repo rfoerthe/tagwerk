@@ -6,6 +6,14 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt
+- Inspektor: „Alle Einträge löschen …“ ganz unten leert einen Tag – automatisch erfasste
+  Zeiten wie manuelle Einträge (Arbeitsbeginn, Feierabend, Pausen, Arbeit ohne Mac,
+  Abwesenheit). Ein Bestätigungsdialog nennt, was wegfällt; „Abbrechen“ ist die
+  Standardtaste. ⌘Z stellt den Tag samt erfasster Zeiten wieder her. Wird der heutige Tag
+  gelöscht, zählt die Menüleisten-App eine laufende Erfassung bzw. laufende Arbeit ohne Mac
+  ab dem Löschen weiter, statt die gelöschte Zeit beim nächsten Speichern zurückzuschreiben.
+
 ### Geändert
 - Ein manueller Feierabend zählt ab dem letzten Sperren davor, ein manueller Arbeitsbeginn
   bis zum ersten Entsperren danach – auch wenn der Mac nach dem Feierabend bzw. vor dem

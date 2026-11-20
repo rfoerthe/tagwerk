@@ -150,11 +150,18 @@ auf Klick als kleines Fenster.
   um den freien Tag. In der Tabelle steht hinter dem Datum ein Kürzel (U, K, F, ZA, halbe
   Tage mit ½), in der Wochenansicht die Abwesenheit im Tageskopf.
 
+- **Alle Einträge löschen** – ganz unten im Inspektor leert „Alle Einträge löschen …“ einen
+  Tag: die automatisch erfassten Zeiten ebenso wie Arbeitsbeginn, Feierabend, Pausen, Arbeit
+  ohne Mac und Abwesenheit. Vorher fragt ein Dialog nach und nennt, was wegfällt; ⌘Z holt
+  den Tag vollständig zurück. Für heute läuft die automatische Erfassung danach ab dem
+  Löschen weiter.
+
 - **Widerrufen und Wiederholen** (⌘Z, ⇧⌘Z, Menü „Bearbeiten“) – jede Korrektur aus dem
   Inspektor und der Wochenansicht lässt sich zurücknehmen, bis zu 50 Schritte, solange das
   Fenster offen ist. Das Menü nennt den Schritt („Widerrufen: Pause entfernen“), und der
   betroffene Tag wird gezeigt. Zurückgenommen werden nur die Korrekturen des Tages; inzwischen
-  erfasste Zeit bleibt.
+  erfasste Zeit bleibt (außer nach „Alle Einträge löschen“, das auch die erfasste Zeit
+  zurückbringt).
 - **Filter** (Symbolleiste oder Menü „Darstellung“) – schränkt die Tabelle auf einen Zeitraum
   ein (dieser oder letzter Monat, dieses oder letztes Jahr), auf Tage mit Hinweisen oder auf
   korrigierte Tage; die Merkmale lassen sich kombinieren. Solange gefiltert wird, ist das
