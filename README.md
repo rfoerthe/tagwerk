@@ -589,6 +589,9 @@ eingetragen, dazu 30 Urlaubstage im Jahr (Karwoche, Brückentag nach Himmelfahrt
 drei Wochen im Sommer, eine Herbstwoche, zwischen den Jahren, Heiligabend und Silvester als
 halbe Tage, der Rest einzeln) und 6 Tage Zeitausgleich (zuerst Brückentage, sonst
 Freitage). Die Mehrarbeit dafür ist über das Jahr verteilt, das Zeitkonto pendelt um null.
+Alle sechs Monate gibt es einen Tag Sonderurlaub; am Samstag der Woche davor wird 4 bis 6
+Stunden gearbeitet (mit „Heute erfassen“ – im Saldo zählt das nur, wenn die
+Arbeitszeitregeln es vorsehen).
 An rund 25 % der Tage gibt es Arbeit ohne Mac (Meeting,
 Telefonat, Networking, Sonstiges – bei gesperrtem Mac, vor dem Beginn oder nach dem Ende,
 auch Meeting und Telefonat direkt hintereinander als zwei Abschnitte), dazu alle sechs

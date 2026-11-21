@@ -46,6 +46,9 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 - Abwesenheit Sonderurlaub (Kürzel SU): senkt das Soll wie Urlaub, gilt aber immer
   ganztags – im Inspektor, in der Wochenansicht und im Export. Ältere Versionen kennen sie
   nicht und rechnen den Tag mit vollem Soll.
+- Testdaten (`testdata/testdb.sh`): alle sechs Monate ein Tag Sonderurlaub (3, 9, 15 …
+  Monate vor dem laufenden) und am Samstag der Woche davor 4 bis 6 Std. Arbeit, als freier
+  Tag mit „Heute erfassen“.
 
 ### Geändert
 - Arbeit an freien Tagen zählt standardmäßig nicht mehr als Mehrarbeit. Das gilt auch für
