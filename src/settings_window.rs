@@ -13,7 +13,8 @@
 //! oder ändert ihn, gespeichert wird erst mit „Übernehmen“.
 //!
 //! „Bei Anmeldung starten“ steht nicht in der Datenbank, sondern ist das Anmeldeobjekt
-//! von macOS; „Standardwerte“ lässt es unverändert.
+//! von macOS; „Standardwerte“ lässt es unverändert. „Standardwerte“ fragt vorher nach und
+//! nennt, was zurückgesetzt wird und was bleibt.
 //!
 //! „Mitteilungen“ zeigt, ob Tagwerk Mitteilungen zeigen darf (Erinnerung an die
 //! Höchstarbeitszeit); wenn nicht, öffnet ein Knopf Systemeinstellungen › Mitteilungen.
@@ -21,14 +22,14 @@
 //!
 //! Rechts in der Symbolleiste öffnet ein Ordner-Knopf den Datenordner im Finder.
 
-use crate::day::{fmt_clock, secs_of, DAY_END};
+use crate::day::{fmt_clock, parse_clock};
 use crate::glyphs;
 use crate::hotkey;
 use crate::login_item;
 use crate::notify::{self, Permission};
 use crate::rules::{self, fmt_day, IconSet, Settings, WorkRules, IDLE_RANGE, MIN_PAUSE_RANGE, MIN_WORK_RANGE, WEEKLY_RANGE};
 use crate::store;
-use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, TimeZone};
+use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly, Message};
@@ -47,17 +48,6 @@ fn mtm() -> MainThreadMarker {
     MainThreadMarker::new().expect("Hauptthread")
 }
 
-/// Fester Bezugstag für die Uhrzeit-Felder (keine Zeitumstellung).
-fn ref_date() -> NaiveDate {
-    NaiveDate::from_ymd_opt(2001, 1, 1).unwrap()
-}
-
-fn to_nsdate(secs: i64) -> Retained<NSDate> {
-    let t: NaiveDateTime = ref_date().and_hms_opt(0, 0, 0).unwrap() + Duration::seconds(secs.clamp(0, DAY_END - 60));
-    let ts = Local.from_local_datetime(&t).earliest().map(|d| d.timestamp()).unwrap_or(0);
-    NSDate::dateWithTimeIntervalSince1970(ts as f64)
-}
-
 /// Mittag des Tages `day` (für Datumsfelder; Mittag, damit die Zeitzone den Tag nicht verschiebt).
 fn day_to_nsdate(day: NaiveDate) -> Retained<NSDate> {
     let ts = day
@@ -70,11 +60,6 @@ fn day_to_nsdate(day: NaiveDate) -> Retained<NSDate> {
 
 fn nsdate_to_day(d: &NSDate) -> Option<NaiveDate> {
     DateTime::from_timestamp(d.timeIntervalSince1970().floor() as i64, 0).map(|u| u.with_timezone(&Local).date_naive())
-}
-
-fn picker_secs(p: &NSDatePicker) -> Option<i64> {
-    let ts = p.dateValue().timeIntervalSince1970();
-    DateTime::from_timestamp(ts.floor() as i64, 0).map(|u| secs_of(u.with_timezone(&Local).naive_local().time()))
 }
 
 struct State {
@@ -107,6 +92,8 @@ struct State {
     idle: Retained<NSTextField>,
     idle_stepper: Retained<NSStepper>,
     ask: Retained<NSButton>,
+    /// Ab wann und wann nachgefragt wird – nach den Regeln von heute (siehe [`ask_note`]).
+    ask_note: Retained<NSTextField>,
     /// Automatische Erfassung nur an Arbeitstagen zählen.
     free_days: Retained<NSButton>,
     notify_limit: Retained<NSButton>,
@@ -130,14 +117,16 @@ struct Sheet {
     begin: Retained<NSTextField>,
     /// Was der Stand bewirkt (bis wann er gilt, ob er rückwirkend ändert …).
     hint: Retained<NSTextField>,
-    frame_from: Retained<NSDatePicker>,
-    frame_to: Retained<NSDatePicker>,
+    /// Arbeitszeitrahmen als Uhrzeiten zum Eintippen – das Ende darf 24:00 sein (siehe
+    /// [`parse_frame`]).
+    frame_from: Retained<NSTextField>,
+    frame_to: Retained<NSTextField>,
     weekly: Retained<NSTextField>,
     weekly_stepper: Retained<NSStepper>,
     /// Arbeitstage Montag bis Freitag (Tag der Checkbox = Bit in `WorkRules::workdays`).
     workdays: Vec<Retained<NSButton>>,
     daily_note: Retained<NSTextField>,
-    /// Arbeit an freien Tagen als Mehrarbeit zählen (`WorkRules::free_days_count`).
+    /// Arbeit an freien Tagen in Saldo und Zeitkonto einrechnen (`WorkRules::free_days_count`).
     free_days: Retained<NSButton>,
     pause: Retained<NSTextField>,
     pause_stepper: Retained<NSStepper>,
@@ -213,6 +202,9 @@ define_class!(
         #[unsafe(method(windowDidBecomeKey:))]
         fn window_did_become_key(&self, _n: &NSNotification) {
             refresh_permission();
+            // Über Mitternacht offen: Die Nachfrage richtet sich nach den Regeln des neuen Tages.
+            // (`try_with_state`: `show` macht das Fenster zum Hauptfenster, während `STATE` geliehen ist.)
+            try_with_state(|s| s.ask_note.setStringValue(&ns(&ask_note(&s.settings, today()))));
         }
     }
 
@@ -295,17 +287,16 @@ define_class!(
         fn sheet_frame_changed(&self, _sender: Option<&AnyObject>) {
             with_state(|s| {
                 let sh = &mut s.sheet;
-                let (Some(from), Some(to)) = (picker_secs(&sh.frame_from), picker_secs(&sh.frame_to)) else {
-                    return;
-                };
-                if to <= from {
-                    show_sheet_error(sh, "Das Ende des Arbeitszeitrahmens muss nach seinem Beginn liegen.");
-                    return;
+                // Bei einem Fehler bleibt die Eingabe stehen, damit sie sich korrigieren lässt.
+                match parse_frame(&sh.frame_from.stringValue().to_string(), &sh.frame_to.stringValue().to_string()) {
+                    Ok((from, to)) => {
+                        sh.draft.frame_from = from;
+                        sh.draft.frame_to = to;
+                        sh.error.setHidden(true);
+                        s.fill_sheet();
+                    }
+                    Err(e) => show_sheet_error(sh, e),
                 }
-                sh.draft.frame_from = from;
-                sh.draft.frame_to = to;
-                sh.error.setHidden(true);
-                s.fill_sheet();
             });
         }
 
@@ -360,7 +351,7 @@ define_class!(
             });
         }
 
-        /// „Arbeit an freien Tagen als Mehrarbeit zählen“ ein- oder ausgeschaltet.
+        /// „Arbeit an freien Tagen in Saldo und Zeitkonto einrechnen“ ein- oder ausgeschaltet.
         #[unsafe(method(sheetFreeDaysChanged:))]
         fn sheet_free_days_changed(&self, sender: Option<&NSButton>) {
             let Some(sender) = sender else { return };
@@ -534,19 +525,10 @@ define_class!(
             notify::open_settings();
         }
 
+        /// „Standardwerte“: erst nachfragen (siehe [`confirm_reset`]).
         #[unsafe(method(resetDefaults:))]
         fn reset_defaults(&self, _sender: Option<&AnyObject>) {
-            // Die Arbeitszeitregeln gelten ab heute wieder wie zu Beginn; frühere Tage behalten
-            // ihre Stände, geplante entfallen.
-            let today = today();
-            with_state(|s| {
-                let mut fresh = Settings { work: s.settings.work.clone(), ..Settings::default() };
-                fresh.work.retain(|p| p.from.is_none_or(|f| f <= today));
-                fresh.set_rules(Some(today), WorkRules::DEFAULT, None);
-                s.settings = fresh;
-                s.error.setHidden(true);
-            });
-            save();
+            confirm_reset();
         }
     }
 );
@@ -585,6 +567,7 @@ impl State {
         self.idle.setStringValue(&ns(&idle_min.to_string()));
         self.idle_stepper.setIntegerValue(idle_min as isize);
         self.ask.setState(state(s.ask_after_lock));
+        self.ask_note.setStringValue(&ns(&ask_note(s, today)));
         self.free_days.setState(state(s.auto_workdays_only));
         self.notify_limit.setState(state(s.notify_limit));
         self.notify_break.setState(state(s.notify_break));
@@ -619,17 +602,13 @@ impl State {
         let first = sh.editing == Some(None);
         sh.valid_from.setHidden(first);
         sh.begin.setHidden(!first);
-        sh.frame_from.setDateValue(&to_nsdate(r.frame_from));
-        sh.frame_to.setDateValue(&to_nsdate(r.frame_to));
+        sh.frame_from.setStringValue(&ns(&fmt_clock(r.frame_from)));
+        sh.frame_to.setStringValue(&ns(&fmt_clock(r.frame_to)));
         sh.weekly.setStringValue(&ns(&rules::fmt_hours(r.weekly_target)));
         sh.weekly_stepper.setDoubleValue(r.weekly_target as f64 / 3600.0);
         sh.pause.setStringValue(&ns(&(r.min_pause / 60).to_string()));
         sh.pause_stepper.setIntegerValue((r.min_pause / 60) as isize);
-        sh.daily_note.setStringValue(&ns(&format!(
-            "{}  ·  {} pro Arbeitstag",
-            r.week_text(),
-            store::fmt_hm(r.daily_target_workday())
-        )));
+        sh.daily_note.setStringValue(&ns(&format!("{}  ·  {} pro Arbeitstag", r.week_text(), r.daily_target_text())));
         for (bit, check) in sh.workdays.iter().enumerate() {
             check.setState(if r.workdays & (1 << bit) != 0 { NSControlStateValueOn } else { NSControlStateValueOff });
         }
@@ -734,14 +713,14 @@ fn refresh_permission() {
 
 // ---------- Arbeitszeitregeln ----------
 
-/// `39 Std./Woche (Mo–Fr, 7:48 h pro Arbeitstag)  ·  Rahmen 07:00–22:00 Uhr  ·  Pausen ab 15 Min.`
+/// `39 Std./Woche (Mo–Fr, 7:48 Std. pro Arbeitstag)  ·  Rahmen 07:00–22:00 Uhr  ·  Pausen ab 15 Min.`
 fn rules_line(r: &WorkRules) -> String {
-    let free = if r.free_days_count { "  ·  Arbeit an freien Tagen zählt" } else { "" };
+    let free = if r.free_days_count { "  ·  Arbeit an freien Tagen im Saldo" } else { "" };
     format!(
         "{} Std./Woche ({}, {} pro Arbeitstag)  ·  Rahmen {}  ·  Pausen ab {} Min.{free}",
         rules::fmt_hours(r.weekly_target),
         r.workdays_text(),
-        store::fmt_hm(r.daily_target_workday()),
+        r.daily_target_text(),
         r.frame_text(),
         r.min_pause / 60
     )
@@ -750,7 +729,7 @@ fn rules_line(r: &WorkRules) -> String {
 /// Über der Liste: welcher Stand heute gilt und welcher als nächster geplant ist – mit dem
 /// Tagessoll, das die Liste nicht zeigt (höchstens zwei Zeilen, siehe `build`).
 fn rules_now_text(s: &Settings, today: NaiveDate) -> String {
-    let per_day = |r: &WorkRules| format!("{} pro Arbeitstag ({})", store::fmt_hm(r.daily_target_workday()), r.week_text());
+    let per_day = |r: &WorkRules| format!("{} pro Arbeitstag ({})", r.daily_target_text(), r.week_text());
     let current = s.work.iter().rev().find(|p| p.from.is_none_or(|f| f <= today)).copied().unwrap_or(s.work[0]);
     let since = current.from.map_or_else(|| "seit Beginn".to_string(), |f| format!("ab {}", fmt_day(f)));
     let mut text = format!("Heute gilt der Stand {since}: {}.", per_day(&current.rules));
@@ -784,9 +763,9 @@ fn rule_rows(s: &Settings, today: NaiveDate) -> Vec<RuleRow> {
         .collect()
 }
 
-/// Spalte „Freie Tage“: ob Arbeit dort als Mehrarbeit zählt.
+/// Spalte „Freie Tage“: ob Arbeit dort in Saldo und Zeitkonto eingeht.
 fn free_days_cell(r: &WorkRules) -> &'static str {
-    if r.free_days_count { "zählen" } else { "–" }
+    if r.free_days_count { "im Saldo" } else { "–" }
 }
 
 /// Stand der Zeile `row` (`None`: keine Zeile; `Some(None)`: der erste Stand).
@@ -825,8 +804,63 @@ fn rule_cell(column: Option<&str>, row: NSInteger) -> Option<Retained<NSView>> {
     })
 }
 
-/// Hinweis im Blatt: bis wann der Stand gilt und ob er rückwirkend ändert (dann `true`:
-/// orange). `editing`/`from` wie in [`Sheet`], `draft` die Regeln im Blatt.
+/// Ein Zeitraum von Tagen: erster und letzter Tag (`None`: seit jeher bzw. ohne Ende).
+type DaySpan = (Option<NaiveDate>, Option<NaiveDate>);
+
+/// Die Tage, an denen `after` andere Arbeitszeitregeln liefert als `before` – zusammenhängende
+/// Tage als ein Zeitraum, nach Datum sortiert. Die Regeln wechseln nur an den Daten der Stände;
+/// dazwischen genügt also ein Tag je Abschnitt zum Vergleich.
+fn changed_days(before: &Settings, after: &Settings) -> Vec<DaySpan> {
+    let mut bounds: Vec<NaiveDate> = before.work.iter().chain(&after.work).filter_map(|p| p.from).collect();
+    bounds.sort();
+    bounds.dedup();
+    let starts = std::iter::once(None).chain(bounds.iter().copied().map(Some));
+    let mut out: Vec<DaySpan> = Vec::new();
+    let mut open = false;
+    for (start, end) in starts.zip(bounds.iter().copied().map(Some).chain(std::iter::once(None))) {
+        // Der erste Abschnitt reicht bis vor den ersten Stand mit Datum.
+        let probe = start.unwrap_or(NaiveDate::MIN);
+        if before.rules(probe) == after.rules(probe) {
+            open = false;
+            continue;
+        }
+        let last = end.map(|e| e.pred_opt().unwrap_or(e));
+        match out.last_mut() {
+            Some(span) if open => span.1 = last,
+            _ => out.push((start, last)),
+        }
+        open = true;
+    }
+    out
+}
+
+/// `ab dem 30.11.2026`, `vom 02.11.2026 bis 29.11.2026 und ab dem 07.12.2026` …
+fn fmt_spans(spans: &[DaySpan]) -> String {
+    let texts: Vec<String> = spans
+        .iter()
+        .map(|span| match *span {
+            (None, None) => "aller Tage".to_string(),
+            (None, Some(e)) => format!("bis zum {}", fmt_day(e)),
+            (Some(a), None) => format!("ab dem {}", fmt_day(a)),
+            (Some(a), Some(e)) if a == e => format!("am {}", fmt_day(a)),
+            (Some(a), Some(e)) => format!("vom {} bis {}", fmt_day(a), fmt_day(e)),
+        })
+        .collect();
+    match texts.split_last() {
+        Some((last, [])) => last.clone(),
+        Some((last, rest)) => format!("{} und {last}", rest.join(", ")),
+        None => String::new(),
+    }
+}
+
+/// Hinweis im Blatt: bis wann der Stand gilt, für welche Tage sich die Regeln ändern und ob
+/// das rückwirkend ist (dann `true`: orange). `editing`/`from` wie in [`Sheet`], `draft` die
+/// Regeln im Blatt.
+///
+/// Verglichen werden die Einstellungen vor und nach „Übernehmen“ (dasselbe
+/// [`Settings::set_rules`] wie dort) – so stimmt der Hinweis auch, wenn ein Stand verschoben
+/// wird (dann ändern sich die Tage zwischen altem und neuem Datum) oder dem davor gleicht und
+/// entfällt.
 fn sheet_hint(
     s: &Settings,
     editing: Option<Option<NaiveDate>>,
@@ -834,39 +868,64 @@ fn sheet_hint(
     draft: &WorkRules,
     today: NaiveDate,
 ) -> (String, bool) {
-    // Die anderen Stände – ohne den, der gerade bearbeitet wird.
-    let others: Vec<_> = s.work.iter().filter(|p| editing != Some(p.from)).collect();
-    let next = others.iter().filter_map(|p| p.from).find(|f| from.is_none_or(|from| *f > from));
-    let Some(from) = from else {
-        return match next {
-            Some(n) => (
-                format!(
-                    "Gilt für alle Tage vor dem {}. Saldo und Aufzeichnungen dieser Tage ändern sich.",
-                    fmt_day(n)
-                ),
-                true,
-            ),
-            None => ("Gilt für alle Tage. Saldo und Aufzeichnungen ändern sich auch rückwirkend.".to_string(), true),
-        };
-    };
+    let mut after = s.clone();
+    after.set_rules(from, *draft, editing.flatten());
+    let changed = changed_days(s, &after);
     let mut parts = Vec::new();
-    parts.push(match next {
-        Some(n) => format!("Gilt vom {} bis {}.", fmt_day(from), fmt_day(n.pred_opt().unwrap_or(n))),
-        None => format!("Gilt ab {}.", fmt_day(from)),
-    });
-    let replaced = others.iter().any(|p| p.from == Some(from));
-    if replaced {
-        parts.push(format!("Ersetzt den vorhandenen Stand ab {}.", fmt_day(from)));
+    // Für welche Tage der Stand nach dem Übernehmen gilt – falls es ihn dann noch gibt.
+    let own = after.work.iter().position(|p| p.from == from).map(|i| (from, after.work.get(i + 1).and_then(|n| n.from)));
+    if let Some((start, next)) = own {
+        parts.push(match (start, next) {
+            (None, Some(n)) => format!("Gilt für alle Tage vor dem {}.", fmt_day(n)),
+            (None, None) => "Gilt für alle Tage.".to_string(),
+            (Some(f), Some(n)) => format!("Gilt vom {} bis {}.", fmt_day(f), fmt_day(n.pred_opt().unwrap_or(n))),
+            (Some(f), None) => format!("Gilt ab {}.", fmt_day(f)),
+        });
     }
-    let before = others.iter().rev().find(|p| p.from.is_none_or(|f| f < from)).map(|p| p.rules);
-    if !replaced && before == Some(*draft) {
-        parts.push("Gleicht dem Stand davor – es ändert sich nichts.".to_string());
+    // Ein anderer Stand am selben Tag (nicht der, der gerade bearbeitet wird).
+    let replaced = s.work.iter().any(|p| p.from == from && editing != Some(p.from));
+    if let (true, Some(f)) = (replaced, from) {
+        parts.push(format!("Ersetzt den vorhandenen Stand ab {}.", fmt_day(f)));
     }
-    let past = from < today;
+    if own.is_none() {
+        parts.push(if changed.is_empty() {
+            "Gleicht dem Stand davor – es ändert sich nichts.".to_string()
+        } else {
+            "Gleicht dem Stand davor und entfällt deshalb.".to_string()
+        });
+    }
+    let past = changed.first().is_some_and(|(start, _)| start.is_none_or(|d| d < today));
+    // Die Tage, für die der Stand gilt (bis vor den nächsten).
+    let own_span = own.map(|(start, next)| (start, next.and_then(|n| n.pred_opt())));
     if past {
-        parts.push(format!("Rückwirkend: Saldo und Aufzeichnungen ab dem {} ändern sich.", fmt_day(from)));
+        parts.push(format!("Rückwirkend: Saldo und Aufzeichnungen {} ändern sich.", fmt_spans(&changed)));
+    } else if changed.iter().any(|c| !own_span.is_some_and(|o| within(*c, o))) {
+        // Auch Tage, für die der Stand nicht gilt, z. B. beim Verschieben die Tage dazwischen.
+        parts.push(format!("Andere Regeln als bisher gelten {}.", fmt_spans(&changed)));
     }
     (parts.join(" "), past || replaced)
+}
+
+/// Liegt der Zeitraum `span` ganz in `outer`?
+fn within(span: DaySpan, outer: DaySpan) -> bool {
+    outer.0.is_none_or(|o| span.0.is_some_and(|s| s >= o)) && outer.1.is_none_or(|o| span.1.is_some_and(|e| e <= o))
+}
+
+/// Arbeitszeitrahmen aus den Feldern „von“ und „bis“ in ganzen Minuten; das Ende darf 24:00
+/// sein (Mitternacht am Ende des Tages, [`crate::day::DAY_END`]).
+fn parse_frame(from: &str, to: &str) -> Result<(i64, i64), &'static str> {
+    let (Some(from), Some(to)) = (parse_clock(from), parse_clock(to)) else {
+        return Err("Der Arbeitszeitrahmen braucht Uhrzeiten wie 07:00 oder 24:00.");
+    };
+    let (from, to) = (from / 60 * 60, to / 60 * 60);
+    if to == 0 {
+        return Err("Das Ende des Arbeitszeitrahmens muss nach seinem Beginn liegen – Mitternacht als Ende \
+                    ist 24:00.");
+    }
+    if to <= from {
+        return Err("Das Ende des Arbeitszeitrahmens muss nach seinem Beginn liegen.");
+    }
+    Ok((from, to))
 }
 
 fn show_sheet_error(sheet: &Sheet, text: &str) {
@@ -946,6 +1005,105 @@ fn confirm_delete_rules(from: NaiveDate) {
     alert.beginSheetModalForWindow_completionHandler(&window, Some(&handler));
 }
 
+/// Die Einstellungen nach „Standardwerte“: alles wie zu Beginn, nur die Arbeitszeitregeln
+/// gelten erst ab `today` wieder wie zu Beginn – frühere Tage behalten ihre Stände, geplante
+/// entfallen. „Bei Anmeldung starten“ steht nicht in den Einstellungen und bleibt.
+fn with_defaults(s: &Settings, today: NaiveDate) -> Settings {
+    let mut fresh = Settings { work: s.work.clone(), ..Settings::default() };
+    fresh.work.retain(|p| p.from.is_none_or(|f| f <= today));
+    fresh.set_rules(Some(today), WorkRules::DEFAULT, None);
+    fresh
+}
+
+/// Text der Nachfrage vor „Standardwerte“: was zurückgesetzt wird (siehe [`with_defaults`])
+/// und was bleibt.
+fn reset_info(s: &Settings, today: NaiveDate) -> String {
+    let d = Settings::default();
+    let mut parts = vec![
+        "Zurückgesetzt werden Symbolsatz und Arbeitszeit in der Menüleiste, Kurzbefehle, Zeitkonto \
+         samt Übertrag, Arbeit ohne Mac, Inaktivität, Nachfrage nach langer Sperre, freie Tage \
+         (Erfassung) und Erinnerungen."
+            .to_string(),
+    ];
+    if s.account_from != d.account_from || s.account_carry != d.account_carry {
+        let mut was = Vec::new();
+        if let Some(f) = s.account_from {
+            was.push(format!("ab {}", fmt_day(f)));
+        }
+        if s.account_carry != 0 {
+            was.push(format!("Übertrag {}", rules::fmt_signed_hm(s.account_carry)));
+        }
+        let was = was.join(", ");
+        parts.push(format!("Das Zeitkonto zählt danach alle erfassten Tage ohne Übertrag (bisher {was})."));
+    }
+    if *s.rules(today) == WorkRules::DEFAULT {
+        parts.push("Die Arbeitszeitregeln von heute sind schon die Standardwerte.".to_string());
+    } else {
+        parts.push(format!(
+            "Ab heute ({}) gelten wieder die Standardregeln: {}.",
+            fmt_day(today),
+            rules_line(&WorkRules::DEFAULT)
+        ));
+    }
+    let planned: Vec<String> = s.work.iter().filter_map(|p| p.from.filter(|f| *f > today)).map(fmt_day).collect();
+    match planned.split_last() {
+        None => {}
+        Some((only, [])) => parts.push(format!("Der geplante Stand ab {only} entfällt.")),
+        Some((last, rest)) => parts.push(format!("Die geplanten Stände ab {} und {last} entfallen.", rest.join(", "))),
+    }
+    parts.push(
+        "Es bleiben „Bei Anmeldung starten“, die Arbeitszeitregeln bis gestern und alle Aufzeichnungen."
+            .to_string(),
+    );
+    parts.join(" ")
+}
+
+/// Nachfrage vor „Standardwerte“; erst „Zurücksetzen“ ändert etwas.
+fn confirm_reset() {
+    let today = today();
+    let Some((window, info)) = with_state(|s| (s.window.clone(), reset_info(&s.settings, today))) else {
+        return;
+    };
+    if window.attachedSheet().is_some() {
+        return;
+    }
+    let alert = NSAlert::new(mtm());
+    alert.setAlertStyle(NSAlertStyle::Warning);
+    alert.setMessageText(&ns("Alle Einstellungen auf Standardwerte zurücksetzen?"));
+    alert.setInformativeText(&ns(&info));
+    let reset = alert.addButtonWithTitle(&ns("Zurücksetzen"));
+    reset.setHasDestructiveAction(true);
+    // Return bestätigt nicht versehentlich: Standard ist „Abbrechen“.
+    reset.setKeyEquivalent(&ns(""));
+    let cancel = alert.addButtonWithTitle(&ns("Abbrechen"));
+    cancel.setKeyEquivalent(&ns("\r"));
+    let handler = RcBlock::new(move |response: NSModalResponse| {
+        if response != NSAlertFirstButtonReturn {
+            return;
+        }
+        with_state(|s| {
+            s.settings = with_defaults(&s.settings, today);
+            s.error.setHidden(true);
+        });
+        save();
+    });
+    alert.beginSheetModalForWindow_completionHandler(&window, Some(&handler));
+}
+
+/// Erklärung zu „Beim Entsperren nach langer Sperre nachfragen“ nach den Regeln von `today`:
+/// Die Grenze ist [`Settings::ask_after`] (30 Min., nie kürzer als die Mindestpause), und
+/// gefragt wird nur, wenn die Sperre im Arbeitszeitrahmen begann und am selben Tag endet.
+fn ask_note(s: &Settings, today: NaiveDate) -> String {
+    let after = s.ask_after(today);
+    let why = if after > rules::ASK_AFTER_LOCK { " (so lang wie die Mindestpause)" } else { "" };
+    format!(
+        "Ab {} Min. Sperre{why} fragt eine Mitteilung, ob es Arbeit ohne Mac oder schon Feierabend \
+         war – sofern die Sperre im Arbeitszeitrahmen begonnen hat und am selben Tag endet. Ohne \
+         Antwort bleibt es eine Pause. Braucht Mitteilungen.",
+        after / 60
+    )
+}
+
 /// Speichern, Felder angleichen und die App benachrichtigen.
 fn save() {
     let notify = with_state(|s| {
@@ -981,20 +1139,6 @@ fn caption(text: &str) -> Retained<NSTextField> {
     l.setSelectable(false);
     l.setPreferredMaxLayoutWidth(330.0);
     l
-}
-
-fn time_picker(target: &Controller, action: Sel) -> Retained<NSDatePicker> {
-    let p = NSDatePicker::new(mtm());
-    p.setDatePickerStyle(NSDatePickerStyle::TextFieldAndStepper);
-    p.setDatePickerElements(NSDatePickerElementFlags::HourMinute);
-    p.setLocale(Some(&NSLocale::localeWithLocaleIdentifier(&ns("de_DE"))));
-    p.setBezeled(true);
-    p.setDrawsBackground(true);
-    unsafe {
-        p.setTarget(Some(target));
-        p.setAction(Some(action));
-    }
-    p
 }
 
 fn number_field(target: &Controller, action: Sel) -> Retained<NSTextField> {
@@ -1158,6 +1302,9 @@ fn rules_table(target: &Controller) -> (Retained<NSScrollView>, Retained<NSTable
         col.setTitle(&ns(title));
         col.setWidth(width);
         col.setResizingMask(NSTableColumnResizingOptions::empty());
+        if id == "free" {
+            col.setHeaderToolTip(Some(&ns("„im Saldo“: Arbeit an freien Tagen geht in Saldo und Zeitkonto ein")));
+        }
         table.addTableColumn(&col);
     }
     unsafe {
@@ -1194,8 +1341,13 @@ fn build_sheet(target: &Controller) -> Sheet {
     }
     let begin = label("Beginn");
     let hint = caption("");
-    let frame_from = time_picker(target, sel!(sheetFrameChanged:));
-    let frame_to = time_picker(target, sel!(sheetFrameChanged:));
+    // Textfelder statt Uhrzeit-Feldern: Diese reichen nur bis 23:59, das Ende darf aber 24:00 sein.
+    let frame_from = number_field(target, sel!(sheetFrameChanged:));
+    frame_from.setPlaceholderString(Some(&ns("07:00")));
+    frame_from.setToolTip(Some(&ns("Beginn des Arbeitszeitrahmens, z. B. 07:00")));
+    let frame_to = number_field(target, sel!(sheetFrameChanged:));
+    frame_to.setPlaceholderString(Some(&ns("22:00")));
+    frame_to.setToolTip(Some(&ns("Ende des Arbeitszeitrahmens, z. B. 22:00 – bis Mitternacht: 24:00")));
     let weekly = number_field(target, sel!(sheetWeeklyChanged:));
     let weekly_stepper = stepper(
         target,
@@ -1218,12 +1370,17 @@ fn build_sheet(target: &Controller) -> Sheet {
     let daily_note = caption("");
     let free_days = unsafe {
         NSButton::checkboxWithTitle_target_action(
-            &ns("Arbeit an freien Tagen als Mehrarbeit zählen"),
+            &ns("Arbeit an freien Tagen in Saldo und Zeitkonto einrechnen"),
             Some(target),
             Some(sel!(sheetFreeDaysChanged:)),
             mtm,
         )
     };
+    free_days.setToolTip(Some(&ns(
+        "Mit Haken geht Arbeit am Wochenende und an abgewählten Arbeitstagen als Mehrarbeit in Saldo und \
+         Zeitkonto ein. Davon unabhängig: „Heute erfassen“ im Menü legt fest, ob die an einem freien Tag \
+         erfasste Zeit überhaupt als Arbeitszeit zählt.",
+    )));
     let pause = number_field(target, sel!(sheetPauseChanged:));
     let pause_stepper = stepper(
         target,
@@ -1269,13 +1426,18 @@ fn build_sheet(target: &Controller) -> Sheet {
             None,
             &caption(
                 "Am Wochenende und an den übrigen freien Tagen gibt es kein Soll. Ohne Haken wird \
-                 Arbeit dort angezeigt, wirkt sich aber nicht auf Saldo und Zeitkonto aus.",
+                 Arbeit dort angezeigt, wirkt sich aber nicht auf Saldo und Zeitkonto aus. Ob die \
+                 automatisch erfasste Zeit dort überhaupt als Arbeitszeit zählt, legt „Heute erfassen“ \
+                 im Menü fest.",
             ),
         ),
         row(Some("Arbeitszeitrahmen:"), &frame_row),
         row(
             None,
-            &caption("Außerhalb dieses Zeitraums wird weder Arbeitszeit noch eine Pause gezählt."),
+            &caption(
+                "Außerhalb dieses Zeitraums wird weder Arbeitszeit noch eine Pause gezählt. Bis \
+                 Mitternacht: 24:00.",
+            ),
         ),
         row(Some("Mindestpause:"), &pause_row),
         row(
@@ -1395,6 +1557,11 @@ fn build(on_change: fn()) -> State {
     let idle_stepper =
         stepper(target, sel!(idleStepped:), (IDLE_RANGE.0 / 60) as f64, (IDLE_RANGE.1 / 60) as f64, 1.0);
     let ask = checkbox("Beim Entsperren nach langer Sperre nachfragen", sel!(switchChanged:));
+    // Text setzt `State::fill`; zum Aufbau der längste mögliche (höchste Mindestpause), damit der
+    // Reiter für jeden Platz hat.
+    let mut longest = Settings::default();
+    longest.set_rules(None, WorkRules { min_pause: MIN_PAUSE_RANGE.1, ..WorkRules::DEFAULT }, None);
+    let ask_note = caption(&ask_note(&longest, today()));
     let free_days = checkbox("Automatische Erfassung nur an Arbeitstagen zählen", sel!(switchChanged:));
     let notify_limit = checkbox("Höchstarbeitszeit (bei 9:45 und 10 Std. Arbeit)", sel!(switchChanged:));
     let notify_break = checkbox("Pause (bei 5:45 und 6 Std. Arbeit am Stück)", sel!(switchChanged:));
@@ -1498,8 +1665,8 @@ fn build(on_change: fn()) -> State {
                     &wide_caption(
                         "Jeder Stand gilt ab seinem Datum bis zum nächsten – eine Änderung rechnet frühere \
                          Tage nicht neu. Die Regelarbeitszeit verteilt sich gleichmäßig auf die \
-                         Arbeitstage; an den übrigen Tagen gibt es kein Soll, und Arbeit dort zählt nur \
-                         als Mehrarbeit, wenn der Stand es vorsieht. Außerhalb des Rahmens wird weder \
+                         Arbeitstage; an den übrigen Tagen gibt es kein Soll, und Arbeit dort geht nur in \
+                         Saldo und Zeitkonto ein, wenn der Stand es vorsieht. Außerhalb des Rahmens wird weder \
                          Arbeitszeit noch eine Pause gezählt.",
                     ),
                 ),
@@ -1537,22 +1704,16 @@ fn build(on_change: fn()) -> State {
                     ),
                 ),
                 row(Some("Lange Sperre:"), &ask),
-                row(
-                    None,
-                    &caption(&format!(
-                        "Ab {} Min. Sperre fragt eine Mitteilung, ob es Arbeit ohne Mac oder schon \
-                         Feierabend war. Ohne Antwort bleibt es eine Pause. Braucht Mitteilungen.",
-                        rules::ASK_AFTER_LOCK / 60
-                    )),
-                ),
+                row(None, &ask_note),
                 row(Some("Freie Tage:"), &free_days),
                 row(
                     None,
                     &caption(
-                        "Am Wochenende und an den übrigen freien Tagen wird erfasst, aber erst gezählt, \
-                         wenn im Menü „Heute erfassen“ gewählt ist – nachträglich auch im Fenster \
-                         „Aufzeichnungen“. Einträge von Hand zählen immer. Ob die Arbeit dort auch in Saldo \
-                         und Zeitkonto eingeht, legen die Arbeitszeitregeln fest.",
+                        "Am Wochenende und an den übrigen freien Tagen wird erfasst, aber erst als \
+                         Arbeitszeit gezählt, wenn im Menü „Heute erfassen“ gewählt ist – nachträglich \
+                         auch im Fenster „Aufzeichnungen“. Einträge von Hand zählen immer. Ob diese \
+                         Arbeitszeit auch in Saldo und Zeitkonto eingeht, legt der Stand der \
+                         Arbeitszeitregeln fest („in Saldo und Zeitkonto einrechnen“).",
                     ),
                 ),
             ],
@@ -1697,6 +1858,7 @@ fn build(on_change: fn()) -> State {
         idle,
         idle_stepper,
         ask,
+        ask_note,
         free_days,
         notify_limit,
         notify_break,
@@ -1810,6 +1972,7 @@ pub fn screenshot(path: &std::path::Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::day::DAY_END;
 
     fn date(d: u32) -> NaiveDate {
         NaiveDate::from_ymd_opt(2026, 11, d).unwrap()
@@ -1825,24 +1988,176 @@ mod tests {
         assert_eq!(sheet_hint(&s, None, Some(today), &part, today), ("Gilt ab 21.11.2026.".to_string(), false));
         // Ohne Änderung
         assert_eq!(
-            sheet_hint(&s, None, Some(today), &d, today).0,
-            "Gilt ab 21.11.2026. Gleicht dem Stand davor – es ändert sich nichts."
+            sheet_hint(&s, None, Some(today), &d, today),
+            ("Gleicht dem Stand davor – es ändert sich nichts.".to_string(), false)
         );
         // Rückwirkend: orange
         let (text, warn) = sheet_hint(&s, None, Some(date(2)), &part, today);
         assert!(warn && text.ends_with("Rückwirkend: Saldo und Aufzeichnungen ab dem 02.11.2026 ändern sich."), "{text}");
         // Mit einem späteren Stand gilt der neue nur bis davor; derselbe Tag ersetzt ihn.
         s.set_rules(Some(date(30)), part, None);
-        assert_eq!(sheet_hint(&s, None, Some(date(23)), &part, today).0, "Gilt vom 23.11.2026 bis 29.11.2026.");
+        let other = WorkRules { weekly_target: 35 * 3600, ..d };
+        assert_eq!(sheet_hint(&s, None, Some(date(23)), &other, today).0, "Gilt vom 23.11.2026 bis 29.11.2026.");
         let (text, warn) = sheet_hint(&s, None, Some(date(30)), &d, today);
-        assert!(warn && text.contains("Ersetzt den vorhandenen Stand ab 30.11.2026."), "{text}");
+        assert!(warn, "{text}");
+        assert_eq!(
+            text,
+            "Ersetzt den vorhandenen Stand ab 30.11.2026. Gleicht dem Stand davor und entfällt deshalb. \
+             Andere Regeln als bisher gelten ab dem 30.11.2026."
+        );
         // Den Stand selbst bearbeiten ersetzt nichts.
         assert_eq!(sheet_hint(&s, Some(Some(date(30))), Some(date(30)), &part, today).0, "Gilt ab 30.11.2026.");
-        // Der erste Stand gilt bis zum nächsten.
+        // Der erste Stand gilt bis zum nächsten; unverändert ändert er nichts, geändert rückwirkend.
         assert_eq!(
             sheet_hint(&s, Some(None), None, &d, today),
-            ("Gilt für alle Tage vor dem 30.11.2026. Saldo und Aufzeichnungen dieser Tage ändern sich.".to_string(), true)
+            ("Gilt für alle Tage vor dem 30.11.2026.".to_string(), false)
         );
+        let short = WorkRules { min_pause: 20 * 60, ..d };
+        assert_eq!(
+            sheet_hint(&s, Some(None), None, &short, today),
+            (
+                "Gilt für alle Tage vor dem 30.11.2026. Rückwirkend: Saldo und Aufzeichnungen bis zum \
+                 29.11.2026 ändern sich."
+                    .to_string(),
+                true
+            )
+        );
+    }
+
+    #[test]
+    fn sheet_hint_compares_before_and_after() {
+        let today = date(21);
+        let d = WorkRules::DEFAULT;
+        let part = WorkRules { weekly_target: 32 * 3600, ..d };
+        let mut s = Settings::default();
+        s.set_rules(Some(date(2)), part, None);
+        // Vergangenen Stand in die Zukunft verschieben: rückwirkend für die Tage dazwischen.
+        let (text, warn) = sheet_hint(&s, Some(Some(date(2))), Some(date(25)), &part, today);
+        assert_eq!(
+            text,
+            "Gilt ab 25.11.2026. Rückwirkend: Saldo und Aufzeichnungen vom 02.11.2026 bis 24.11.2026 ändern sich."
+        );
+        assert!(warn);
+        // Zurückverschieben in die Vergangenheit: die Tage davor.
+        assert_eq!(
+            sheet_hint(&s, Some(Some(date(2))), Some(date(1)), &part, today).0,
+            "Gilt ab 01.11.2026. Rückwirkend: Saldo und Aufzeichnungen am 01.11.2026 ändern sich."
+        );
+        // Ein geplanter Stand wird später: Nur künftige Tage ändern sich – keine Warnung, aber
+        // die Tage dazwischen werden genannt.
+        let mut s = Settings::default();
+        s.set_rules(Some(date(25)), part, None);
+        assert_eq!(
+            sheet_hint(&s, Some(Some(date(25))), Some(date(28)), &part, today),
+            ("Gilt ab 28.11.2026. Andere Regeln als bisher gelten vom 25.11.2026 bis 27.11.2026.".to_string(), false)
+        );
+        // Ein vergangener Stand gleicht nach der Änderung dem davor und entfällt: rückwirkend.
+        let mut s = Settings::default();
+        s.set_rules(Some(date(2)), part, None);
+        assert_eq!(
+            sheet_hint(&s, Some(Some(date(2))), Some(date(2)), &d, today),
+            (
+                "Gleicht dem Stand davor und entfällt deshalb. Rückwirkend: Saldo und Aufzeichnungen ab dem \
+                 02.11.2026 ändern sich."
+                    .to_string(),
+                true
+            )
+        );
+        // Gleicht der Entwurf dem Stand danach, entfällt dieser: Der Stand gilt dann ohne Ende,
+        // geändert sind aber nur die Tage bis davor (kein Zusatz, sie gehören zum Stand).
+        s.set_rules(Some(date(30)), d, None);
+        assert_eq!(sheet_hint(&s, None, Some(today), &d, today), ("Gilt ab 21.11.2026.".to_string(), false));
+        let mut s = Settings::default();
+        s.set_rules(Some(date(30)), part, None);
+        assert_eq!(sheet_hint(&s, None, Some(date(23)), &part, today).0, "Gilt ab 23.11.2026.");
+    }
+
+    #[test]
+    fn changed_days_merge_and_split() {
+        let d = WorkRules::DEFAULT;
+        let part = WorkRules { weekly_target: 32 * 3600, ..d };
+        let short = WorkRules { min_pause: 20 * 60, ..d };
+        let mut before = Settings::default();
+        before.set_rules(Some(date(2)), part, None);
+        before.set_rules(Some(date(10)), short, None);
+        // Stand vom 02.11. auf den 20.11. verschieben: 02.–09.11. wieder Standard, ab 20.11. „part“.
+        let mut after = before.clone();
+        after.set_rules(Some(date(20)), part, Some(date(2)));
+        assert_eq!(changed_days(&before, &after), vec![(Some(date(2)), Some(date(9))), (Some(date(20)), None)]);
+        assert_eq!(
+            fmt_spans(&changed_days(&before, &after)),
+            "vom 02.11.2026 bis 09.11.2026 und ab dem 20.11.2026"
+        );
+        assert!(changed_days(&before, &before).is_empty());
+        let mut all = Settings::default();
+        all.set_rules(None, part, None);
+        assert_eq!(changed_days(&Settings::default(), &all), vec![(None, None)]);
+        assert_eq!(fmt_spans(&[(None, None)]), "aller Tage");
+    }
+
+    #[test]
+    fn frame_end_may_be_midnight() {
+        assert_eq!(parse_frame("07:00", "24:00"), Ok((7 * 3600, DAY_END)));
+        assert_eq!(parse_frame("7.30", "22:00 Uhr"), Ok((7 * 3600 + 1800, 22 * 3600)));
+        // Sekunden fallen weg.
+        assert_eq!(parse_frame("07:00:30", "22:00"), Ok((7 * 3600, 22 * 3600)));
+        assert!(parse_frame("07:00", "00:00").unwrap_err().contains("24:00"));
+        assert!(parse_frame("22:00", "07:00").is_err());
+        assert!(parse_frame("24:00", "24:00").is_err());
+        assert!(parse_frame("7", "22:00").is_err());
+        assert!(parse_frame("07:00", "24:01").is_err());
+        // 24:00 wird wieder als 24:00 gezeigt (Rahmen bis Mitternacht übersteht das Speichern).
+        let r = WorkRules { frame_to: DAY_END, ..WorkRules::DEFAULT }.sanitized();
+        assert_eq!((r.frame_to, fmt_clock(r.frame_to)), (DAY_END, "24:00".to_string()));
+    }
+
+    #[test]
+    fn ask_note_follows_todays_rules() {
+        let today = date(21);
+        let mut s = Settings::default();
+        assert!(ask_note(&s, today).starts_with("Ab 30 Min. Sperre fragt"), "{}", ask_note(&s, today));
+        s.set_rules(Some(today), WorkRules { min_pause: 45 * 60, ..WorkRules::DEFAULT }, None);
+        assert!(ask_note(&s, today).starts_with("Ab 45 Min. Sperre (so lang wie die Mindestpause) fragt"));
+        assert!(ask_note(&s, date(20)).starts_with("Ab 30 Min. Sperre fragt"));
+        assert!(ask_note(&s, today).contains("im Arbeitszeitrahmen begonnen hat und am selben Tag endet"));
+    }
+
+    #[test]
+    fn reset_names_what_changes_and_what_stays() {
+        let today = date(21);
+        let part = WorkRules { weekly_target: 32 * 3600, ..WorkRules::DEFAULT };
+        let mut s = Settings { account_carry: 12 * 3600 + 1800, account_from: Some(date(1)), ..Settings::default() };
+        s.set_rules(Some(date(2)), part, None);
+        s.set_rules(Some(date(30)), WorkRules { min_pause: 20 * 60, ..part }, None);
+        let info = reset_info(&s, today);
+        for part in [
+            "Das Zeitkonto zählt danach alle erfassten Tage ohne Übertrag (bisher ab 01.11.2026, Übertrag +12:30).",
+            "Ab heute (21.11.2026) gelten wieder die Standardregeln: 39 Std./Woche (Mo–Fr, 7:48 Std. pro Arbeitstag)",
+            "Der geplante Stand ab 30.11.2026 entfällt.",
+        ] {
+            assert!(info.contains(part), "{info}");
+        }
+        assert!(
+            info.ends_with("Es bleiben „Bei Anmeldung starten“, die Arbeitszeitregeln bis gestern und alle Aufzeichnungen."),
+            "{info}"
+        );
+        // Was der Text sagt, tut `with_defaults`.
+        let fresh = with_defaults(&s, today);
+        assert_eq!((fresh.account_from, fresh.account_carry), (None, 0));
+        assert_eq!(*fresh.rules(date(20)), part);
+        assert_eq!(*fresh.rules(today), WorkRules::DEFAULT);
+        assert_eq!(*fresh.rules(date(30)), WorkRules::DEFAULT);
+        // Schon Standard: kein Satz über Zeitkonto, keine geplanten Stände.
+        let info = reset_info(&Settings::default(), today);
+        assert!(info.contains("Die Arbeitszeitregeln von heute sind schon die Standardwerte."), "{info}");
+        assert!(!info.contains("Zeitkonto zählt danach") && !info.contains("geplant"), "{info}");
+    }
+
+    #[test]
+    fn daily_target_shows_uneven_weeks() {
+        let r = WorkRules { weekly_target: 38 * 3600 + 1800, workdays: 0b0_1111, ..WorkRules::DEFAULT };
+        let line = rules_line(&r);
+        assert!(line.starts_with("38,5 Std./Woche (Mo, Di, Mi, Do, 9:37 bis 9:38 Std. pro Arbeitstag)"), "{line}");
     }
 
     #[test]
@@ -1856,12 +2171,12 @@ mod tests {
         assert_eq!(rows[1].cells[1..], ["38 Std.", "Mo–Fr", "07:00–22:00", "15 Min.", "–"].map(String::from));
         assert_eq!(
             rules_now_text(&s, date(21)),
-            "Heute gilt der Stand ab 02.11.2026: 7:36 h pro Arbeitstag (5-Tage-Woche).\n\
-             Geplant ab 30.11.2026: 9:45 h pro Arbeitstag (4-Tage-Woche)."
+            "Heute gilt der Stand ab 02.11.2026: 7:36 Std. pro Arbeitstag (5-Tage-Woche).\n\
+             Geplant ab 30.11.2026: 9:45 Std. pro Arbeitstag (4-Tage-Woche)."
         );
-        // Zählt Arbeit an freien Tagen, steht es in der Spalte „Freie Tage“.
+        // Geht Arbeit an freien Tagen in den Saldo ein, steht es in der Spalte „Freie Tage“.
         s.set_rules(Some(date(16)), WorkRules { free_days_count: true, ..WorkRules::DEFAULT }, None);
-        assert_eq!(rule_rows(&s, date(21))[2].cells[5], "zählen");
+        assert_eq!(rule_rows(&s, date(21))[2].cells[5], "im Saldo");
     }
 
     #[test]

@@ -191,18 +191,28 @@ fn export(from: Option<String>, to: Option<String>, format: Option<String>, outp
 fn import(path: PathBuf) {
     let text = std::fs::read_to_string(&path)
         .unwrap_or_else(|e| fail(format!("{} konnte nicht gelesen werden: {e}", path.display())));
-    let days = store::parse_file(&text);
+    let now = Local::now().naive_local();
+    // Was auch das Fenster nicht zulässt, wird übersprungen (siehe `store::check_import`).
+    let import = store::check_import(store::parse_file(&text), now);
+    let days = &import.days;
     if days.is_empty() {
-        fail(format!("{} enthält keine Aufzeichnungen.", path.display()));
+        match import.skipped_text().as_str() {
+            "" => fail(format!("{} enthält keine Aufzeichnungen.", path.display())),
+            skipped => fail(format!("{} enthält keine Tage, die sich übernehmen lassen. {skipped}", path.display())),
+        }
     }
     let mut db = store::Db::open().unwrap_or_else(|e| fail(e));
-    if let Err(e) = db.save_days(&days, &[], Local::now().naive_local()) {
-        fail(e);
-    }
+    let backup = db.import_days(days, now).unwrap_or_else(|e| fail(e));
     eprintln!(
         "{} Tag(e) vom {} bis {} übernommen (vorhandene Einträge dieser Tage ersetzt).",
         days.len(),
         store::fmt_date_short(days[0].date),
         store::fmt_date_short(days[days.len() - 1].date)
     );
+    if !import.skipped.is_empty() {
+        eprintln!("{}", import.skipped_text());
+    }
+    if let Some(backup) = backup {
+        eprintln!("Stand davor gesichert in {}", backup.display());
+    }
 }

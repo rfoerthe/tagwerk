@@ -181,9 +181,9 @@ fn compose(report: &Report, settings: &Settings, now: NaiveDateTime) -> Retained
     );
     t.line(
         &format!(
-            "Soll: {} ({}; nur Tage mit Arbeitszeit).  ✎ manuell korrigiert  ·  ⚠ siehe Hinweise",
+            "Soll: {} ({}).  ✎ manuell korrigiert  ·  ⚠ siehe Hinweise",
             store::fmt_hm(target),
-            settings.target_basis(report.from, report.to)
+            store::target_note(settings, report.from, report.to, now.date())
         ),
         8.5,
         regular,

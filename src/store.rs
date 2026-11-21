@@ -222,15 +222,30 @@ impl Db {
         self.data_version = -1;
     }
 
-    /// Alle Tage, nach Datum sortiert.
+    /// Alle Tage, nach Datum sortiert – ohne Frei-Markierungen, die nach den Regeln nicht
+    /// mehr gelten (siehe [`drop_stale_free_days`]).
     pub fn load(&self) -> Result<Vec<Day>> {
-        load_between(&self.conn, "", "~")
+        let mut days = load_between(&self.conn, "", "~")?;
+        drop_stale_free_days(&mut days, &self.load_settings()?);
+        Ok(days)
     }
 
-    /// Alle Tage von `from` bis einschließlich `to`.
+    /// Alle Tage von `from` bis einschließlich `to` (wie [`Db::load`]).
     #[cfg(test)]
     pub fn load_range(&self, from: NaiveDate, to: NaiveDate) -> Result<Vec<Day>> {
-        load_between(&self.conn, &date_key(from), &date_key(to))
+        let mut days = load_between(&self.conn, &date_key(from), &date_key(to))?;
+        drop_stale_free_days(&mut days, &self.load_settings()?);
+        Ok(days)
+    }
+
+    /// Übernimmt die Tage eines Imports (sie ersetzen die vorhandenen Einträge dieser Tage) –
+    /// vorher sichert Tagwerk die Datenbank eigens dafür, damit sich der Import zurücknehmen
+    /// lässt. Gibt den Pfad der Sicherung zurück (`None`: Es gab noch nichts zu sichern).
+    pub fn import_days(&mut self, days: &[Day], now: NaiveDateTime) -> Result<Option<PathBuf>> {
+        let name = format!("tagwerk-{}-vor-import-{}.db", date_key(now.date()), now.format("%H%M%S"));
+        let backup = self.backup_to(&self.backup_dir().join(name))?;
+        self.save_days(days, &[], now)?;
+        Ok(backup)
     }
 
     /// Schreibt die übergebenen Tage (leere Tage werden gelöscht) und löscht `removed`.
@@ -386,35 +401,54 @@ impl Db {
     /// `backups/tagwerk-JJJJ-MM-TT.db`; es bleiben die letzten [`MAX_BACKUPS`].
     /// Ein Fehler beim Sichern verhindert das Speichern nicht.
     fn daily_backup(&self, today: NaiveDate) {
-        let bdir = self.backup_dir();
-        let target = bdir.join(format!("tagwerk-{}.db", date_key(today)));
+        let target = self.backup_dir().join(format!("tagwerk-{}.db", date_key(today)));
         if target.exists() {
             return;
         }
-        let result = (|| -> Result<()> {
-            let rows: i64 = self.conn.query_row(
-                "SELECT (SELECT count(*) FROM periods) + (SELECT count(*) FROM breaks)
-                      + (SELECT count(*) FROM day_marks) + (SELECT count(*) FROM work_blocks)
-                      + (SELECT count(*) FROM absences) + (SELECT count(*) FROM auto_counting)",
-                [],
-                |r| r.get(0),
-            )?;
-            if rows == 0 {
-                return Ok(());
-            }
-            fs::create_dir_all(&bdir)?;
-            let path = target.to_str().ok_or("Pfad des Backups ist kein gültiger Text")?;
-            self.conn.execute("VACUUM INTO ?1", [path])?;
-            prune_backups(&bdir)?;
-            Ok(())
-        })();
-        if let Err(e) = result {
+        if let Err(e) = self.backup_to(&target) {
             // Ein anderer Prozess kann das Backup gerade angelegt haben.
             if !target.exists() {
                 eprintln!("Tagwerk: Backup fehlgeschlagen: {e}");
             }
         }
     }
+
+    /// Sichert die Datenbank nach `target` im Ordner der Backups (ältere werden aufgeräumt).
+    /// `None`: Die Datenbank ist noch leer – nichts zu sichern.
+    fn backup_to(&self, target: &Path) -> Result<Option<PathBuf>> {
+        let rows: i64 = self.conn.query_row(
+            "SELECT (SELECT count(*) FROM periods) + (SELECT count(*) FROM breaks)
+                  + (SELECT count(*) FROM day_marks) + (SELECT count(*) FROM work_blocks)
+                  + (SELECT count(*) FROM absences) + (SELECT count(*) FROM auto_counting)",
+            [],
+            |r| r.get(0),
+        )?;
+        if rows == 0 {
+            return Ok(None);
+        }
+        let bdir = self.backup_dir();
+        fs::create_dir_all(&bdir)?;
+        let path = target.to_str().ok_or("Pfad des Backups ist kein gültiger Text")?;
+        self.conn.execute("VACUUM INTO ?1", [path])?;
+        prune_backups(&bdir)?;
+        Ok(Some(target.to_path_buf()))
+    }
+}
+
+/// Verwirft Frei-Markierungen ([`Day::free_day`]) an Tagen, die nach den Regeln `s` Arbeitstage
+/// sind. Die Markierung entsteht beim ersten Entsperren an einem freien Tag; wird der Tag
+/// nachträglich zum Arbeitstag (ein Stand der Arbeitszeitregeln rückwirkend geändert), hat er
+/// ein Soll – dann muss auch zählen, was an ihm erfasst wurde, sonst stünde das volle Soll
+/// gegen null Arbeitszeit. Tage, die nur aus der Markierung bestanden, entfallen. In der
+/// Datenbank bleibt die Markierung stehen, bis der Tag neu geschrieben wird: Wer die Änderung
+/// der Regeln zurücknimmt, bekommt sie zurück.
+pub fn drop_stale_free_days(days: &mut Vec<Day>, s: &Settings) {
+    for d in days.iter_mut().filter(|d| d.free_day.is_some()) {
+        if s.is_workday(d.date) {
+            d.free_day = None;
+        }
+    }
+    days.retain(|d| !d.is_empty());
 }
 
 fn init_schema(conn: &mut Connection, dir: &Path) -> Result<()> {
@@ -782,6 +816,72 @@ pub fn parse_file(text: &str) -> Vec<Day> {
     days
 }
 
+/// Ergebnis der Prüfung eines Imports ([`check_import`]).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Import {
+    /// Tage, die übernommen werden.
+    pub days: Vec<Day>,
+    /// Tage, die nicht übernommen werden, mit dem Grund.
+    pub skipped: Vec<(NaiveDate, String)>,
+}
+
+impl Import {
+    /// `Übersprungen: 12.03.2026 (Arbeitsbeginn nicht vor dem Feierabend), …` – leer, wenn
+    /// nichts übersprungen wurde; bei vielen Tagen stehen die ersten drei da.
+    pub fn skipped_text(&self) -> String {
+        if self.skipped.is_empty() {
+            return String::new();
+        }
+        let mut parts: Vec<String> =
+            self.skipped.iter().take(3).map(|(d, why)| format!("{} ({why})", fmt_date_short(*d))).collect();
+        if self.skipped.len() > 3 {
+            parts.push(format!("und {} weitere", self.skipped.len() - 3));
+        }
+        format!("Übersprungen: {}.", parts.join(", "))
+    }
+}
+
+/// Prüft eingelesene Tage ([`parse_file`]) auf das, was auch das Fenster „Aufzeichnungen“ nicht
+/// zulässt: Zeiten in der Zukunft, einen Arbeitsbeginn, der nicht vor dem Feierabend liegt,
+/// eine ganztägige Abwesenheit neben anderen Einträgen. Solche Tage werden übersprungen –
+/// eine Datei von Hand oder aus einer älteren Version brächte sonst Tage in die Datenbank, die
+/// falsch rechnen und sich im Fenster nicht mehr herstellen ließen. Pausen ohne Dauer entfallen
+/// stillschweigend.
+pub fn check_import(days: Vec<Day>, now: NaiveDateTime) -> Import {
+    let (today, clock) = (now.date(), day::secs_of(now.time()));
+    let mut out = Import { days: Vec::new(), skipped: Vec::new() };
+    for mut d in days {
+        d.breaks.retain(|b| b.to > b.from);
+        let latest = [
+            d.periods.last().map(|p| p.to),
+            d.work.last().map(|w| w.to),
+            d.breaks.iter().map(|b| b.to).max(),
+            d.start,
+            d.end,
+        ]
+        .into_iter()
+        .flatten()
+        .max();
+        let problem = if d.date > today && d.has_entries() {
+            Some("Zeiten in der Zukunft")
+        } else if d.date == today && latest.is_some_and(|t| t > clock) {
+            Some("Zeiten nach der jetzigen Uhrzeit")
+        } else if !day::bounds_in_order(d.start, d.end) {
+            Some("Arbeitsbeginn nicht vor dem Feierabend")
+        } else if d.locks_entries() && d.has_entries() {
+            Some("ganztägige Abwesenheit neben anderen Einträgen")
+        } else {
+            None
+        };
+        match problem {
+            Some(why) => out.skipped.push((d.date, why.to_string())),
+            None if d.is_empty() => {}
+            None => out.days.push(d),
+        }
+    }
+    out
+}
+
 // ---------- Markdown: Export ----------
 
 /// Standard-Zeitraum des Exports: die letzten 28 Tage bis einschließlich `today`.
@@ -864,6 +964,18 @@ pub fn write_export(
     Ok(())
 }
 
+/// Erklärung zum Soll eines Exports von `from` bis `to` (`today`: heute): worauf es beruht und
+/// welche Tage zählen – so, wie [`rules::balance`] rechnet. Steht in PDF und Markdown.
+pub fn target_note(settings: &Settings, from: NaiveDate, to: NaiveDate, today: NaiveDate) -> String {
+    let basis = settings.target_basis(from, to);
+    // Der laufende Tag zählt nur, soweit sein Soll erarbeitet ist (bis zum Feierabend).
+    if from <= today && today <= to {
+        format!("{basis}; Arbeitstage bis gestern auch ohne Eintrag, heute nur das schon Erarbeitete")
+    } else {
+        format!("{basis}; Arbeitstage bis gestern auch ohne Eintrag")
+    }
+}
+
 /// Ein Tag in der Übersicht ([`Report`]), mit den Werten wie im Fenster „Aufzeichnungen“
 /// (Arbeitszeit und Pausen nach den angezeigten Uhrzeiten).
 #[derive(Clone, Debug, PartialEq)]
@@ -909,7 +1021,7 @@ impl Report {
                     work: r.shown_work_secs,
                     pause: r.shown_pause_secs,
                     counted: settings.counted_work(d.date, r.shown_work_secs),
-                    target: settings.counted_target(d, r.work_secs, today),
+                    target: settings.counted_target(d, &r, today),
                     absence: d.absence.map(Absence::label).unwrap_or_default(),
                     corrected: d.has_corrections(),
                     warnings: rules::day_warnings(days, d.date, settings).iter().map(rules::Warning::text).collect(),
@@ -967,7 +1079,9 @@ fn fmt_h_m(secs: i64) -> String {
 
 /// Die Übersicht als CSV für Tabellenprogramme: je Tag eine Zeile, Felder mit Semikolon
 /// getrennt, Dezimalkomma, Zeilenende CRLF und BOM – so öffnet ein deutsches Excel die Datei
-/// ohne Umweg. Salden haben ein einfaches Minuszeichen, damit sie sich weiterverrechnen lassen.
+/// ohne Umweg. Salden haben ein einfaches Minuszeichen, damit sie sich weiterverrechnen lassen;
+/// ein Tag ohne Saldo (Arbeit an einem freien Tag, die nicht zählt) hat dort ein leeres Feld –
+/// wie Beginn und Ende an einem Tag ohne Arbeitszeit.
 pub fn export_csv(report: &Report) -> String {
     let field = |s: &str| {
         if s.contains([';', '"', '\n']) {
@@ -993,7 +1107,11 @@ pub fn export_csv(report: &Report) -> String {
             format!("{:.2}", d.work as f64 / 3600.0).replace('.', ","),
             fmt_h_m(d.pause),
             fmt_h_m(d.target),
-            format!("{}{}", if balance < 0 { "-" } else { "+" }, fmt_h_m(balance.abs())),
+            if d.has_balance() {
+                format!("{}{}", if balance < 0 { "-" } else { "+" }, fmt_h_m(balance.abs()))
+            } else {
+                String::new()
+            },
             d.absence.clone(),
             if d.corrected { "ja" } else { "nein" }.to_string(),
             d.warnings.join(" | "),
@@ -1032,7 +1150,8 @@ pub fn export_markdown(
         "Exportiert am {} um {} Uhr. Arbeitszeit = Zeit, in der der Mac entsperrt war, verrechnet \
          mit den manuellen Korrekturen; Sperren {pause} zählen als Arbeitszeit. Gezählt wird \
          nur im Arbeitszeitrahmen{frame}. Pausenzeit = Zeit zwischen Beginn und Ende, in der nicht \
-         gearbeitet wurde.\n\n",
+         gearbeitet wurde. Der Saldo rechnet wie das Fenster „Aufzeichnungen“ mit den Uhrzeiten \
+         in ganzen Minuten.\n\n",
         fmt_date_short(now.date()),
         now.format("%H:%M"),
     ));
@@ -1045,7 +1164,10 @@ pub fn export_markdown(
     }
     s.push_str("| Datum | Beginn | Ende | Arbeitszeit | Pausenzeit | Saldo |\n");
     s.push_str("|:------|:------:|:----:|------------:|-----------:|------:|\n");
-    // `counted`: Arbeitszeit, die in den Saldo eingeht (ohne freie Tage, an denen sie nicht zählt).
+    // `counted`: Arbeitszeit, die in den Saldo eingeht (ohne freie Tage, an denen sie nicht
+    // zählt) – wie im Fenster nach den angezeigten Uhrzeiten, damit Markdown, CSV, PDF und
+    // Fenster denselben Saldo nennen und die Summe zu den Zeilen passt. Arbeitszeit und
+    // Pausenzeit stehen daneben sekundengenau.
     let (mut work, mut counted, mut pause, mut target, mut count) = (0, 0, 0, 0, 0);
     // Arbeitstage ohne Eintrag stehen mit ihrem Soll dazwischen.
     let mut missing = rules::missing_workdays(all, from, to, now.date(), settings).into_iter().peekable();
@@ -1065,8 +1187,9 @@ pub fn export_markdown(
     for d in &days {
         let Some(r) = d.record(settings) else { continue };
         add_missing(&mut s, &mut target, Some(d.date));
-        let day_target = settings.counted_target(d, r.work_secs, now.date());
-        let day_counted = settings.counted_work(d.date, r.work_secs);
+        let day_target = settings.counted_target(d, &r, now.date());
+        let day_counted = settings.counted_work(d.date, r.shown_work_secs);
+        let day_balance = settings.day_balance(d, &r, now.date());
         work += r.work_secs;
         counted += day_counted;
         pause += r.pause_secs();
@@ -1081,7 +1204,7 @@ pub fn export_markdown(
             fmt_clock_s(r.last_end.min(DAY_END - 1)),
             fmt_hms(r.work_secs),
             fmt_hms(r.pause_secs()),
-            if day_counted > 0 || day_target > 0 { rules::fmt_balance(day_counted - day_target) } else { "–".to_string() },
+            day_balance.map_or("–".to_string(), rules::fmt_balance),
         ));
     }
     add_missing(&mut s, &mut target, None);
@@ -1092,11 +1215,7 @@ pub fn export_markdown(
         fmt_hms(pause),
         rules::fmt_balance(counted - target)
     ));
-    s.push_str(&format!(
-        "\nSoll: {} ({}; Arbeitstage bis gestern auch ohne Eintrag).\n",
-        fmt_hm(target),
-        settings.target_basis(from, to)
-    ));
+    s.push_str(&format!("\nSoll: {} ({}).\n", fmt_hm(target), target_note(settings, from, to, now.date())));
 
     s.push_str(&format!("\n{HEAD_WARNINGS}\n\n"));
     let warnings: Vec<(NaiveDate, rules::Warning)> = days
@@ -1355,8 +1474,10 @@ mod tests {
         assert!(md.contains("| Mo, 16.11.2026 | 08:00:00 | 18:30:00 | 08:58:00 | 01:32:00 | +1:10 h |"), "{md}");
         assert!(md.contains("| Mo, 16.11.2026 | Pause | 12:00:00 | 12:45:00 | |"));
         assert!(md.contains("| Mo, 16.11.2026 | Arbeit ohne Mac | 18:00:00 | 18:30:00 | Telefonat |"), "{md}");
-        assert!(md.contains("| Di, 17.11.2026 | 08:00:00 | 10:00:00 | 02:00:00 | 00:00:00 | −5:48 h |"), "{md}");
-        assert!(md.contains("| **Summe: 2 Arbeitstage** | | | **10:58:00** | **01:32:00** | **−4:38 h** |"), "{md}");
+        // Der Dienstag ist heute und noch offen: Sein Soll zählt nur, soweit es erarbeitet ist.
+        assert!(md.contains("| Di, 17.11.2026 | 08:00:00 | 10:00:00 | 02:00:00 | 00:00:00 | +0:00 h |"), "{md}");
+        assert!(md.contains("| **Summe: 2 Arbeitstage** | | | **10:58:00** | **01:32:00** | **+1:10 h** |"), "{md}");
+        assert!(md.contains("Soll: 9:48 h (39 Std./Woche, Mo–Fr; Arbeitstage bis gestern auch ohne Eintrag, heute nur das schon Erarbeitete)."), "{md}");
         assert!(md.contains("Keine Verstöße"), "{md}");
         assert_eq!(parse_file(&md), days);
 
@@ -1526,8 +1647,8 @@ mod tests {
             "Datum;Wochentag;Beginn;Ende;Arbeitszeit;Arbeitszeit (Std.);Pausen;Soll;Saldo;Abwesenheit;Korrigiert;Hinweise"
         );
         assert_eq!(lines[1], "16.11.2026;Mo;08:00;17:30;8:30;8,50;1:00;7:48;+0:42;;ja;");
-        // Arbeit am Wochenende zählt nicht im Saldo.
-        assert_eq!(lines[2], "21.11.2026;Sa;10:00;11:00;1:00;1,00;0:00;0:00;+0:00;;nein;Arbeit am Wochenende – zählt nicht im Saldo");
+        // Arbeit am Wochenende zählt nicht im Saldo: Das Feld bleibt leer.
+        assert_eq!(lines[2], "21.11.2026;Sa;10:00;11:00;1:00;1,00;0:00;0:00;;;nein;Arbeit am Wochenende – zählt nicht im Saldo");
         assert_eq!(report.balance(), h(0, 42));
         // Mit dem Schalter im Stand als Mehrarbeit.
         let counted = st().with_rules(rules::WorkRules { free_days_count: true, ..rules::WorkRules::DEFAULT });
@@ -1644,6 +1765,123 @@ mod tests {
         assert_eq!(parse_file(&md), days);
         // Nur der Sonntag zählt.
         assert!(md.contains("| So, 22.11.2026 | 09:00:00 | 10:00:00 | 01:00:00 |"), "{md}");
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn markdown_and_csv_name_the_same_balance() {
+        // 08:00:10–16:48:00 Uhr: sekundengenau 8:47:50, angezeigt 8:48 Std. – Saldo +1:00.
+        let mut mon = Day::new(date(16));
+        mon.add_period(h(8, 0) + 10, h(16, 48));
+        let mut tue = Day::new(date(17));
+        tue.add_period(h(8, 0) + 20, h(15, 0));
+        let days = vec![mon, tue];
+        let later = date(23).and_hms_opt(10, 0, 0).unwrap();
+        let md = export_markdown(&days, date(16), date(17), later, &st());
+        assert!(md.contains("| Mo, 16.11.2026 | 08:00:10 | 16:48:00 | 08:47:50 | 00:00:00 | +1:00 h |"), "{md}");
+        assert!(md.contains("| Di, 17.11.2026 | 08:00:20 | 15:00:00 | 06:59:40 | 00:00:00 | −0:48 h |"), "{md}");
+        // Die Summe ist die Summe der Zeilen.
+        assert!(md.contains("| **Summe: 2 Arbeitstage** | | | **15:47:30** | **00:00:00** | **+0:12 h** |"), "{md}");
+        let report = Report::new(&days, date(16), date(17), date(23), &st());
+        let csv = export_csv(&report);
+        assert!(csv.contains("16.11.2026;Mo;08:00;16:48;8:48;8,80;0:00;7:48;+1:00;"), "{csv}");
+        assert!(csv.contains("17.11.2026;Di;08:00;15:00;7:00;7,00;0:00;7:48;-0:48;"), "{csv}");
+        assert_eq!(report.balance(), h(0, 12));
+        // Fußzeile zum Soll: mit dem laufenden Tag im Zeitraum sagt sie, wie er zählt.
+        assert_eq!(
+            target_note(&st(), date(16), date(22), date(23)),
+            "39 Std./Woche, Mo–Fr; Arbeitstage bis gestern auch ohne Eintrag"
+        );
+        assert!(target_note(&st(), date(16), date(22), date(17)).ends_with("heute nur das schon Erarbeitete"));
+    }
+
+    #[test]
+    fn stale_free_day_marks_are_dropped_on_load() {
+        let dir = temp_dir("stale-marks");
+        let mut db = Db::open_in(&dir).unwrap();
+        // Vier-Tage-Woche ohne Freitag: Am Freitag wurde erfasst, aber nicht gezählt; am
+        // Freitag davor steht nur die Entscheidung.
+        let four = st().with_rules(rules::WorkRules { workdays: 0b0_1111, ..rules::WorkRules::DEFAULT });
+        db.save_settings(&four, date(23)).unwrap();
+        let mut fri = Day::new(date(20));
+        fri.add_period(h(8, 0), h(16, 0));
+        fri.free_day = Some(FreeDay::Uncounted);
+        let mut mark_only = Day::new(date(13));
+        mark_only.free_day = Some(FreeDay::Stopped);
+        let mut sat = Day::new(date(21));
+        sat.add_period(h(10, 0), h(11, 0));
+        sat.free_day = Some(FreeDay::Uncounted);
+        let days = vec![mark_only, fri.clone(), sat.clone()];
+        db.save_days(&days, &[], now()).unwrap();
+        assert_eq!(db.load().unwrap(), days);
+        assert_eq!(days[1].record(&four).unwrap().work_secs, 0);
+        // Der Stand wird rückwirkend Mo–Fr: Der Freitag hat ein Soll – und seine Zeit zählt.
+        db.save_settings(&st(), date(23)).unwrap();
+        let loaded = db.load().unwrap();
+        fri.free_day = None;
+        assert_eq!(loaded, vec![fri.clone(), sat.clone()], "Samstag bleibt, der leere Freitag entfällt");
+        assert_eq!(loaded[0].record(&st()).unwrap().work_secs, h(8, 0));
+        assert_eq!(db.load_range(date(20), date(20)).unwrap(), vec![fri]);
+        // Zurück zur Vier-Tage-Woche: Die Markierung ist noch da.
+        db.save_settings(&four, date(23)).unwrap();
+        assert_eq!(db.load().unwrap(), days);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn import_skips_what_the_window_would_refuse() {
+        let noon = date(18).and_hms_opt(12, 0, 0).unwrap();
+        let mut fine = Day::new(date(16));
+        fine.add_period(h(8, 0), h(16, 0));
+        fine.breaks.push(Break { from: h(12, 0), to: h(12, 0) }); // ohne Dauer: entfällt
+        let mut reversed = Day::new(date(17));
+        reversed.add_period(h(8, 0), h(16, 0));
+        reversed.start = Some(h(18, 0));
+        reversed.end = Some(h(12, 0));
+        let mut later_today = Day::new(date(18));
+        later_today.add_period(h(8, 0), h(13, 0));
+        let mut future = Day::new(date(19));
+        future.add_work(h(9, 0), h(10, 0), "Meeting");
+        let mut planned = Day::new(date(20));
+        planned.absence = Some(Absence::new(AbsenceKind::Vacation, false));
+        let mut locked = Day::new(date(13));
+        locked.absence = Some(Absence::new(AbsenceKind::Sick, false));
+        locked.add_period(h(8, 0), h(9, 0));
+        let import = check_import(vec![locked, fine.clone(), reversed, later_today, future, planned.clone()], noon);
+        fine.breaks.clear();
+        assert_eq!(import.days, vec![fine, planned], "geplante Abwesenheit geht, Zeiten in der Zukunft nicht");
+        let why: Vec<(u32, &str)> = import.skipped.iter().map(|(d, w)| (chrono::Datelike::day(d), w.as_str())).collect();
+        assert_eq!(
+            why,
+            [
+                (13, "ganztägige Abwesenheit neben anderen Einträgen"),
+                (17, "Arbeitsbeginn nicht vor dem Feierabend"),
+                (18, "Zeiten nach der jetzigen Uhrzeit"),
+                (19, "Zeiten in der Zukunft"),
+            ]
+        );
+        assert_eq!(
+            import.skipped_text(),
+            "Übersprungen: 13.11.2026 (ganztägige Abwesenheit neben anderen Einträgen), 17.11.2026 (Arbeitsbeginn \
+             nicht vor dem Feierabend), 18.11.2026 (Zeiten nach der jetzigen Uhrzeit), und 1 weitere."
+        );
+        // Ein eigener Export kommt unverändert durch.
+        let days = sample_days();
+        let md = export_markdown(&days, date(16), date(17), now(), &st());
+        assert_eq!(check_import(parse_file(&md), now()), Import { days, skipped: Vec::new() });
+    }
+
+    #[test]
+    fn import_backs_up_the_state_before() {
+        let dir = temp_dir("import-backup");
+        let mut db = Db::open_in(&dir).unwrap();
+        // Leere Datenbank: nichts zu sichern.
+        assert_eq!(db.import_days(&sample_days()[..1], now()).unwrap(), None);
+        let later = now() + Duration::seconds(90);
+        let backup = db.import_days(&sample_days()[1..], later).unwrap().expect("Sicherung");
+        assert_eq!(backup.file_name().unwrap().to_str().unwrap(), "tagwerk-2026-11-17-vor-import-100130.db");
+        assert!(backup.exists());
+        assert_eq!(db.load().unwrap(), sample_days());
         let _ = fs::remove_dir_all(&dir);
     }
 }

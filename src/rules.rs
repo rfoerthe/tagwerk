@@ -7,16 +7,21 @@
 //!
 //! - **Arbeitszeitrahmen** – Arbeit nur im eingestellten Zeitraum (Standard 07:00–22:00), an
 //!   jedem Tag; außerhalb wird weder Arbeitszeit noch Pause gezählt, es gibt aber einen Hinweis.
-//!   Arbeitstage sind Mo–Fr: Arbeit am Wochenende wird gemeldet.
+//!   Arbeit an Tagen ohne Soll (Wochenende, abgewählte Arbeitstage) wird gemeldet.
 //! - **Freie Tage** – Wochenende und abgewählte Arbeitstage haben kein Soll. Arbeit dort
 //!   wirkt sich standardmäßig nicht auf Saldo und Zeitkonto aus; je Stand lässt sie sich als
 //!   Mehrarbeit zählen ([`WorkRules::free_days_count`]).
-//! - **Sollarbeitszeit** – Regelwochenarbeitszeit verteilt auf fünf Arbeitstage
-//!   (39 Std. = 7:48 Std. pro Tag); daraus ergibt sich der Saldo.
+//! - **Sollarbeitszeit** – Regelwochenarbeitszeit verteilt auf die Arbeitstage
+//!   (39 Std. = 7:48 Std. pro Tag), je Tag in ganzen Minuten ([`WorkRules::daily_target_on`]);
+//!   daraus ergibt sich der Saldo.
 //! - **Pausen** (§ 4 ArbZG) – mehr als 6 Std. Arbeit: 30 Min., mehr als 9 Std.: 45 Min.;
 //!   gezählt werden Abschnitte von mindestens 15 Min. Länger als 6 Std. am Stück ohne
 //!   solche Pause sind ebenfalls ein Verstoß.
 //! - **Ruhezeit** (§ 5 ArbZG) – mindestens 11 Std. zwischen zwei Arbeitstagen.
+//!
+//! Pausen, Höchstarbeitszeit und Ruhezeit werden zuerst mit der gezählten Arbeitszeit geprüft
+//! und dann mit der tatsächlichen – samt der Zeit außerhalb des Arbeitszeitrahmens
+//! ([`Day::actual_spans`]); der Hinweis sagt dann, dass sie mitgerechnet ist.
 //! - **Höchstarbeitszeit** – mehr als 10 Std. am Tag gelten als Verstoß; bei 9:45 und 10 Std.
 //!   kommt eine Mitteilung (siehe [`LimitWatch`]).
 
@@ -157,7 +162,8 @@ impl WorkRules {
         let d = Self::DEFAULT;
         let mut r = Self {
             min_pause: self.min_pause.clamp(MIN_PAUSE_RANGE.0, MIN_PAUSE_RANGE.1),
-            weekly_target: self.weekly_target.clamp(WEEKLY_RANGE.0, WEEKLY_RANGE.1),
+            // In ganzen Minuten – so wie sie sich eingeben lässt und wie alle Salden rechnen.
+            weekly_target: self.weekly_target.clamp(WEEKLY_RANGE.0, WEEKLY_RANGE.1) / 60 * 60,
             frame_from: self.frame_from.clamp(0, DAY_END),
             frame_to: self.frame_to.clamp(0, DAY_END),
             // Ohne Arbeitstag gäbe es kein Soll: dann wieder Montag bis Freitag.
@@ -182,9 +188,38 @@ impl WorkRules {
         ((self.workdays & ALL_WORKDAYS).count_ones() as i64).max(1)
     }
 
-    /// Sollarbeitszeit eines Arbeitstags (Wochenarbeitszeit / Arbeitstage).
-    pub fn daily_target_workday(&self) -> i64 {
-        self.weekly_target / self.workday_count()
+    /// Sollarbeitszeit des Tages `date` in ganzen Minuten (an freien Tagen 0). Geht die
+    /// Wochenarbeitszeit nicht in vollen Minuten auf (38,5 Std. an vier Tagen = 9:37:30),
+    /// bekommen die Arbeitstage der Woche der Reihe nach 9:37, 9:38, 9:37 und 9:38 Std. –
+    /// zusammen genau die Wochenarbeitszeit. So ist jeder Tagessaldo eine ganze Minutenzahl,
+    /// und Tage summieren sich zur Woche ohne Rundungsreste.
+    pub fn daily_target_on(&self, date: NaiveDate) -> i64 {
+        if !self.is_workday(date) {
+            return 0;
+        }
+        let weekday = date.weekday().num_days_from_monday();
+        // Arbeitstage der Woche vor diesem Tag.
+        let before = (self.workdays & ((1u8 << weekday) - 1)).count_ones() as i64;
+        let (week, n) = (self.weekly_target / 60, self.workday_count());
+        ((before + 1) * week / n - before * week / n) * 60
+    }
+
+    /// Kürzeste und längste Sollarbeitszeit eines Arbeitstags (siehe
+    /// [`WorkRules::daily_target_on`]) – meist gleich, sonst eine Minute auseinander.
+    pub fn daily_target_range(&self) -> (i64, i64) {
+        let (week, n) = (self.weekly_target / 60, self.workday_count());
+        let low = week / n * 60;
+        (low, if week % n == 0 { low } else { low + 60 })
+    }
+
+    /// `7:48 Std.` bzw. `9:37 bis 9:38 Std.` – die Sollarbeitszeit eines Arbeitstags zum
+    /// Anzeigen.
+    pub fn daily_target_text(&self) -> String {
+        let hm = |secs: i64| format!("{}:{:02}", secs / 3600, secs % 3600 / 60);
+        match self.daily_target_range() {
+            (low, high) if low == high => format!("{} Std.", hm(low)),
+            (low, high) => format!("{} bis {} Std.", hm(low), hm(high)),
+        }
     }
 
     /// `Mo–Fr` bzw. `Mo, Di, Do` – die eingestellten Arbeitstage.
@@ -214,7 +249,7 @@ impl WorkRules {
 
     /// Kurzfassung für Fußzeilen und Export.
     pub fn summary(&self) -> String {
-        let free = if self.free_days_count { "  ·  Arbeit an freien Tagen zählt als Mehrarbeit" } else { "" };
+        let free = if self.free_days_count { "  ·  Arbeit an freien Tagen im Saldo" } else { "" };
         format!(
             "Arbeitszeitrahmen {}  ·  Regelarbeitszeit {} Std./Woche ({})  ·  Pausen ab {} Min.{free}",
             self.frame_text(),
@@ -413,45 +448,49 @@ impl Settings {
     /// `None`, wenn es keinen gibt – weder Arbeitszeit, die zählt, noch Soll (z. B. Arbeit an
     /// einem freien Tag, die nicht zählt).
     pub fn day_balance(&self, day: &Day, rec: &DayRecord, today: NaiveDate) -> Option<i64> {
-        let target = self.counted_target(day, rec.work_secs, today);
+        let target = self.counted_target(day, rec, today);
         (self.counted_work(day.date, rec.work_secs) > 0 || target > 0)
             .then(|| self.counted_work(day.date, rec.shown_work_secs) - target)
     }
 
     /// Sollarbeitszeit eines Tages (an freien Tagen 0) nach den Regeln, die an ihm gelten.
     pub fn daily_target(&self, date: NaiveDate) -> i64 {
-        let r = self.rules(date);
-        if r.is_workday(date) {
-            r.daily_target_workday()
-        } else {
-            0
-        }
+        self.rules(date).daily_target_on(date)
     }
 
     /// Sollarbeitszeit des Tages `date` mit der Abwesenheit `absence`: Urlaub, Sonderurlaub,
-    /// Krankheit und Feiertag senken sie auf null bzw. (halber Tag) auf die Hälfte,
-    /// Zeitausgleich nicht.
+    /// Krankheit und Feiertag senken sie auf null bzw. (halber Tag) auf die Hälfte – auf ganze
+    /// Minuten abgerundet, damit auch dieser Tagessaldo ohne Sekunden bleibt –, Zeitausgleich
+    /// nicht.
     pub fn day_target(&self, date: NaiveDate, absence: Option<Absence>) -> i64 {
         let full = self.daily_target(date);
         match absence {
             Some(a) if !a.kind.reduces_target() => full,
-            Some(a) if a.half => full / 2,
+            Some(a) if a.half => full / 120 * 60,
             Some(_) => 0,
             None => full,
         }
     }
 
-    /// Soll, das für `day` in den Saldo eingeht (`today`: heute). Bis gestern zählt jeder
-    /// Arbeitstag, auch ohne Arbeitszeit – bis eine Abwesenheit eingetragen ist, ist er ein
-    /// Minus. Heute (und später) zählt das Soll erst mit Arbeitszeit oder Abwesenheit, damit
-    /// der Tag nicht schon morgens im Minus beginnt; künftige Tage (eine geplante Abwesenheit)
-    /// zählen noch gar nicht. Mit Abwesenheit gilt, was sie besagt: halber Urlaubstag =
-    /// halbes Soll, Zeitausgleich = volles Soll.
-    pub fn counted_target(&self, day: &Day, work_secs: i64, today: NaiveDate) -> i64 {
-        if day.date > today || (day.absence.is_none() && work_secs <= 0 && day.date >= today) {
+    /// Soll, das für `day` mit seinen Kennzahlen `rec` in den Saldo eingeht (`today`: heute).
+    /// Bis gestern zählt jeder Arbeitstag, auch ohne Arbeitszeit – bis eine Abwesenheit
+    /// eingetragen ist, ist er ein Minus. Mit Abwesenheit gilt, was sie besagt: halber
+    /// Urlaubstag = halbes Soll, Zeitausgleich = volles Soll. Künftige Tage (eine geplante
+    /// Abwesenheit) zählen noch gar nicht.
+    ///
+    /// Heute zählt das Soll nur, soweit es schon erarbeitet ist: Der laufende Tag steht bei
+    /// null, bis das Soll erreicht ist, und danach im Plus – Wochensaldo und Zeitkonto fallen
+    /// also nicht morgens um das Tagessoll, um sich bis zum Abend wieder zu erholen. Was fehlt,
+    /// zählt erst mit dem Feierabend (dann ist der Tag zu Ende) oder ab morgen. Zeitausgleich
+    /// zählt sofort – dort soll das Zeitkonto sinken.
+    pub fn counted_target(&self, day: &Day, rec: &DayRecord, today: NaiveDate) -> i64 {
+        let target = self.day_target(day.date, day.absence);
+        if day.date > today {
             0
+        } else if day.date < today || day.end.is_some() || day.absence.is_some_and(|a| !a.kind.reduces_target()) {
+            target
         } else {
-            self.day_target(day.date, day.absence)
+            target.min(self.counted_work(day.date, rec.shown_work_secs))
         }
     }
 
@@ -505,43 +544,58 @@ pub fn parse_hours(s: &str) -> Option<i64> {
 /// Hinweis bei einem Verstoß gegen eine Regel.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Warning {
-    /// Zu wenig Pause für die Arbeitszeit (`required` Sekunden vorgeschrieben).
-    Breaks { required: i64 },
+    /// Zu wenig Pause für die Arbeitszeit (`required` Sekunden vorgeschrieben). `outside` hier
+    /// und bei den nächsten drei: Der Verstoß ergibt sich erst mit der Arbeit außerhalb des
+    /// Arbeitszeitrahmens, die nicht gezählt wird.
+    Breaks { required: i64, outside: bool },
     /// Mehr als 6 Stunden am Stück ohne Pause gearbeitet (`work` Sekunden).
-    LongStretch { work: i64 },
+    LongStretch { work: i64, outside: bool },
     /// Mehr als 10 Stunden Arbeit.
-    MaxHours { work: i64 },
+    MaxHours { work: i64, outside: bool },
     /// Ruhezeit seit dem letzten Arbeitstag zu kurz.
-    Rest { rest: i64 },
+    Rest { rest: i64, outside: bool },
     /// Arbeitszeit außerhalb des Arbeitszeitrahmens (nicht gezählt): wann und in welchem Rahmen.
     OutsideFrame { spans: Vec<Span>, frame: String },
     /// Arbeit am Wochenende (`counted`: Sie zählt als Mehrarbeit, siehe
     /// [`WorkRules::free_days_count`]).
     Weekend { counted: bool },
+    /// Arbeit an einem freien Wochentag (abgewählter Arbeitstag); `counted` wie bei
+    /// [`Warning::Weekend`].
+    FreeWeekday { counted: bool },
 }
 
 impl Warning {
     pub fn text(&self) -> String {
+        // Der Verstoß ergibt sich erst mit der Zeit, die nicht gezählt wird: dazusagen, sonst
+        // passt der Hinweis nicht zur angezeigten Arbeitszeit.
+        let with = |outside: &bool| if *outside { ", mit der Zeit außerhalb des Arbeitszeitrahmens" } else { "" };
         match self {
-            Warning::Breaks { required } => format!(
-                "Ab {} Std. Arbeit sind {} Min. Pause vorgeschrieben (§ 4 ArbZG)",
+            Warning::Breaks { required, outside } => format!(
+                "Ab {} Std. Arbeit sind {} Min. Pause vorgeschrieben (§ 4 ArbZG){}",
                 if *required >= 45 * 60 { 9 } else { 6 },
-                required / 60
+                required / 60,
+                with(outside)
             ),
-            Warning::LongStretch { work } => {
-                format!("{} ohne Pause – erlaubt sind höchstens 6 Std. am Stück (§ 4 ArbZG)", fmt_hm(*work))
+            Warning::LongStretch { work, outside } => format!(
+                "{} ohne Pause – erlaubt sind höchstens 6 Std. am Stück (§ 4 ArbZG){}",
+                fmt_hm(*work),
+                with(outside)
+            ),
+            Warning::MaxHours { work, outside } => {
+                format!("{} Arbeitszeit – mehr als 10 Std. am Tag (§ 3 ArbZG){}", fmt_hm(*work), with(outside))
             }
-            Warning::MaxHours { work } => {
-                format!("{} Arbeitszeit – mehr als 10 Std. am Tag (§ 3 ArbZG)", fmt_hm(*work))
-            }
-            Warning::Rest { rest } => {
-                format!("Ruhezeit nur {} – vorgeschrieben sind 11 Std. (§ 5 ArbZG)", fmt_hm(*rest))
+            Warning::Rest { rest, outside } => {
+                format!("Ruhezeit nur {} – vorgeschrieben sind 11 Std. (§ 5 ArbZG){}", fmt_hm(*rest), with(outside))
             }
             Warning::OutsideFrame { spans, frame } => {
                 format!("{} außerhalb des Arbeitszeitrahmens ({frame}) – nicht gezählt", fmt_spans(spans))
             }
             Warning::Weekend { counted: true } => "Arbeit am Wochenende – zählt ohne Soll als Mehrarbeit".to_string(),
             Warning::Weekend { counted: false } => "Arbeit am Wochenende – zählt nicht im Saldo".to_string(),
+            Warning::FreeWeekday { counted: true } => {
+                "Arbeit an einem freien Tag – zählt ohne Soll als Mehrarbeit".to_string()
+            }
+            Warning::FreeWeekday { counted: false } => "Arbeit an einem freien Tag – zählt nicht im Saldo".to_string(),
         }
     }
 }
@@ -569,41 +623,67 @@ fn fmt_hm(secs: i64) -> String {
     format!("{}:{:02} Std.", m / 60, m % 60)
 }
 
+/// Verstöße gegen Pausen und Höchstarbeitszeit in den Arbeitsabschnitten `spans` (`outside`:
+/// samt der Zeit außerhalb des Arbeitszeitrahmens): zu wenig Pause, zu lange am Stück, mehr als
+/// 10 Stunden.
+fn legal_checks(spans: &[Span], outside: bool) -> [Option<Warning>; 3] {
+    let work: i64 = spans.iter().map(Span::len).sum();
+    let pause = Day::legal_pause_secs(spans);
+    let breaks = if work > 9 * 3600 && pause < 45 * 60 {
+        Some(Warning::Breaks { required: 45 * 60, outside })
+    } else if work > 6 * 3600 && pause < 30 * 60 {
+        Some(Warning::Breaks { required: 30 * 60, outside })
+    } else {
+        None
+    };
+    // Fehlt die Pause ganz, sagt der Hinweis oben schon alles; sonst zählt auch, wann sie lag.
+    let no_break_at_all = pause == 0 && breaks.is_some();
+    let stretch = Day::longest_stretch_secs(spans);
+    let stretch = (stretch > MAX_STRETCH && !no_break_at_all).then_some(Warning::LongStretch { work: stretch, outside });
+    let max = (work > MAX_DAILY_WORK).then_some(Warning::MaxHours { work, outside });
+    [breaks, stretch, max]
+}
+
 /// Hinweise für den Tag `date`. `days` muss nach Datum sortiert sein; der vorige
 /// Arbeitstag wird für die Ruhezeit gebraucht.
+///
+/// Pausen, Höchstarbeitszeit und Ruhezeit werden zweimal geprüft: mit der gezählten Arbeitszeit
+/// und – wenn das nichts ergibt – mit der tatsächlichen samt der Zeit außerhalb des
+/// Arbeitszeitrahmens ([`Day::actual_spans`]). Das Gesetz fragt nicht danach, was gezählt wird.
 pub fn day_warnings(days: &[Day], date: NaiveDate, s: &Settings) -> Vec<Warning> {
     let Some(idx) = days.iter().position(|d| d.date == date) else { return Vec::new() };
     let day = &days[idx];
     let mut out = Vec::new();
     let spans = day.spans(s);
     let work: i64 = spans.iter().map(|x| x.len()).sum();
+    let actual = day.actual_spans(s);
 
-    let pause = Day::legal_pause_secs(&spans);
-    if work > 9 * 3600 && pause < 45 * 60 {
-        out.push(Warning::Breaks { required: 45 * 60 });
-    } else if work > 6 * 3600 && pause < 30 * 60 {
-        out.push(Warning::Breaks { required: 30 * 60 });
-    }
-    // Fehlt die Pause ganz, sagt der Hinweis oben schon alles; sonst zählt auch, wann sie lag.
-    let no_break_at_all = pause == 0 && !out.is_empty();
-    let stretch = Day::longest_stretch_secs(&spans);
-    if stretch > MAX_STRETCH && !no_break_at_all {
-        out.push(Warning::LongStretch { work: stretch });
-    }
-    if work > MAX_DAILY_WORK {
-        out.push(Warning::MaxHours { work });
-    }
-    if let (Some(first), Some(prev)) = (
+    let counted = legal_checks(&spans, false);
+    let with_outside = if actual == spans { [None, None, None] } else { legal_checks(&actual, true) };
+    out.extend(counted.into_iter().zip(with_outside).filter_map(|(c, a)| c.or(a)));
+
+    // Ruhezeit seit dem Ende des letzten Tages mit Arbeit – gezählt bzw. tatsächlich.
+    let rest = |first: Option<&Span>, prev: Option<(NaiveDate, i64)>| {
+        let (first, (prev_date, prev_end)) = (first?, prev?);
+        Some((date - prev_date).num_days() * DAY_END + first.from - prev_end)
+    };
+    let before = &days[..idx];
+    let counted_rest = rest(
         spans.first(),
-        days[..idx].iter().rev().find_map(|d| d.record(s).filter(|r| r.work_secs > 0)),
-    ) {
-        let rest = (date - prev.date).num_days() * DAY_END + first.from - prev.last_end;
-        if rest < MIN_REST {
-            out.push(Warning::Rest { rest });
-        }
+        before.iter().rev().find_map(|d| d.record(s).filter(|r| r.work_secs > 0).map(|r| (d.date, r.last_end))),
+    );
+    let actual_rest =
+        rest(actual.first(), before.iter().rev().find_map(|d| d.actual_spans(s).last().map(|l| (d.date, l.to))));
+    match (counted_rest, actual_rest) {
+        (Some(rest), _) if rest < MIN_REST => out.push(Warning::Rest { rest, outside: false }),
+        (_, Some(rest)) if rest < MIN_REST => out.push(Warning::Rest { rest, outside: true }),
+        _ => {}
     }
-    if work > 0 && Settings::is_weekend(date) {
-        out.push(Warning::Weekend { counted: s.work_counts_on(date) });
+    // Arbeit an einem Tag ohne Soll: Sie geht nur in den Saldo ein, wenn der Stand es vorsieht –
+    // am Wochenende wie an einem abgewählten Arbeitstag.
+    if work > 0 && !s.is_workday(date) {
+        let counted = s.work_counts_on(date);
+        out.push(if Settings::is_weekend(date) { Warning::Weekend { counted } } else { Warning::FreeWeekday { counted } });
     }
     // Abschnitte unter einer Minute (z. B. kurz entsperrt in der Nacht) lohnen keinen Hinweis.
     let outside: Vec<Span> = day.outside_frame_spans(s).into_iter().filter(|x| x.len() >= 60).collect();
@@ -616,15 +696,19 @@ pub fn day_warnings(days: &[Day], date: NaiveDate, s: &Settings) -> Vec<Warning>
 /// Arbeitstage von `from` bis `to` ohne jeden Eintrag (`days`: alle Tage, nach Datum
 /// sortiert). Sie zählen trotzdem ins Soll – ab dem ersten erfassten Tag (davor gibt es keine
 /// Daten) bis gestern (heute zählt erst mit Arbeitszeit, siehe [`Settings::counted_target`]).
+/// Ein Eintrag ist, was eine Zeile ergibt ([`Day::record`]): erfasste Zeit, eine Korrektur
+/// oder eine Abwesenheit. Die bloße Entscheidung zur Erfassung an einem freien Tag ist keiner –
+/// sonst fiele der Tag ganz aus dem Soll, wenn er nachträglich Arbeitstag wird.
 pub fn missing_workdays(days: &[Day], from: NaiveDate, to: NaiveDate, today: NaiveDate, s: &Settings) -> Vec<NaiveDate> {
-    let Some(first) = days.iter().find(|d| !d.is_empty()).map(|d| d.date) else { return Vec::new() };
+    let entry = |d: &&Day| d.has_entries() || d.absence.is_some();
+    let Some(first) = days.iter().find(entry).map(|d| d.date) else { return Vec::new() };
     let Some(yesterday) = today.pred_opt() else { return Vec::new() };
     let (from, to) = (from.max(first), to.min(yesterday));
     if from > to {
         return Vec::new();
     }
     let recorded: std::collections::HashSet<NaiveDate> =
-        days.iter().filter(|d| d.date >= from && d.date <= to && !d.is_empty()).map(|d| d.date).collect();
+        days.iter().filter(|d| d.date >= from && d.date <= to).filter(entry).map(|d| d.date).collect();
     from.iter_days().take_while(|d| *d <= to).filter(|d| s.is_workday(*d) && !recorded.contains(d)).collect()
 }
 
@@ -639,7 +723,7 @@ pub fn balance(days: &[Day], from: NaiveDate, to: NaiveDate, today: NaiveDate, s
         .filter(|d| d.date >= from && d.date <= to)
         .filter_map(|d| d.record(s).map(|r| (d, r)))
         .fold((0, 0), |(w, t), (d, r)| {
-            (w + s.counted_work(d.date, r.shown_work_secs), t + s.counted_target(d, r.work_secs, today))
+            (w + s.counted_work(d.date, r.shown_work_secs), t + s.counted_target(d, &r, today))
         });
     let missing: i64 = missing_workdays(days, from, to, today, s).iter().map(|d| s.daily_target(*d)).sum();
     (work, target + missing)
@@ -1003,11 +1087,11 @@ mod tests {
         let days = vec![mon, tue, sat];
 
         let w = day_warnings(&days, date(16), &s);
-        assert!(w.contains(&Warning::Breaks { required: 45 * 60 }), "{w:?}");
+        assert!(w.contains(&Warning::Breaks { required: 45 * 60, outside: false }), "{w:?}");
         assert!(!w.iter().any(|x| matches!(x, Warning::MaxHours { .. })), "genau 10 Std. sind erlaubt");
 
         let w = day_warnings(&days, date(17), &s);
-        assert!(w.contains(&Warning::Rest { rest: h(9, 0) }), "{w:?}");
+        assert!(w.contains(&Warning::Rest { rest: h(9, 0), outside: false }), "{w:?}");
         let outside = Warning::OutsideFrame { spans: vec![Span::new(h(6, 30), h(7, 0))], frame: s.rules(date(17)).frame_text() };
         assert!(w.contains(&outside), "{w:?}");
         assert_eq!(
@@ -1021,7 +1105,7 @@ mod tests {
         long.add_period(h(7, 0), h(12, 0));
         long.add_period(h(13, 0), h(19, 0));
         let w = day_warnings(&[long], date(18), &s);
-        assert_eq!(w, vec![Warning::MaxHours { work: h(11, 0) }]);
+        assert_eq!(w, vec![Warning::MaxHours { work: h(11, 0), outside: false }]);
     }
 
     #[test]
@@ -1037,25 +1121,25 @@ mod tests {
         // 7 Std. am Stück, die Pause kommt erst danach: genug Pause, aber zu spät.
         let late = day(&[(h(7, 0), h(14, 0)), (h(14, 30), h(15, 30))]);
         let w = day_warnings(&[late], date(18), &s);
-        assert_eq!(w, vec![Warning::LongStretch { work: h(7, 0) }]);
+        assert_eq!(w, vec![Warning::LongStretch { work: h(7, 0), outside: false }]);
         assert_eq!(w[0].text(), "7:00 Std. ohne Pause – erlaubt sind höchstens 6 Std. am Stück (§ 4 ArbZG)");
         // Genau 6 Std. am Stück sind erlaubt.
         let ok = day(&[(h(7, 0), h(13, 0)), (h(13, 30), h(15, 0))]);
         assert!(day_warnings(&[ok], date(18), &s).is_empty());
         // Ganz ohne Pause genügt der Hinweis auf die fehlende Pause.
         let none = day(&[(h(7, 0), h(14, 0))]);
-        assert_eq!(day_warnings(&[none], date(18), &s), vec![Warning::Breaks { required: 30 * 60 }]);
+        assert_eq!(day_warnings(&[none], date(18), &s), vec![Warning::Breaks { required: 30 * 60, outside: false }]);
         // Zu wenig Pause und zu spät: beide Hinweise.
         let both = day(&[(h(7, 0), h(13, 10)), (h(13, 30), h(14, 30))]);
         assert_eq!(
             day_warnings(&[both], date(18), &s),
-            vec![Warning::Breaks { required: 30 * 60 }, Warning::LongStretch { work: h(6, 10) }]
+            vec![Warning::Breaks { required: 30 * 60, outside: false }, Warning::LongStretch { work: h(6, 10), outside: false }]
         );
         // Mindestpause 5 Min.: Eine Unterbrechung von 10 Min. ist keine Pause nach dem Gesetz –
         // die Arbeit davor und danach zählt zusammen (ohne die Unterbrechung).
         let short = Settings { min_work: 5 * 60, ..s.clone() }.with_rules(WorkRules { min_pause: 5 * 60, ..WorkRules::DEFAULT });
         let split = day(&[(h(7, 0), h(10, 0)), (h(10, 10), h(13, 30)), (h(14, 0), h(15, 0))]);
-        assert_eq!(day_warnings(&[split], date(18), &short), vec![Warning::LongStretch { work: h(6, 20) }]);
+        assert_eq!(day_warnings(&[split], date(18), &short), vec![Warning::LongStretch { work: h(6, 20), outside: false }]);
     }
 
     #[test]
@@ -1143,13 +1227,16 @@ mod tests {
         assert_eq!(four.daily_target(date(20)), 0); // Freitag
         assert!(four.is_workday(date(19)) && !four.is_workday(date(20)) && !four.is_workday(date(21)));
         assert_eq!(r4.summary(), "Arbeitszeitrahmen 07:00–22:00 Uhr  ·  Regelarbeitszeit 32 Std./Woche (Mo, Di, Mi, Do)  ·  Pausen ab 15 Min.");
-        // Arbeit am freien Freitag zählt nicht im Saldo, und es gibt keinen Hinweis wie am
+        // Arbeit am freien Freitag zählt nicht im Saldo – das sagt ein Hinweis wie am
         // Wochenende; mit dem Schalter im Stand ist sie Mehrarbeit.
         let mut fri = Day::new(date(20));
         fri.add_period(h(9, 0), h(11, 0));
-        assert!(day_warnings(&[fri.clone()], date(20), &four).is_empty());
+        let hint = day_warnings(&[fri.clone()], date(20), &four);
+        assert_eq!(hint, vec![Warning::FreeWeekday { counted: false }]);
+        assert_eq!(hint[0].text(), "Arbeit an einem freien Tag – zählt nicht im Saldo");
         assert_eq!(balance(&[fri.clone()], date(16), date(22), date(23), &four), (0, 0));
         let four_counted = s.clone().with_rules(WorkRules { free_days_count: true, ..r4 });
+        assert_eq!(day_warnings(&[fri.clone()], date(20), &four_counted), vec![Warning::FreeWeekday { counted: true }]);
         assert_eq!(balance(&[fri], date(16), date(22), date(23), &four_counted), (h(2, 0), 0));
         // Ungültige Angaben: ohne Arbeitstag wieder Mo–Fr, Samstag und Sonntag gibt es nicht.
         assert_eq!(WorkRules { workdays: 0, ..d }.sanitized().workdays, ALL_WORKDAYS);
@@ -1184,7 +1271,7 @@ mod tests {
 
         // Halber Urlaubstag mit 4 Std. Arbeit: +0:06 statt −3:48.
         let half = day(16, 4, Some(Absence::new(Vacation, true)));
-        assert_eq!(s.counted_target(&half, h(4, 0), date(23)), full / 2);
+        assert_eq!(s.counted_target(&half, &half.record(&s).unwrap(), date(23)), full / 2);
         // Ganzer Urlaubstag, trotzdem 1 Std. gearbeitet: Mehrarbeit.
         let vacation = day(17, 1, Some(Absence::new(Vacation, false)));
         // Zeitausgleich ohne Arbeitszeit: das volle Soll zählt.
@@ -1200,8 +1287,8 @@ mod tests {
         assert_eq!(balance(&days, date(16), date(22), date(21), &s), (h(5, 0), full / 2 + 2 * full));
         assert_eq!(fmt_balance(account(&days, date(22), &s)), "−14:30 h");
         // Geplanter Zeitausgleich zählt erst an seinem Tag.
-        assert_eq!(s.counted_target(&days[2], 0, date(17)), 0);
-        assert_eq!(s.counted_target(&days[2], 0, date(18)), full);
+        assert_eq!(s.counted_target(&days[2], &days[2].record(&s).unwrap(), date(17)), 0);
+        assert_eq!(s.counted_target(&days[2], &days[2].record(&s).unwrap(), date(18)), full);
         // Die Abwesenheit allein macht aus dem Tag einen Eintrag.
         assert!(!days[2].is_empty() && days[2].has_corrections());
         // Texte für Export und Tabelle – und zurück.
@@ -1269,7 +1356,7 @@ mod tests {
         assert_eq!(s.day_balance(&holiday, &holiday.record(&s).unwrap(), date(23)), Some(h(2, 0)));
         // Die Kurzfassung nennt den Schalter nur, wenn er an ist.
         assert!(!s.rules(date(16)).summary().contains("freien Tagen"));
-        assert!(s.rules(date(19)).summary().ends_with("Arbeit an freien Tagen zählt als Mehrarbeit"));
+        assert!(s.rules(date(19)).summary().ends_with("Arbeit an freien Tagen im Saldo"));
         // Der Standard zählt nicht.
         assert!(!WorkRules::DEFAULT.free_days_count && !Settings::default().work_counts_on(date(15)));
         // `sanitized` lässt den Schalter stehen.
@@ -1341,8 +1428,8 @@ mod tests {
         // Ein Tag nur mit Pause o. Ä., aber ohne Arbeitszeit, zählt sein Soll ebenso.
         let mut tue = Day::new(date(17));
         tue.add_break(h(12, 0), h(12, 30));
-        assert_eq!(s.counted_target(&tue, 0, date(23)), h(7, 48));
-        assert_eq!(s.counted_target(&tue, 0, date(17)), 0, "heute noch nicht");
+        assert_eq!(s.counted_target(&tue, &tue.record(&s).unwrap(), date(23)), h(7, 48));
+        assert_eq!(s.counted_target(&tue, &tue.record(&s).unwrap(), date(17)), 0, "heute noch nicht");
     }
 
     #[test]
@@ -1363,5 +1450,145 @@ mod tests {
         let (work, target) = balance(&days, date(16), date(22), date(18), &s);
         assert_eq!(work, h(15, 8));
         assert_eq!(fmt_balance(work - target), "−0:28 h");
+    }
+
+    #[test]
+    fn daily_targets_are_whole_minutes_and_add_up() {
+        // 38,5 Std. an vier Tagen: 9:37:30 je Tag ginge nicht in Minuten auf.
+        let r = WorkRules { workdays: 0b0_1111, weekly_target: h(38, 30), ..WorkRules::DEFAULT };
+        let s = Settings::default().with_rules(r);
+        let targets: Vec<i64> = (16..=22).map(|d| s.daily_target(date(d))).collect();
+        assert_eq!(targets, [h(9, 37), h(9, 38), h(9, 37), h(9, 38), 0, 0, 0]);
+        assert_eq!(targets.iter().sum::<i64>(), h(38, 30));
+        assert_eq!(r.daily_target_range(), (h(9, 37), h(9, 38)));
+        assert_eq!(r.daily_target_text(), "9:37 bis 9:38 Std.");
+        assert_eq!(WorkRules::DEFAULT.daily_target_text(), "7:48 Std.");
+        assert!((16..=20).all(|d| Settings::default().daily_target(date(d)) == h(7, 48)));
+        // Di und Do als Arbeitstage: der zweite bekommt die Minute mehr.
+        let two = WorkRules { workdays: 0b0_1010, weekly_target: h(19, 15), ..WorkRules::DEFAULT };
+        assert_eq!((two.daily_target_on(date(17)), two.daily_target_on(date(19))), (h(9, 37), h(9, 38)));
+        assert_eq!(two.daily_target_on(date(16)), 0);
+        // Vier Tage mit je 9:37:30 Arbeit: Jeder Tagessaldo ist eine ganze Minutenzahl, und
+        // zusammen ergeben sie genau den Wochensaldo.
+        let days: Vec<Day> = (16..=19)
+            .map(|d| {
+                let mut day = Day::new(date(d));
+                day.add_period(h(8, 0), h(17, 37) + 30);
+                day
+            })
+            .collect();
+        let per_day: Vec<i64> = days.iter().map(|d| s.day_balance(d, &d.record(&s).unwrap(), date(23)).unwrap()).collect();
+        assert_eq!(per_day, [0, -60, 0, -60]);
+        let (work, target) = balance(&days, date(16), date(22), date(23), &s);
+        assert_eq!(work - target, per_day.iter().sum::<i64>());
+        assert_eq!(fmt_balance(work - target), "−0:02 h");
+        // Halber Tag: die Hälfte, auf ganze Minuten abgerundet.
+        let half = Some(Absence::new(crate::day::AbsenceKind::Vacation, true));
+        assert_eq!(s.day_target(date(16), half), h(4, 48));
+        assert_eq!(Settings::default().day_target(date(16), half), h(3, 54));
+        // Eine Wochenarbeitszeit mit Sekunden (nur aus einer fremden Datenbank) wird abgerundet.
+        assert_eq!(WorkRules { weekly_target: h(39, 0) + 59, ..WorkRules::DEFAULT }.sanitized().weekly_target, h(39, 0));
+    }
+
+    #[test]
+    fn todays_target_counts_only_as_far_as_worked() {
+        let s = Settings::default();
+        let mut mon = Day::new(date(16));
+        mon.add_period(h(8, 0), h(16, 0)); // 8:00 Std.: +0:12
+        let mut tue = Day::new(date(17));
+        tue.add_period(h(8, 0), h(8, 1));
+        let week = |days: &[Day], today: u32| {
+            let (work, target) = balance(days, date(16), date(22), date(today), &s);
+            work - target
+        };
+        let day_balance = |d: &Day, today: u32| s.day_balance(d, &d.record(&s).unwrap(), date(today));
+        // Dienstag vor dem ersten Entsperren und um 08:01 Uhr: Der Wochensaldo bleibt stehen.
+        assert_eq!(week(&[mon.clone()], 17), h(0, 12));
+        assert_eq!(week(&[mon.clone(), tue.clone()], 17), h(0, 12));
+        assert_eq!(day_balance(&tue, 17), Some(0));
+        // Mittags ebenso; über dem Soll wächst er.
+        tue.add_period(h(8, 0), h(12, 0));
+        assert_eq!(week(&[mon.clone(), tue.clone()], 17), h(0, 12));
+        let mut long = tue.clone();
+        long.add_period(h(12, 0), h(16, 30));
+        assert_eq!(day_balance(&long, 17), Some(h(0, 42)));
+        // Feierabend um 12:00 Uhr: Der Tag ist zu Ende, der Rest fehlt.
+        let mut closed = tue.clone();
+        closed.end = Some(h(12, 0));
+        assert_eq!(day_balance(&closed, 17), Some(h(4, 0) - h(7, 48)));
+        // Ohne Feierabend fehlt er ab morgen.
+        assert_eq!(day_balance(&tue, 18), Some(h(4, 0) - h(7, 48)));
+        assert_eq!(week(&[mon.clone(), tue.clone()], 18), h(0, 12) + h(4, 0) - h(7, 48));
+        // Halber Urlaubstag heute: das halbe Soll, ebenfalls nur soweit erarbeitet.
+        let mut half = tue.clone();
+        half.absence = Some(Absence::new(crate::day::AbsenceKind::Vacation, true));
+        assert_eq!(day_balance(&half, 17), Some(h(0, 6)));
+        let mut half_only = Day::new(date(17));
+        half_only.absence = half.absence;
+        assert_eq!(day_balance(&half_only, 17), None);
+        assert_eq!(day_balance(&half_only, 18), Some(-h(3, 54)));
+        // Zeitausgleich zählt sofort: Dort soll das Zeitkonto sinken.
+        let mut off = Day::new(date(17));
+        off.absence = Some(Absence::new(crate::day::AbsenceKind::TimeOff, false));
+        assert_eq!(day_balance(&off, 17), Some(-h(7, 48)));
+    }
+
+    #[test]
+    fn legal_checks_see_work_outside_the_frame() {
+        let s = Settings::default();
+        // Montag bis 23:30 Uhr am Mac (gezählt bis 22:00), Dienstag ab 09:15 Uhr.
+        let mut mon = Day::new(date(16));
+        mon.add_period(h(8, 0), h(12, 0));
+        mon.add_period(h(13, 0), h(23, 30));
+        let mut tue = Day::new(date(17));
+        tue.add_period(h(9, 15), h(12, 0));
+        let w = day_warnings(&[mon, tue.clone()], date(17), &s);
+        assert_eq!(w, vec![Warning::Rest { rest: h(9, 45), outside: true }]);
+        assert_eq!(
+            w[0].text(),
+            "Ruhezeit nur 9:45 Std. – vorgeschrieben sind 11 Std. (§ 5 ArbZG), mit der Zeit außerhalb des Arbeitszeitrahmens"
+        );
+        // Mittwoch 05:00–11:00 und 11:45–16:00 Uhr: gezählt 8:15, tatsächlich 10:15 Std.
+        let mut wed = Day::new(date(18));
+        wed.add_period(h(5, 0), h(11, 0));
+        wed.add_period(h(11, 45), h(16, 0));
+        let w = day_warnings(&[wed.clone()], date(18), &s);
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert_eq!(w[0], Warning::MaxHours { work: h(10, 15), outside: true });
+        assert!(matches!(w[1], Warning::OutsideFrame { .. }));
+        // Ein Verstoß schon in der gezählten Zeit wird nicht doppelt gemeldet.
+        let mut long = Day::new(date(18));
+        long.add_period(h(5, 0), h(11, 0));
+        long.add_period(h(11, 45), h(19, 0));
+        let w = day_warnings(&[long], date(18), &s);
+        let max: Vec<&Warning> = w.iter().filter(|x| matches!(x, Warning::MaxHours { .. })).collect();
+        assert_eq!(max, [&Warning::MaxHours { work: h(11, 15), outside: false }]);
+        // Ein kurzer Blick auf den Mac in der Nacht (unter einer Minute) verkürzt keine Ruhezeit.
+        let mut thu = Day::new(date(19));
+        thu.add_period(h(2, 0), h(2, 0) + 30);
+        thu.add_period(h(8, 0), h(12, 0));
+        assert!(day_warnings(&[wed, thu], date(19), &s).is_empty());
+        // Sonntagabend erfasst, aber nicht gezählt: keine Arbeit – also auch keine Ruhezeit.
+        let mut sun = Day::new(date(22));
+        sun.add_period(h(20, 0), h(23, 0));
+        sun.free_day = Some(crate::day::FreeDay::Uncounted);
+        let mut next = Day::new(date(23));
+        next.add_period(h(7, 0), h(12, 0));
+        assert!(day_warnings(&[sun, next], date(23), &s).is_empty());
+    }
+
+    #[test]
+    fn a_day_with_only_the_free_day_mark_is_no_entry() {
+        let s = Settings::default();
+        let mut first = Day::new(date(16));
+        first.add_period(h(8, 0), h(16, 0));
+        // Nur die Entscheidung zur Erfassung, an einem Tag, der (inzwischen) Arbeitstag ist.
+        let mut marked = Day::new(date(17));
+        marked.free_day = Some(crate::day::FreeDay::Stopped);
+        let days = [first, marked];
+        assert_eq!(missing_workdays(&days, date(16), date(22), date(19), &s), [date(17), date(18)]);
+        assert_eq!(balance(&days, date(16), date(22), date(19), &s), (h(8, 0), 3 * h(7, 48)));
+        // Ein solcher Tag allein ist auch kein erster erfasster Tag.
+        assert!(missing_workdays(&days[1..], date(16), date(22), date(19), &s).is_empty());
     }
 }

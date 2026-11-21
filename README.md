@@ -75,10 +75,12 @@ reine Anzeige und lassen sich nicht anklicken. Lange Hinweise brechen um, damit 
   unter Systemeinstellungen › Mitteilungen › Tagwerk. Nur in der installierten App.
 - **Inaktivität** (einschaltbar) – bleibt der entsperrte Mac länger als eingestellt ohne
   Eingabe, gilt er als verlassen: Die Erfassung endet rückwirkend mit der letzten Eingabe,
-  wie bei einer Sperre, und läuft mit der nächsten Eingabe weiter. Solange eine App den
-  Bildschirm wach hält (Videokonferenz, Präsentation), zählt die Zeit weiter.
+  wie bei einer Sperre, und läuft mit der nächsten Eingabe weiter – auch am nächsten
+  Morgen, wenn der Mac über Nacht nie gesperrt war. Solange eine App den Bildschirm wach
+  hält (Videokonferenz, Präsentation), zählt die Zeit weiter.
 - **Nachfrage nach langer Sperre** (einschaltbar) – war der Mac mindestens 30 Min.
-  gesperrt, fragt beim Entsperren eine Mitteilung, was die Zeit war: Meeting, Telefonat,
+  gesperrt (bei einer längeren Mindestpause: so lange wie sie), fragt beim Entsperren eine
+  Mitteilung, was die Zeit war: Meeting, Telefonat,
   Networking oder sonstige Arbeit ohne Mac – oder schon Feierabend (dann endet der Tag mit
   dem Sperren). Ohne Antwort bleibt es eine Pause.
 - **Zeitkonto** – das Menü zeigt neben dem Saldo der Woche den Stand des Zeitkontos: den
@@ -99,8 +101,11 @@ reine Anzeige und lassen sich nicht anklicken. Lange Hinweise brechen um, damit 
 - **Ohne Mac weiterarbeiten** – vor einem Meeting, Telefonat oder Termin wählen
   (Meeting, Telefonat, Networking oder Sonstiges). Die Zeit zählt dann als Arbeitszeit, auch wenn
   der Mac gesperrt wird oder in den Ruhezustand geht – bis zum nächsten Entsperren oder
-  „Zurück am Mac“, spätestens um Mitternacht oder mit dem Feierabend. Sie erscheint als
-  „Arbeit ohne Mac“ mit der gewählten Notiz. Beim Beenden der App bleibt der Zustand
+  „Zurück am Mac“, spätestens mit dem Feierabend. Sie erscheint als „Arbeit ohne Mac“ mit
+  der gewählten Notiz. Wählt bis Mitternacht niemand „Zurück am Mac“, war es vergessen:
+  Dann endet die Arbeit ohne Mac mit dem Arbeitszeitrahmen, und beim nächsten Entsperren
+  nennt eine Mitteilung den Eintrag – das wahre Ende trägt man im Fenster „Aufzeichnungen“
+  nach. Beim Beenden der App bleibt der Zustand
   bestehen, beim Abmelden oder Neustarten endet er.
 - **Heute erfassen** – nur an freien Tagen (Wochenende, abgewählte Arbeitstage), nicht
   nach Feierabend. Dort zeichnet Tagwerk zwar auf, zählt aber nichts: Der Status heißt
@@ -121,7 +126,13 @@ reine Anzeige und lassen sich nicht anklicken. Lange Hinweise brechen um, damit 
   letzte Angabe: Liegt ein Termin vor dem neu festgelegten Beginn oder nach dem neu
   festgelegten Feierabend, entfällt er bzw. wird dort abgeschnitten – eine Mitteilung
   nennt, was entfallen ist. Wird der Termin erst danach eingetragen, zählt er auch vor dem
-  Beginn bzw. nach dem Feierabend.
+  Beginn bzw. nach dem Feierabend. Der Beginn muss vor dem Feierabend liegen; sonst bleibt
+  alles, wie es war, und eine Mitteilung sagt, warum. Nach dem Feierabend zeichnet Tagwerk
+  weiter auf, zählt aber nichts mehr: Wer ihn mit „Feierabend aufheben“ zurücknimmt,
+  bekommt die Zeit dazwischen zurück. Während „Arbeit unterbrechen“ endet der Tag mit der
+  Unterbrechung, nicht erst mit dem Klick. Vor Beginn des Arbeitszeitrahmens gibt es
+  keinen Feierabend – kurz nach Mitternacht ist der Abend davor gemeint, und der neue Tag
+  bliebe sonst gesperrt.
 - **Arbeitszeit neben dem Symbol** – auf Wunsch steht die Arbeitszeit von heute (z. B.
   `6:12`) rechts neben dem Symbol in der Menüleiste; sonst zeigt sie der Tooltip.
 - **Globale Kurzbefehle** – auf Wunsch wirken ⌃⌥⌘P („Arbeit unterbrechen“ bzw. „Weiter
@@ -140,7 +151,12 @@ Das Fenster öffnet in der zuletzt benutzten Ansicht.
 Die Ansicht **Tage** zeigt Kennzahlen für heute, die Woche, den Monat, den
 Durchschnitt pro Arbeitstag und das Zeitkonto, eine Tabelle aller Tage mit Saldo und Wochensummen sowie
 einen **Inspektor**. Dort lassen sich Arbeitsbeginn, Pausen, Arbeit
-ohne Mac und Feierabend eines Tages korrigieren – auch für Tage ohne Aufzeichnung.
+ohne Mac und Feierabend eines Tages korrigieren – auch für Tage ohne Aufzeichnung. Der
+Arbeitsbeginn muss vor dem Feierabend liegen, und Zeiten in der Zukunft gibt es nicht: An
+künftigen Tagen lässt sich nur eine Abwesenheit eintragen, heute nichts nach der jetzigen
+Uhrzeit. Was nicht geht, sagt der Inspektor über dem betroffenen Feld; der Tag bleibt dann,
+wie er ist. Liegt ein neuer Eintrag vor dem bisher ersten erfassten Tag, fragt ein Dialog
+nach – alle Arbeitstage dazwischen zählten sonst unbemerkt mit ihrem Soll als Minus.
 **Arbeit ohne Mac** (Telefonat, Meeting … bei gesperrtem Mac) zählt als Arbeitszeit,
 mit einem Grund aus der Auswahlbox (Meeting, Telefonat, Networking, Sonstiges); eine
 manuelle Pause in dieser Zeit entfällt und umgekehrt. Genauso bei Arbeitsbeginn und
@@ -172,7 +188,10 @@ auf Klick als kleines Fenster.
   nichts anderes eintragen oder ändern, bis sie wieder auf „Keine“ steht, und die
   Menüleisten-App erfasst an diesem Tag nichts: Das Menü zeigt „Heute abwesend: Urlaub“
   ohne Arbeitsbeginn, Unterbrechen, Ohne Mac und Feierabend. Ein halber Tag geht auch neben
-  Arbeitszeit. Urlaub,
+  Arbeitszeit: „Ganzer Tag/Halber Tag“ lässt sich schon vor der Art wählen, und die
+  Rückfrage für heute bietet „Halben Tag eintragen“ an – die erfasste Zeit bleibt dann. An
+  freien Tagen (Wochenende, abgewählte Arbeitstage) gibt es kein Soll; dort lässt sich
+  keine Abwesenheit eintragen, eine vorhandene nur entfernen. Urlaub,
   Krankheit und Feiertag senken das Soll des Tages – ganz oder, als halber Tag, auf die
   Hälfte: Ein halber Urlaubstag mit vier Stunden Arbeit ist damit kein Minus mehr.
   Sonderurlaub (etwa für Hochzeit, Umzug oder Todesfall) senkt das Soll ebenfalls, gilt
@@ -186,7 +205,8 @@ auf Klick als kleines Fenster.
   „Erfasste Zeit zählen“ in der Wochenansicht. Ohne Haken zählt die erfasste Zeit nicht:
   Oben steht „Freier Tag – die erfasste Zeit zählt nicht“, die Tabelle zeigt weder Beginn
   noch Ende, und Arbeitsbeginn, Pausen und Feierabend lassen sich erst mit dem Haken
-  festlegen (schon festgelegte lassen sich entfernen). Arbeit ohne Mac geht immer – wie in
+  festlegen (schon festgelegte lassen sich entfernen; solange der Haken fehlt, gelten
+  Beginn und Feierabend nicht). Arbeit ohne Mac geht immer – wie in
   der Wochenansicht, die an einem solchen Tag auch keine Kanten zum Verschieben zeigt.
 
 - **Alle Einträge löschen** – ganz unten im Inspektor oder per Rechtsklick in der
@@ -199,14 +219,19 @@ auf Klick als kleines Fenster.
 - **Widerrufen und Wiederholen** (⌘Z, ⇧⌘Z, Menü „Bearbeiten“) – jede Korrektur aus dem
   Inspektor und der Wochenansicht lässt sich zurücknehmen, bis zu 50 Schritte, solange das
   Fenster offen ist. Das Menü nennt den Schritt („Widerrufen: Pause entfernen“), und der
-  betroffene Tag wird gezeigt. Zurückgenommen werden nur die Korrekturen des Tages; inzwischen
-  erfasste Zeit bleibt (außer nach „Alle Einträge löschen“, das auch die erfasste Zeit
-  zurückbringt).
+  betroffene Tag wird gezeigt. Zurückgenommen wird nur, was der Schritt selbst geändert
+  hat: Was inzwischen anders geändert wurde – etwa ein Feierabend oder „Ohne Mac
+  weiterarbeiten“ aus dem Menü –, bleibt, und eine Meldung nennt es. Ergäbe das Widerrufen
+  einen unzulässigen Tag (Beginn nicht vor Feierabend, ganztägige Abwesenheit neben
+  Einträgen), bleibt der Tag, wie er ist. Inzwischen erfasste Zeit bleibt immer – auch nach
+  „Alle Einträge löschen“, das die gelöschte erfasste Zeit zurückbringt.
 - **Filter** (Symbolleiste oder Menü „Darstellung“) – schränkt die Tabelle auf einen Zeitraum
   ein (dieser oder letzter Monat, dieses oder letztes Jahr), auf Tage mit Hinweisen oder auf
   korrigierte Tage; die Merkmale lassen sich kombinieren. Solange gefiltert wird, ist das
   Symbol gefüllt, und die Fußzeile nennt, wie viele Tage zu sehen sind. Kennzahlen und
-  Wochensummen zählen weiter alles.
+  Wochensummen zählen weiter alles. „Arbeitstage“ sind überall die Tage mit Arbeitszeit –
+  in den Kennzahlen, den Wochenzeilen, der Fußzeile, im Export-Dialog und in den
+  Summenzeilen der Exporte.
 
 ### Wochenansicht
 
@@ -235,9 +260,12 @@ zu „Woche“ zeigt die Woche des ausgewählten Tags. In der Menüleisten-App e
 - Arbeitsbeginn und Feierabend lassen sich mit der Maus verschieben: Fährt die Maus an die
   Oberkante des ersten bzw. die Unterkante des letzten Abschnitts, erscheint ein Griff.
   Beim Ziehen folgt der Tag samt Arbeitszeit und Pausen im Tageskopf, ein Schild nennt die
-  neue Uhrzeit und die Abweichung („Beginn 07:30 · +25 Min.“). Die Zeit rastet auf
-  5 Minuten ein, mit gedrückter ⌥-Taste auf die Minute, und am erfassten Wert – dorthin
-  zurückgezogen, gilt wieder die automatische Erfassung. Arbeit ohne Mac, die dabei
+  neue Uhrzeit und die Abweichung („Beginn 07:30 · +25 Min.“). Ändert sich die Arbeitszeit
+  dabei anders als die Uhrzeit, steht es dazu („· Arbeitszeit +1:45 h“) – etwa wenn ein
+  manueller Feierabend neben abgesetzter Arbeit ohne Mac die Zeit seit dem letzten Sperren
+  mitzählen lässt. Die Zeit rastet auf 5 Minuten ein, mit gedrückter ⌥-Taste auf die
+  Minute, und am erfassten Wert – dorthin zurückgezogen, gilt wieder die automatische
+  Erfassung; die Rasterwerte gleich daneben bleiben erreichbar. Arbeit ohne Mac, die dabei
   entfiele, ist orange gestrichelt; Esc bricht ab, ⌘Z nimmt die Änderung zurück.
   Arbeitsbeginn und Feierabend tragen eine Linie in Textfarbe. Ist eine Grenze manuell
   festgelegt, ist die Linie kräftiger und hat am rechten Ende einen Punkt. Das Ende eines
@@ -247,6 +275,10 @@ zu „Woche“ zeigt die Woche des ausgewählten Tags. In der Menüleisten-App e
   (mit Uhrzeit-Feld) oder zurücksetzen und – an Arbeitstagen, auch künftigen –
   die Abwesenheit wählen (Urlaub, Krank, Feiertag, je ganz oder halb, Sonderurlaub,
   Zeitausgleich, keine; ganztags nur an einem Tag ohne andere Einträge) oder alle Einträge des Tages löschen.
+  Für „ändern …“ gelten dieselben Grenzen wie beim Ziehen: im Arbeitszeitrahmen, nicht in
+  der Zukunft und mindestens 5 Minuten vom anderen Ende entfernt; „Übernehmen“ ohne
+  Änderung bewirkt nichts. An freien Tagen lässt sich keine Abwesenheit eintragen, eine
+  vorhandene nur entfernen.
 - Eine Abwesenheit liegt als türkises, gestricheltes Band über dem Arbeitszeitrahmen des
   Tages, mit ihrer Art oben; Abschnitte, an denen trotzdem gearbeitet wurde, darüber.
 - Der Tag in Bearbeitung – derselbe, den in „Tage“ der Inspektor zeigt – trägt sein Datum
@@ -273,7 +305,10 @@ zu „Woche“ zeigt die Woche des ausgewählten Tags. In der Menüleisten-App e
   Beginn, Ende und Grund (Meeting, Telefonat, Networking, Sonstiges). In einer Pause ist
   die ganze Pause vorgeschlagen, vor dem Arbeitsbeginn und nach dem Feierabend eine halbe
   Stunde ab dem Klick. Fährt die Maus über einen freien Bereich, zeigt ein Rahmen genau
-  diesen Vorschlag. Zukünftige Zeiten lassen sich nicht eintragen.
+  diesen Vorschlag. Den Vorschlag nimmt der Dialog unverändert an, ebenso eine Eingabe, die
+  genau eine Pause füllt – auch wenn sie kürzer ist als die Mindestdauer für Arbeit ohne
+  Mac; kurz vor „jetzt“ beginnt der Vorschlag entsprechend früher. Zukünftige Zeiten lassen
+  sich nicht eintragen.
 
 <details>
 <summary>Weitere Ansichten</summary>
@@ -303,7 +338,8 @@ Arbeitstage, Arbeitszeitrahmen, Mindestpause): Sie gelten ab einem Datum, damit 
 Titelleiste zeigt den Datenordner im Finder. **Standardwerte** setzt alle Einstellungen
 auf allen Reitern zurück, auch Zeitkonto und Übertrag; die Arbeitszeitregeln gelten ab
 heute wieder wie zu Beginn, frühere Tage behalten ihre Stände, geplante entfallen. Nur
-„Bei Anmeldung starten“ bleibt, wie es ist.
+„Bei Anmeldung starten“ bleibt, wie es ist. Vorher fragt ein Dialog nach und nennt, was
+zurückgesetzt wird und was bleibt.
 
 Die Einstellungen stehen auf vier Reitern:
 
@@ -315,15 +351,15 @@ Die Einstellungen stehen auf vier Reitern:
 |              | Kurzbefehle            | ⌃⌥⌘P und ⌃⌥⌘A wirken in jeder App, auch bei geschlossenem Menü           | aus             |
 | Arbeitszeit  | Regeln (je Stand, gültig ab einem Datum): | | |
 |              | – Regelarbeitszeit     | Wochenarbeitszeit, daraus ergibt sich das Tagessoll                      | 39 Std.         |
-|              | – Arbeitstage          | Mo bis Fr einzeln wählbar; das Wochensoll verteilt sich gleichmäßig auf sie (angezeigt als „4-Tage-Woche · 9:45 h pro Arbeitstag“) | Mo–Fr |
-|              | – Arbeitszeitrahmen    | Nur in diesem Zeitraum wird Arbeitszeit bzw. Pause gezählt – an jedem Tag | 07:00–22:00 Uhr |
+|              | – Arbeitstage          | Mo bis Fr einzeln wählbar; das Wochensoll verteilt sich gleichmäßig auf sie (angezeigt als „4-Tage-Woche · 9:45 Std. pro Arbeitstag“, bei ungeraden Wochenarbeitszeiten „9:37 bis 9:38 Std.“) | Mo–Fr |
+|              | – Arbeitszeitrahmen    | Nur in diesem Zeitraum wird Arbeitszeit bzw. Pause gezählt – an jedem Tag; als Uhrzeiten einzutippen, bis Mitternacht: 24:00 | 07:00–22:00 Uhr |
 |              | – Mindestpause         | Ab dieser Sperrdauer gilt eine Unterbrechung als Pause                  | 15 Min.         |
-|              | – Freie Tage           | Arbeit an freien Tagen (Wochenende, abgewählte Arbeitstage) als Mehrarbeit in Saldo und Zeitkonto zählen | aus |
+|              | – Freie Tage           | „Arbeit an freien Tagen in Saldo und Zeitkonto einrechnen“: Arbeit am Wochenende und an abgewählten Arbeitstagen geht als Mehrarbeit in Saldo und Zeitkonto ein | aus |
 |              | Zeitkonto              | Zählt alle erfassten Tage oder erst ab einem Datum; der Übertrag ist der Saldo aus der Zeit davor (z. B. `+12:30`) | alle Tage, kein Übertrag |
 | Erfassung    | Arbeit ohne Mac        | „mindestens … Minuten“ (1 bis 240): kürzere Abschnitte lassen sich im Fenster „Aufzeichnungen“ nicht eintragen | 15 Min. |
 |              | Inaktivität            | Erfassung anhalten nach so vielen Minuten ohne Eingabe                  | aus (10 Min.)   |
-|              | Lange Sperre           | Beim Entsperren nach mindestens 30 Min. Sperre nachfragen               | aus             |
-|              | Freie Tage             | Automatische Erfassung nur an Arbeitstagen zählen; am Wochenende und an abgewählten Arbeitstagen erst nach „Heute erfassen“ | ein |
+|              | Lange Sperre           | Beim Entsperren nach mindestens 30 Min. Sperre nachfragen (nie kürzer als die Mindestpause); nur für Sperren, die im Arbeitszeitrahmen begonnen haben und am selben Tag enden | aus |
+|              | Freie Tage             | Automatische Erfassung nur an Arbeitstagen als Arbeitszeit zählen; am Wochenende und an abgewählten Arbeitstagen erst nach „Heute erfassen“ | ein |
 | Mitteilungen | Mitteilungen           | Zeigt, ob Tagwerk Mitteilungen senden darf; wenn nicht, öffnet „Systemeinstellungen öffnen“ die Mitteilungseinstellungen von Tagwerk | – |
 |              | Erinnern an            | Höchstarbeitszeit (9:45 und 10 Std.) und Pause (5:45 und 6 Std. am Stück), einzeln abschaltbar | beides ein |
 
@@ -337,10 +373,12 @@ Die Einstellungen stehen auf vier Reitern:
   welcher als nächster geplant ist, jeweils mit dem Tagessoll; der heute gültige ist in der
   Liste fett, geplante sind grau. An freien Tagen – dem Wochenende und abgewählten
   Arbeitstagen – gibt es kein Soll. Arbeit dort wird angezeigt, wirkt sich aber
-  standardmäßig nicht auf Saldo und Zeitkonto aus; mit „Arbeit an freien Tagen als
-  Mehrarbeit zählen“ im Stand zählt sie als Mehrarbeit (Spalte „Freie Tage“: „zählen“).
-  Tage, an denen sie nicht zählt, haben in Tabelle, Inspektor und Export keinen Saldo
-  („–“). Die Fußzeile im
+  standardmäßig nicht auf Saldo und Zeitkonto aus; mit „Arbeit an freien Tagen in Saldo
+  und Zeitkonto einrechnen“ im Stand geht sie als Mehrarbeit ein (Spalte „Freie Tage“: „im
+  Saldo“). Das ist etwas anderes als „Heute erfassen“: Jenes entscheidet, ob die an einem
+  freien Tag erfasste Zeit überhaupt als Arbeitszeit zählt – dieser Schalter, ob solche
+  Arbeitszeit auch den Saldo ändert. Tage, an denen sie nicht eingeht, haben in Tabelle,
+  Inspektor und Export keinen Saldo („–“, in CSV ein leeres Feld). Die Fußzeile im
   Fenster „Aufzeichnungen“ nennt die Regeln des gewählten Tages („Regeln am 13.11.2026: …“),
   ohne Auswahl die von heute. Das Zeitkonto zählt ohne Haken alle erfassten Tage, mit Haken erst ab dem Datum; der Übertrag wird mit
   Vorzeichen eingegeben (`+12:30`, `−3:15`).
@@ -348,8 +386,10 @@ Die Einstellungen stehen auf vier Reitern:
   **Neu …** öffnet das Blatt „Arbeitszeit ändern“ mit heute als „Gültig ab“ und den Regeln,
   die heute gelten; **Bearbeiten …** (oder Doppelklick) ändert den gewählten Stand samt
   Datum, beim ersten Stand nur die Regeln. Gespeichert wird erst mit „Übernehmen“. Unter
-  dem Datum steht, bis wann der Stand gilt; orange, wenn er rückwirkend Saldo und
-  Aufzeichnungen ändert oder einen vorhandenen Stand am selben Tag ersetzt. Ein Stand, der
+  dem Datum steht, bis wann der Stand gilt und für welche Tage danach andere Regeln gelten
+  als bisher – auch beim Verschieben eines Stands, wo alle Tage zwischen altem und neuem
+  Datum betroffen sind; orange, wenn er rückwirkend Saldo und Aufzeichnungen ändert oder
+  einen vorhandenen Stand am selben Tag ersetzt. Ein Stand, der
   dem davor gleicht, entfällt von selbst. **Löschen** fragt nach; ab dem Datum gilt dann
   wieder der Stand davor. Der erste Stand lässt sich nicht löschen.
 
@@ -393,10 +433,12 @@ Wahl:
   der Hinweise.
 
 CSV und PDF zeigen Arbeitszeit und Pausen wie das Fenster (nach den angezeigten
-Uhrzeiten). Die Markdown-Datei enthält:
+Uhrzeiten). Der Saldo ist in allen drei Formaten derselbe wie im Fenster. Ein Tag ohne
+Saldo (Arbeit an einem freien Tag, die nicht zählt) hat in Markdown und PDF „–“, in CSV
+ein leeres Feld. Die Markdown-Datei enthält:
 
 1. eine **Übersichtstabelle** mit Beginn, Ende, Arbeits- und Pausenzeit (sekundengenau)
-   sowie Saldo je Tag und einer Summenzeile,
+   sowie Saldo je Tag (wie im Fenster nach den angezeigten Minuten) und einer Summenzeile,
 2. **`## Hinweise`** – Verstöße gegen die [Regeln](#regeln),
 3. **`## Korrekturen`** – die manuellen Entscheidungen samt Arbeit ohne Mac mit Notiz und
    Abwesenheiten,
@@ -405,7 +447,11 @@ Uhrzeiten). Die Markdown-Datei enthält:
 Ein Markdown-Export lässt sich wieder einlesen: im Fenster „Aufzeichnungen“ über Ablage ›
 „Importieren …“ (⇧⌘I) oder mit `Tagwerk --import <datei.md>`. Die enthaltenen Tage
 ersetzen dabei die vorhandenen Einträge dieser Tage; das Fenster nennt vorher, wie viele
-Tage betroffen sind. CSV und PDF lassen sich nicht einlesen – ihnen fehlen die erfassten
+Tage betroffen sind. Vor dem Import sichert Tagwerk den Stand eigens im Ordner `backups`
+(`tagwerk-JJJJ-MM-TT-vor-import-HHMMSS.db`) – damit lässt er sich zurückholen. Tage, die
+auch das Fenster nicht zuließe, werden übersprungen und genannt: Zeiten in der Zukunft,
+ein Arbeitsbeginn, der nicht vor dem Feierabend liegt, eine ganztägige Abwesenheit neben
+anderen Einträgen. CSV und PDF lassen sich nicht einlesen – ihnen fehlen die erfassten
 Perioden.
 
 ## Regeln
@@ -417,22 +463,32 @@ erfasste Arbeitszeit ändern sie nicht.
 
 | Regel                | Inhalt                                                                  |
 |----------------------|-------------------------------------------------------------------------|
-| Arbeitszeitrahmen    | Zeit außerhalb des eingestellten Zeitraums wird nicht gezählt; Arbeit am Wochenende wird gemeldet und zählt nur als Mehrarbeit, wenn der Stand der Arbeitszeitregeln es vorsieht |
-| Sollarbeitszeit      | Regelwochenarbeitszeit, gleichmäßig auf die eingestellten Arbeitstage verteilt (39 Std. an Mo–Fr → 7:48 Std.) |
+| Arbeitszeitrahmen    | Zeit außerhalb des eingestellten Zeitraums wird nicht gezählt; Arbeit am Wochenende und an abgewählten Arbeitstagen wird gemeldet und zählt nur als Mehrarbeit, wenn der Stand der Arbeitszeitregeln es vorsieht |
+| Sollarbeitszeit      | Regelwochenarbeitszeit, gleichmäßig auf die eingestellten Arbeitstage verteilt (39 Std. an Mo–Fr → 7:48 Std.), je Tag in ganzen Minuten (38,5 Std. an vier Tagen → 9:37, 9:38, 9:37 und 9:38 Std.) |
 | Pausen (§ 4 ArbZG)   | mehr als 6 Std. Arbeit: 30 Min., mehr als 9 Std.: 45 Min.; höchstens 6 Std. am Stück ohne Pause; es zählen Pausen ab 15 Min. |
 | Ruhezeit (§ 5 ArbZG) | mindestens 11 Std. zwischen dem Ende eines Arbeitstags und dem nächsten Beginn |
 | Höchstarbeitszeit    | mehr als 10 Std. Arbeit an einem Tag; Mitteilung bei 9:45 und 10 Std. (abschaltbar) |
 | Erfassung            | Beginn und Ende durch Entsperren/Sperren, Arbeit unterbrechen/Weiter arbeiten oder Ohne Mac weiterarbeiten; keine Zeiten in der Zukunft (Abwesenheiten schon) |
+
+Pausen, Ruhezeit und Höchstarbeitszeit prüft Tagwerk zuerst mit der gezählten Arbeitszeit
+und dann mit der tatsächlichen – samt der Zeit außerhalb des Arbeitszeitrahmens, denn das
+Gesetz fragt nicht danach, was gezählt wird. Ergibt sich der Verstoß erst so, sagt der
+Hinweis es dazu („Ruhezeit nur 9:45 Std. – vorgeschrieben sind 11 Std. (§ 5 ArbZG), mit der
+Zeit außerhalb des Arbeitszeitrahmens“). Außen vor bleiben Abschnitte unter einer Minute,
+die Zeit nach dem Feierabend und was an einem freien Tag erfasst, aber nicht gezählt ist.
 
 > [!NOTE]
 > Der Saldo vergleicht die Arbeitszeit mit dem Soll. Jeder Arbeitstag bis gestern zählt
 > sein Soll – auch ganz ohne Eintrag, ab dem ersten erfassten Tag. Urlaub, Feiertage und
 > Krankheit trägt man deshalb als Abwesenheit ein; sie regelt das Soll des Tages (halber
 > Urlaubstag: die Hälfte, Sonderurlaub: null, Zeitausgleich: voll). Heute zählt das Soll
-> erst mit Arbeitszeit oder Abwesenheit, künftige Tage (eine geplante Abwesenheit) noch gar
-> nicht. Arbeit am Wochenende und an abgewählten Arbeitstagen geht standardmäßig nicht in
-> den Saldo ein; mit „Arbeit an freien Tagen als Mehrarbeit zählen“ im Stand der
-> Arbeitszeitregeln zählt sie vollständig als Mehrarbeit – automatisch erfasste Zeit dort
+> nur, soweit es schon erarbeitet ist: Der laufende Tag steht bei +0:00, bis das Soll
+> erreicht ist, und danach im Plus – Wochensaldo und Zeitkonto fallen also nicht morgens um
+> das Tagessoll. Was fehlt, zählt mit dem Feierabend oder ab morgen; Zeitausgleich zählt
+> sofort. Künftige Tage (eine geplante Abwesenheit) zählen noch gar nicht. Jeder Tagessaldo
+> ist eine ganze Minutenzahl, Tage summieren sich also ohne Rundungsreste zur Woche. Arbeit am Wochenende und an abgewählten Arbeitstagen geht standardmäßig nicht in
+> den Saldo ein; mit „Arbeit an freien Tagen in Saldo und Zeitkonto einrechnen“ im Stand
+> der Arbeitszeitregeln zählt sie vollständig als Mehrarbeit – automatisch erfasste Zeit dort
 > erst nach „Heute erfassen“ (Einstellung „Freie Tage“ unter „Erfassung“).
 > Das Zeitkonto ist dieser Saldo über alle Tage (oder ab einem Datum) plus Übertrag.
 
