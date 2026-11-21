@@ -277,6 +277,8 @@ struct Inspector {
     /// Hinweise, dass Arbeitsbeginn bzw. Feierabend Arbeit ohne Mac gekürzt haben.
     start_cut: Retained<NSTextField>,
     end_cut: Retained<NSTextField>,
+    /// „Automatisch erfasst“: zugeklappt die Kurzfassung, aufgeklappt die Zeiten.
+    recorded: RecordedView,
     /// Abwesenheit: Art (erster Eintrag = keine) und ganzer bzw. halber Tag.
     absence_kind: Retained<NSPopUpButton>,
     absence_part: Retained<NSPopUpButton>,
@@ -298,6 +300,50 @@ impl Inspector {
             Input::Work => &self.work_error,
             Input::End => &self.end_error,
         }
+    }
+}
+
+/// Abschnitt „Automatisch erfasst“ im Inspektor: zugeklappt eine Zeile mit Anzahl und Spanne,
+/// aufgeklappt die einzelnen Zeiten.
+#[derive(Clone)]
+struct RecordedView {
+    summary: Retained<NSTextField>,
+    list: Retained<NSStackView>,
+    /// Es gibt Zeiten zum Aufklappen (sonst bleibt die Kurzfassung „Keine …“ stehen).
+    any: bool,
+}
+
+impl RecordedView {
+    fn show(&self, open: bool) {
+        self.list.setHidden(!open);
+        self.summary.setHidden(open && self.any);
+    }
+}
+
+/// Kurzfassung der automatisch erfassten Zeiten: `3 Zeiten, 08:02 – 17:31`.
+fn recorded_summary(periods: &[Span]) -> String {
+    match (periods.iter().map(|p| p.from).min(), periods.iter().map(|p| p.to).max()) {
+        (Some(from), Some(to)) => {
+            format!("{}, {} – {}", plural(periods.len(), "Zeit", "Zeiten"), fmt_clock(from), fmt_clock(to))
+        }
+        _ => "Keine – der Mac war nicht entsperrt.".to_string(),
+    }
+}
+
+/// Ist „Automatisch erfasst“ im Inspektor aufgeklappt? Zugeklappt, solange nichts anderes
+/// gewählt wurde.
+fn recorded_open() -> bool {
+    NSUserDefaults::standardUserDefaults().boolForKey(&ns(RECORDED_OPEN_KEY))
+}
+
+/// „Automatisch erfasst“ auf- oder zuklappen und das für alle Tage merken – ohne den
+/// Inspektor neu aufzubauen, damit eine laufende Eingabe bleibt.
+fn set_recorded_open(open: bool) {
+    if SCREENSHOT.with(|s| s.borrow().is_none()) {
+        NSUserDefaults::standardUserDefaults().setBool_forKey(open, &ns(RECORDED_OPEN_KEY));
+    }
+    if let Some(recorded) = model(|m| m.inspector.as_ref().map(|i| i.recorded.clone())) {
+        recorded.show(open);
     }
 }
 
@@ -829,6 +875,10 @@ pub struct Embed {
 /// Schlüssel in den Benutzereinstellungen für die zuletzt benutzte Ansicht.
 const MODE_KEY: &str = "TagwerkRecordsView";
 
+/// Schlüssel in den Benutzereinstellungen: Der Abschnitt „Automatisch erfasst“ im Inspektor
+/// ist aufgeklappt (ohne Eintrag: zugeklappt).
+const RECORDED_OPEN_KEY: &str = "TagwerkInspectorRecordedOpen";
+
 thread_local! {
     static MODEL: RefCell<Model> = RefCell::new(Model::default());
     static UI: RefCell<Option<Ui>> = const { RefCell::new(None) };
@@ -1168,6 +1218,12 @@ define_class!(
             if let Some(secs) = sender.and_then(picker_secs) {
                 apply(Edit::SetEnd(Some(secs)), false);
             }
+        }
+
+        /// Dreieck an „Automatisch erfasst“ im Inspektor: die Zeiten auf- oder zuklappen.
+        #[unsafe(method(toggleRecorded:))]
+        fn toggle_recorded(&self, sender: Option<&NSButton>) {
+            set_recorded_open(sender.is_some_and(|b| b.state() == NSControlStateValueOn));
         }
 
         /// Info-Knopf an einer Überschrift des Inspektors: Erklärung als Popover.
@@ -2479,6 +2535,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
             row.addArrangedSubview(&info);
         }
         stack.addArrangedSubview(&row);
+        row
     };
 
     // Abwesenheit
@@ -2880,21 +2937,30 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     stack.addArrangedSubview(&end_note);
     pin_width(&end_note, stack, 40.0);
 
-    // Automatisch erfasst
-    section(
+    // Automatisch erfasst – zum Aufklappen: zugeklappt (Standard) steht nur die Kurzfassung da.
+    let recorded_head = section(
         "Automatisch erfasst",
         Some(&end_note),
         &format!(
-            "Zeiten, in denen der Mac entsperrt war. Gezählt wird nur im Arbeitszeitrahmen ({}).",
+            "Zeiten, in denen der Mac entsperrt war. Gezählt wird nur im Arbeitszeitrahmen ({}). \
+             Das Dreieck klappt die einzelnen Zeiten auf und zu – für alle Tage.",
             settings.rules(date).frame_text()
         ),
     );
     let periods: Vec<Span> = day.as_ref().map(|d| d.periods.clone()).unwrap_or_default();
-    if periods.is_empty() {
-        let none = label("Keine – der Mac war nicht entsperrt.");
-        none.setTextColor(Some(&NSColor::secondaryLabelColor()));
-        stack.addArrangedSubview(&none);
-    }
+    let open = recorded_open();
+    let disclosure =
+        unsafe { NSButton::buttonWithTitle_target_action(&ns(""), Some(target), Some(sel!(toggleRecorded:)), mtm()) };
+    disclosure.setBezelStyle(NSBezelStyle::Disclosure);
+    disclosure.setButtonType(NSButtonType::PushOnPushOff);
+    disclosure.setState(if open { NSControlStateValueOn } else { NSControlStateValueOff });
+    disclosure.setToolTip(Some(&ns("Automatisch erfasste Zeiten ein- oder ausblenden")));
+    disclosure.setAccessibilityLabel(Some(&ns("Automatisch erfasste Zeiten")));
+    recorded_head.insertArrangedSubview_atIndex(&disclosure, 0);
+    let summary = label(&recorded_summary(&periods));
+    summary.setFont(Some(&font_digits(NSFont::systemFontSize(), font_regular())));
+    summary.setTextColor(Some(&NSColor::secondaryLabelColor()));
+    let list = vstack(stack.spacing());
     for p in &periods {
         let row = hstack(8.0);
         let times = label(&format!("{} – {}", fmt_clock(p.from), fmt_clock(p.to)));
@@ -2905,8 +2971,16 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         dur.setTextColor(Some(&NSColor::tertiaryLabelColor()));
         row.addArrangedSubview(&times);
         row.addArrangedSubview(&dur);
-        stack.addArrangedSubview(&row);
+        list.addArrangedSubview(&row);
     }
+    // Beides in einem Block, der immer sichtbar ist: Der Abstand zum Trenner darunter hängt
+    // an ihm, egal was davon gerade ausgeblendet ist.
+    let recorded_box = vstack(0.0);
+    recorded_box.addArrangedSubview(&summary);
+    recorded_box.addArrangedSubview(&list);
+    stack.addArrangedSubview(&recorded_box);
+    let recorded = RecordedView { summary, list, any: !periods.is_empty() };
+    recorded.show(open);
 
     // Ganz unten, abgesetzt: den Tag leeren – nur mit Einträgen außer der Abwesenheit (die
     // allein entfernt „Keine“ oben).
@@ -2941,6 +3015,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
             work_list,
             start_cut,
             end_cut,
+            recorded,
             absence_kind,
             absence_part,
             absence_error,
@@ -4752,6 +4827,16 @@ mod tests {
     fn absence_today_offers_half_day() {
         assert!(!absence_today_text(3600, false).contains("halber Tag"));
         assert!(absence_today_text(3600, true).ends_with("Ein halber Tag geht auch neben der erfassten Zeit – sie bleibt dann."));
+    }
+
+    #[test]
+    fn recorded_summary_names_count_and_span() {
+        assert_eq!(recorded_summary(&[]), "Keine – der Mac war nicht entsperrt.");
+        let mut day = Day::new(date(17));
+        day.add_period(8 * 3600 + 120, 12 * 3600);
+        assert_eq!(recorded_summary(&day.periods), "1 Zeit, 08:02 – 12:00");
+        day.add_period(13 * 3600, 17 * 3600 + 31 * 60);
+        assert_eq!(recorded_summary(&day.periods), "2 Zeiten, 08:02 – 17:31");
     }
 
     #[test]

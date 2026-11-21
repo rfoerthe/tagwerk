@@ -44,6 +44,10 @@ Pausen und Höchstarbeitszeit sehen auch die Arbeit außerhalb des Arbeitszeitra
   (`backups/tagwerk-JJJJ-MM-TT-vor-import-HHMMSS.db`). Tage, die das Fenster nicht zuließe,
   werden übersprungen und genannt: Zeiten in der Zukunft, ein Arbeitsbeginn, der nicht vor
   dem Feierabend liegt, eine ganztägige Abwesenheit neben anderen Einträgen.
+- Inspektor: Der Abschnitt „Automatisch erfasst“ lässt sich auf- und zuklappen und ist
+  zunächst zugeklappt. Zugeklappt steht dort eine Zeile mit Anzahl und Spanne der Zeiten
+  („5 Zeiten, 07:28 – 18:01“), das Dreieck vor der Überschrift zeigt sie einzeln. Tagwerk
+  merkt sich die Wahl für alle Tage.
 
 ### Behoben
 - Feierabend kurz nach Mitternacht sperrte den neuen Tag, bis ihn jemand aufhob. Vor
