@@ -106,7 +106,7 @@ reine Anzeige und lassen sich nicht anklicken. Lange Hinweise brechen um, damit 
   nach Feierabend. Dort zeichnet Tagwerk zwar auf, zählt aber nichts: Der Status heißt
   „Freier Tag – Erfassung zählt nicht“, das Symbol ist das für „außerhalb“, und das Menü
   bietet nur „Heute erfassen“ an – Arbeitsbeginn, Arbeit unterbrechen, Ohne Mac
-  weiterarbeiten und Feierabend erscheinen erst danach. Mit „Heute erfassen“ zählt die
+  weiterarbeiten, Pause als Arbeitszeit zählen und Feierabend erscheinen erst danach. Mit „Heute erfassen“ zählt die
   Zeit des Tages – rückwirkend ab dem ersten Entsperren; ein Häkchen zeigt das, ein
   zweiter Klick nimmt es zurück. Löscht man im Fenster „Aufzeichnungen“ alle Einträge des
   Tages, fällt auch der Haken weg, und die Erfassung bleibt für heute aus („Freier Tag –
@@ -180,6 +180,14 @@ auf Klick als kleines Fenster.
   Arbeitszeit – so sinkt das Zeitkonto um den freien Tag. In der Tabelle steht hinter dem
   Datum ein Kürzel (U, SU, K, F, ZA, halbe Tage mit ½), in der Wochenansicht die
   Abwesenheit im Tageskopf.
+
+- **Erfassung** – an einem freien Tag, an dem Tagwerk aufgezeichnet hat, steht unter der
+  Abwesenheit der Haken „Erfasste Zeit zählen“ – derselbe wie „Heute erfassen“ im Menü und
+  „Erfasste Zeit zählen“ in der Wochenansicht. Ohne Haken zählt die erfasste Zeit nicht:
+  Oben steht „Freier Tag – die erfasste Zeit zählt nicht“, die Tabelle zeigt weder Beginn
+  noch Ende, und Arbeitsbeginn, Pausen und Feierabend lassen sich erst mit dem Haken
+  festlegen (schon festgelegte lassen sich entfernen). Arbeit ohne Mac geht immer – wie in
+  der Wochenansicht, die an einem solchen Tag auch keine Kanten zum Verschieben zeigt.
 
 - **Alle Einträge löschen** – ganz unten im Inspektor oder per Rechtsklick in der
   Wochenansicht leert „Alle Einträge löschen …“ einen Tag: die automatisch erfassten Zeiten ebenso wie Arbeitsbeginn, Feierabend, Pausen, Arbeit

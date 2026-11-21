@@ -795,7 +795,8 @@ impl AppState {
             }
             self.items.count_pause_list = pauses;
         }
-        self.items.count_pause.setHidden(self.items.count_pause_list.is_empty() || absent);
+        // Wie die übrigen Steuerpunkte erst, wenn die erfasste Zeit zählt.
+        self.items.count_pause.setHidden(self.items.count_pause_list.is_empty() || absent || uncounted);
         self.items.close.setHidden(closed || absent || uncounted);
         self.items.reopen.setHidden(!closed || absent);
         if week_view::is_visible() {

@@ -453,6 +453,13 @@ impl Day {
         self.free_day.is_none_or(FreeDay::counts)
     }
 
+    /// Freier Tag, dessen automatisch erfasste Zeit (noch) nicht zählt – ohne „Heute erfassen“
+    /// bzw. „Erfasste Zeit zählen“. Arbeitsbeginn, Pausen und Feierabend lassen sich dann
+    /// nicht festlegen; Arbeit ohne Mac zählt wie immer.
+    pub fn uncounted(&self) -> bool {
+        !self.periods_count()
+    }
+
     /// Automatisch erfasste Zeiten, die zählen (an einem freien Tag ohne „Heute erfassen“
     /// keine).
     fn counted_periods(&self) -> Vec<Span> {
@@ -1505,6 +1512,16 @@ mod tests {
         assert!(!d.is_empty(), "die Entscheidung bleibt gespeichert");
         assert!(!d.has_entries());
         assert_eq!(d.record(&st()), None);
+    }
+
+    #[test]
+    fn uncounted_only_without_counting() {
+        let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 21).unwrap());
+        assert!(!d.uncounted(), "ohne Markierung zählt alles");
+        for (f, uncounted) in [(FreeDay::Uncounted, true), (FreeDay::Stopped, true), (FreeDay::Counted, false)] {
+            d.free_day = Some(f);
+            assert_eq!(d.uncounted(), uncounted, "{f:?}");
+        }
     }
 
     #[test]

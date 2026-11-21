@@ -977,6 +977,13 @@ define_class!(
             reveal(&store::db_file());
         }
 
+        /// Freier Tag: „Erfasste Zeit zählen“ ein- oder ausgeschaltet.
+        #[unsafe(method(countingToggled:))]
+        fn counting_toggled(&self, sender: Option<&NSButton>) {
+            let on = sender.is_some_and(|b| b.state() == NSControlStateValueOn);
+            apply(Edit::SetCounting(on), true);
+        }
+
         #[unsafe(method(startToggled:))]
         fn start_toggled(&self, sender: Option<&NSButton>) {
             let on = sender.is_some_and(|b| b.state() == NSControlStateValueOn);
@@ -1278,8 +1285,9 @@ fn cell_view(m: &Model, column: Option<&str>, row: NSInteger) -> Option<Retained
         (Row::Day { day, rec, .. }, Some(col)) => {
             let today = now().date();
             let is_today = rec.date == today;
-            // Ohne Arbeitszeit (z. B. ein Urlaubstag) gibt es weder Beginn noch Ende.
-            let worked = rec.work_secs > 0 || !day.periods.is_empty();
+            // Ohne Arbeitszeit (z. B. ein Urlaubstag oder ein freier Tag, dessen erfasste Zeit
+            // nicht zählt) gibt es weder Beginn noch Ende.
+            let worked = rec.work_secs > 0 || (!day.periods.is_empty() && !day.uncounted());
             let (text, align, secondary) = match col {
                 "date" => (store::fmt_date(rec.date), NSTextAlignment::Left, false),
                 "start" if !worked => ("–".to_string(), NSTextAlignment::Right, true),
@@ -1607,6 +1615,17 @@ impl Edit {
     }
 }
 
+/// Lässt der Tag `d` die Änderung nicht zu? Eine ganztägige Abwesenheit lässt nur sich selbst
+/// ändern oder den Tag leeren. An einem freien Tag, dessen erfasste Zeit nicht zählt, gibt es
+/// Arbeitsbeginn, Pausen und Feierabend erst nach „Erfasste Zeit zählen“ (wie im Menü und in
+/// der Wochenansicht) – entfernen geht immer, Arbeit ohne Mac auch.
+fn refuses(d: &Day, edit: &Edit) -> bool {
+    let locked = d.locks_entries() && !matches!(edit, Edit::SetAbsence(_) | Edit::ClearDay);
+    let uncounted =
+        d.uncounted() && matches!(edit, Edit::SetStart(Some(_)) | Edit::SetEnd(Some(_)) | Edit::AddBreak(..));
+    locked || uncounted
+}
+
 fn apply(edit: Edit, rebuild: bool) {
     let Some(date) = model(|m| m.inspector.as_ref().map(|i| i.date)) else { return };
     if let Err(e) = save(date, edit, rebuild) {
@@ -1634,10 +1653,9 @@ fn save(date: NaiveDate, edit: Edit, rebuild: bool) -> Result<Option<Bound>, Str
             let clears = matches!(edit, Edit::SetAbsence(a) if d.clears_for_absence(a, today));
             let snapshot = if clears || matches!(edit, Edit::ClearDay) { Corrections::whole } else { Corrections::of };
             let before = snapshot(d);
-            // Ganztägige Abwesenheit: nur sie selbst lässt sich ändern oder der Tag leeren.
-            let locked = d.locks_entries() && !matches!(edit, Edit::SetAbsence(_) | Edit::ClearDay);
+            let refused = refuses(d, &edit);
             match edit {
-                _ if locked => {}
+                _ if refused => {}
                 // Arbeit ohne Mac davor bzw. danach entfällt: die letzte Angabe gilt.
                 Edit::SetStart(s) => {
                     d.set_start(s);
@@ -1918,6 +1936,7 @@ fn day_stats(date: NaiveDate, day: Option<&Day>, days: &[Day], settings: &Settin
         // Ohne Arbeitszeit, aber mit Soll (Arbeitstag ohne Eintrag, Zeitausgleich, halber Tag).
         _ if target > 0 => DayStats::Numbers { work: 0, pause: 0, balance: Some(-target) },
         Some((d, _)) if d.absence.is_some() && d.periods.is_empty() => DayStats::Note("Keine Arbeitszeit, kein Soll."),
+        Some((d, _)) if d.uncounted() => DayStats::Note("Freier Tag – die erfasste Zeit zählt nicht."),
         Some(_) => DayStats::Note("Keine Arbeitszeit im Arbeitszeitrahmen."),
         None => DayStats::Note("Für diesen Tag ist noch nichts erfasst."),
     }
@@ -2136,6 +2155,39 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         absence_last = Retained::into_super(Retained::into_super(note));
     }
 
+    // Erfassung – nur an einem freien Tag mit Entscheidung zur automatischen Erfassung (wie
+    // „Heute erfassen“ im Menü und „Erfasste Zeit zählen“ in der Wochenansicht).
+    let uncounted = day.as_ref().is_some_and(Day::uncounted);
+    if let Some(free) = day.as_ref().and_then(|d| d.free_day).filter(|_| !locked) {
+        section(
+            "Erfassung",
+            Some(&absence_last),
+            "An freien Tagen (Wochenende, abgewählte Arbeitstage) zählt die automatisch erfasste Zeit \
+             erst, wenn sie gezählt werden soll – im Menü „Heute erfassen“. Bis dahin lassen sich \
+             Arbeitsbeginn, Pausen und Feierabend nicht festlegen; Arbeit ohne Mac zählt immer.",
+        );
+        let check = checkbox("Erfasste Zeit zählen", free.counts(), sel!(countingToggled:), target);
+        stack.addArrangedSubview(&check);
+        let text = match free {
+            FreeDay::Counted => "Freier Tag: Die automatisch erfasste Zeit zählt.",
+            FreeDay::Stopped => {
+                "Freier Tag: Alle Einträge wurden gelöscht, die automatische Erfassung ist aus. Mit \
+                 dem Haken zählt sie wieder."
+            }
+            FreeDay::Uncounted => {
+                "Freier Tag: Die automatisch erfasste Zeit zählt nicht. Arbeitsbeginn, Pausen und \
+                 Feierabend lassen sich erst mit dem Haken festlegen; Arbeit ohne Mac zählt immer."
+            }
+        };
+        let note = caption(text);
+        stack.addArrangedSubview(&note);
+        pin_width(&note, stack, 40.0);
+        absence_last = Retained::into_super(Retained::into_super(note));
+    }
+    // Was sich nur festlegen lässt, wenn die erfasste Zeit zählt (Entfernen geht immer).
+    let settable = !locked && !uncounted;
+    const UNCOUNTED_NOTE: &str = "Erst wenn die erfasste Zeit zählt (siehe „Erfassung“ oben).";
+
     // Arbeitsbeginn
     section(
         "Arbeitsbeginn",
@@ -2154,8 +2206,9 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     let start_value = manual_start.or(rec.as_ref().map(|r| r.first_start)).unwrap_or(8 * 3600);
     let start_check = checkbox("Manuell festlegen", manual_start.is_some(), sel!(startToggled:), target);
     let start_picker = time_picker(date, start_value, sel!(startChanged:), target);
-    start_picker.setEnabled(manual_start.is_some() && !locked);
-    start_check.setEnabled(!locked);
+    start_picker.setEnabled(manual_start.is_some() && settable);
+    // Einen festgelegten Beginn kann man auch dann noch entfernen.
+    start_check.setEnabled(settable || (!locked && manual_start.is_some()));
     let row = hstack(8.0);
     row.addArrangedSubview(&start_check);
     row.addArrangedSubview(&start_picker);
@@ -2165,6 +2218,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         START_CUT,
     );
     let start_note = caption(&match auto {
+        _ if uncounted => UNCOUNTED_NOTE.to_string(),
         Some((a, _)) => format!(
             "Ohne Angabe gilt das erste Entsperren{first_in_frame} um {} Uhr. War der Mac zum Beginn \
              gesperrt, zählt die Zeit bis zum Entsperren danach mit.",
@@ -2238,7 +2292,10 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     }
     let add = button("Hinzufügen", sel!(addBreak:), target);
     for c in [&*break_from as &NSControl, &break_to, &add] {
-        c.setEnabled(!locked);
+        c.setEnabled(settable);
+    }
+    if uncounted {
+        add.setToolTip(Some(&ns(UNCOUNTED_NOTE)));
     }
     let row = hstack(6.0);
     row.addArrangedSubview(&break_from);
@@ -2307,8 +2364,8 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         .unwrap_or(if is_today { secs_of(t.time()) } else { 17 * 3600 });
     let end_check = checkbox("Manuell festlegen", manual_end.is_some(), sel!(endToggled:), target);
     let end_picker = time_picker(date, end_value, sel!(endChanged:), target);
-    end_picker.setEnabled(manual_end.is_some() && !locked);
-    end_check.setEnabled(!locked);
+    end_picker.setEnabled(manual_end.is_some() && settable);
+    end_check.setEnabled(settable || (!locked && manual_end.is_some()));
     let row = hstack(8.0);
     row.addArrangedSubview(&end_check);
     row.addArrangedSubview(&end_picker);
@@ -2317,6 +2374,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         END_CUT,
     );
     let end_note = caption(&match auto {
+        _ if uncounted => UNCOUNTED_NOTE.to_string(),
         Some(_) if is_today && manual_end.is_none() => {
             "Ohne Angabe gilt das letzte Sperren. Mit Feierabend wird heute nichts mehr erfasst.".to_string()
         }
@@ -3981,6 +4039,38 @@ mod tests {
         sat.free_day = Some(FreeDay::Counted);
         assert!(clear_day_text(&sat, true).contains("bleibt heute aus"));
         assert!(clear_day_text(&sat, false).ends_with("Das betrifft 1 automatisch erfasste Zeit. ⌘Z nimmt das zurück."));
+    }
+
+    #[test]
+    fn uncounted_free_day_allows_only_what_menu_and_week_allow() {
+        let s = Settings::default();
+        let mut sat = Day::new(date(21));
+        sat.add_period(9 * 3600 + 42 * 60, 15 * 3600);
+        sat.free_day = Some(FreeDay::Uncounted);
+        // Arbeitsbeginn, Feierabend und Pausen erst nach „Erfasste Zeit zählen“ …
+        for edit in [Edit::SetStart(Some(9 * 3600)), Edit::SetEnd(Some(14 * 3600)), Edit::AddBreak(12 * 3600, 12 * 3600 + 1800)] {
+            assert!(refuses(&sat, &edit), "{}", edit.name());
+        }
+        // … entfernen, Arbeit ohne Mac, zählen lassen und leeren gehen.
+        for edit in [
+            Edit::SetStart(None),
+            Edit::SetEnd(None),
+            Edit::RemoveBreak(0),
+            Edit::AddWork(16 * 3600, 17 * 3600, String::new()),
+            Edit::SetCounting(true),
+            Edit::ClearDay,
+        ] {
+            assert!(!refuses(&sat, &edit), "{}", edit.name());
+        }
+        // Kennzahlen: kein „keine Arbeitszeit im Rahmen“, sondern warum nichts zählt.
+        assert_eq!(
+            day_stats(date(21), Some(&sat), &[sat.clone()], &s, date(23)),
+            DayStats::Note("Freier Tag – die erfasste Zeit zählt nicht.")
+        );
+        // Gezählt: alles wie an jedem Tag.
+        sat.free_day = Some(FreeDay::Counted);
+        assert!(!refuses(&sat, &Edit::SetStart(Some(9 * 3600))));
+        assert!(matches!(day_stats(date(21), Some(&sat), &[sat.clone()], &s, date(23)), DayStats::Numbers { .. }));
     }
 
     #[test]

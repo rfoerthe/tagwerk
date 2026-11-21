@@ -46,6 +46,15 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 - Abwesenheit Sonderurlaub (Kürzel SU): senkt das Soll wie Urlaub, gilt aber immer
   ganztags – im Inspektor, in der Wochenansicht und im Export. Ältere Versionen kennen sie
   nicht und rechnen den Tag mit vollem Soll.
+- Freier Tag ohne „Heute erfassen“: Menü, Wochenansicht und Inspektor bieten dieselben
+  Bearbeitungen an. Der Inspektor hat den neuen Abschnitt „Erfassung“ mit dem Haken
+  „Erfasste Zeit zählen“; ohne Haken lassen sich dort Arbeitsbeginn, Pausen und
+  Feierabend nicht festlegen (nur entfernen) – bisher ging das, wirkte allein aber nicht
+  und zusammen nur teilweise. Arbeit ohne Mac geht weiter überall. Oben steht „Freier Tag –
+  die erfasste Zeit zählt nicht“ statt „Keine Arbeitszeit im Arbeitszeitrahmen“, und die
+  Tabelle zeigt weder Beginn noch Ende. Die Wochenansicht zeigt an einem solchen Tag keine
+  Kanten für Arbeitsbeginn und Feierabend mehr (auch nicht neben Arbeit ohne Mac), das Menü
+  blendet „Pause als Arbeitszeit zählen“ aus.
 - Testdaten (`testdata/testdb.sh`): alle sechs Monate ein Tag Sonderurlaub (3, 9, 15 …
   Monate vor dem laufenden) und am Samstag der Woche davor 4 bis 6 Std. Arbeit, als freier
   Tag mit „Heute erfassen“.
