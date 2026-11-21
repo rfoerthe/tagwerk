@@ -6,6 +6,16 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+## [1.5.1] - 2026-11-21
+
+### Zusammenfassung
+Die Arbeitszeitregeln gelten jetzt ab einem Datum: Wer in Teilzeit geht, andere Arbeitstage
+wählt oder den Rahmen ändert, rechnet frühere Tage nicht mehr neu. An freien Tagen zeichnet
+Tagwerk weiter auf, zählt aber erst nach „Heute erfassen“, und Arbeit am Wochenende oder an
+abgewählten Arbeitstagen geht standardmäßig nicht mehr in Saldo und Zeitkonto ein – **das
+Zeitkonto kann sich dadurch rückwirkend ändern**; je Stand der Arbeitszeitregeln lässt sie
+sich wieder als Mehrarbeit zählen. Neu ist außerdem die Abwesenheit Sonderurlaub.
+
 ### Hinzugefügt
 - Arbeitszeitregeln mit Gültigkeitsdatum: Regelarbeitszeit, Arbeitstage,
   Arbeitszeitrahmen und Mindestpause gelten je Stand ab einem Datum. Eine Änderung rechnet
@@ -27,8 +37,13 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   nicht“, und die Wochenansicht zeigt die Zeit orange als „nicht gezählt“; dort lässt sie
   sich per Rechtsklick („Erfasste Zeit zählen“) auch nachträglich zählen. Solange nichts
   zählt, bietet das Menü nur „Heute erfassen“ an; Arbeitsbeginn, Arbeit unterbrechen, Ohne
-  Mac weiterarbeiten und Feierabend erscheinen erst danach. Einträge von Hand im Fenster
-  „Aufzeichnungen“ zählen immer. „Alle Einträge löschen …“ an einem solchen Tag nimmt auch den Haken bei
+  Mac weiterarbeiten, Pause als Arbeitszeit zählen und Feierabend erscheinen erst danach.
+  Im Inspektor steht dafür der Abschnitt „Erfassung“ mit dem Haken „Erfasste Zeit zählen“;
+  ohne ihn lassen sich dort Arbeitsbeginn, Pausen und Feierabend nicht festlegen (nur
+  entfernen), oben steht „Freier Tag – die erfasste Zeit zählt nicht“, und die Tabelle
+  zeigt weder Beginn noch Ende. Die Wochenansicht zeigt dann auch keine Kanten für
+  Arbeitsbeginn und Feierabend. Arbeit ohne Mac lässt sich überall eintragen und zählt
+  immer. „Alle Einträge löschen …“ an einem solchen Tag nimmt auch den Haken bei
   „Heute erfassen“ weg und lässt die Erfassung für heute aus, bis er wieder gesetzt ist.
   Neue Einstellung „Freie Tage“ unter „Erfassung“ (standardmäßig ein); die Entscheidung
   gilt je Tag, vergangene Tage bleiben unverändert.
@@ -46,25 +61,16 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 - Abwesenheit Sonderurlaub (Kürzel SU): senkt das Soll wie Urlaub, gilt aber immer
   ganztags – im Inspektor, in der Wochenansicht und im Export. Ältere Versionen kennen sie
   nicht und rechnen den Tag mit vollem Soll.
-- Freier Tag ohne „Heute erfassen“: Menü, Wochenansicht und Inspektor bieten dieselben
-  Bearbeitungen an. Der Inspektor hat den neuen Abschnitt „Erfassung“ mit dem Haken
-  „Erfasste Zeit zählen“; ohne Haken lassen sich dort Arbeitsbeginn, Pausen und
-  Feierabend nicht festlegen (nur entfernen) – bisher ging das, wirkte allein aber nicht
-  und zusammen nur teilweise. Arbeit ohne Mac geht weiter überall. Oben steht „Freier Tag –
-  die erfasste Zeit zählt nicht“ statt „Keine Arbeitszeit im Arbeitszeitrahmen“, und die
-  Tabelle zeigt weder Beginn noch Ende. Die Wochenansicht zeigt an einem solchen Tag keine
-  Kanten für Arbeitsbeginn und Feierabend mehr (auch nicht neben Arbeit ohne Mac), das Menü
-  blendet „Pause als Arbeitszeit zählen“ aus.
 - Testdaten (`testdata/testdb.sh`): alle sechs Monate ein Tag Sonderurlaub (3, 9, 15 …
   Monate vor dem laufenden) und am Samstag der Woche davor 4 bis 6 Std. Arbeit, als freier
   Tag mit „Heute erfassen“.
 
 ### Geändert
-- Arbeit an freien Tagen zählt standardmäßig nicht mehr als Mehrarbeit. Das gilt auch für
-  vorhandene Stände der Arbeitszeitregeln: Wochensaldo und Zeitkonto ändern sich
-  rückwirkend um die Arbeit an Wochenenden und abgewählten Arbeitstagen. Wer sie weiter
-  zählen will, setzt den Haken „Arbeit an freien Tagen als Mehrarbeit zählen“ im
-  jeweiligen Stand.
+- Arbeit an freien Tagen zählt standardmäßig nicht mehr als Mehrarbeit – auch rückwirkend:
+  Die bisherigen Einstellungen werden zum ersten Stand der Arbeitszeitregeln, ohne den
+  Haken. Wochensaldo und Zeitkonto ändern sich damit um die Arbeit an Wochenenden und
+  abgewählten Arbeitstagen. Wer sie weiter zählen will, setzt den Haken „Arbeit an freien
+  Tagen als Mehrarbeit zählen“ im jeweiligen Stand.
 - Die Mindestpause steht nicht mehr im Reiter „Erfassung“, sondern bei den
   Arbeitszeitregeln. „Standardwerte“ lässt frühere Stände der Arbeitszeitregeln stehen und
   setzt sie ab heute zurück. Die Bilder der Einstellungen im README sind neu, dazu kommt
@@ -520,7 +526,8 @@ als Markdown. Alle Daten bleiben lokal auf dem Mac.
   notarisiert es und installiert sie auf Wunsch nach `/Applications`.
 - `github-release.sh` veröffentlicht ein geprüftes DMG als Release auf GitHub.
 
-[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.5.0...HEAD
+[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.5.1...HEAD
+[1.5.1]: https://github.com/rfoerthe/tagwerk/compare/v1.5.0...v1.5.1
 [1.5.0]: https://github.com/rfoerthe/tagwerk/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/rfoerthe/tagwerk/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/rfoerthe/tagwerk/compare/v1.2.0...v1.3.0
