@@ -15,7 +15,11 @@
 //!
 //! An freien Tagen (Samstag, Sonntag, abgewählte Arbeitstage) zählt die automatische Erfassung
 //! nur nach „Heute erfassen“ ([`Day::free_day`]); bis dahin ist sie erfasst, aber nicht
-//! gezählt – wie Zeit außerhalb des Arbeitszeitrahmens. Einträge von Hand zählen immer.
+//! gezählt – wie Zeit außerhalb des Arbeitszeitrahmens. Arbeit ohne Mac zählt immer;
+//! Arbeitsbeginn und Feierabend gelten erst, wenn die erfasste Zeit zählt.
+//!
+//! Auch nach dem Feierabend wird weiter aufgezeichnet, aber nicht gezählt: Wer ihn
+//! zurücknimmt, bekommt die Zeit dazwischen zurück.
 //!
 //! So lässt sich jede Korrektur nachvollziehen und wieder zurücknehmen; geänderte
 //! Einstellungen wirken auch auf frühere Tage.
@@ -679,10 +683,15 @@ impl Day {
         // den Mac ab). Bezug ist das Entsperren bzw. Sperren – auch wenn davor bzw. danach
         // Arbeit ohne Mac liegt (sonst verkürzte sie den Tag).
         let unlocked = fill_gaps(self.counted_periods(), min_pause);
-        if let Some(s) = self.start {
+        // An einem freien Tag, dessen erfasste Zeit nicht zählt, gelten auch Arbeitsbeginn und
+        // Feierabend nicht: Festlegen lassen sie sich dort nicht, sie können nur von vorher
+        // stammen – und ohne erfasste Zeit füllten sie sonst die ganze Spanne dazwischen (wer
+        // „Erfasste Zeit zählen“ abschaltet, bekäme mehr Arbeitszeit statt weniger).
+        let (start, end) = if self.uncounted() { (None, None) } else { (self.start, self.end) };
+        if let Some(s) = start {
             // Beginn vor einem Entsperren: die Zeit bis zum ersten Entsperren danach zählt mit.
             let first = if unlocked.is_empty() {
-                spans.first().map(|x| x.from).unwrap_or(self.end.unwrap_or(s))
+                spans.first().map(|x| x.from).unwrap_or(end.unwrap_or(s))
             } else {
                 // Nach dem letzten Sperren gibt es kein Entsperren, bis zu dem etwas zählen könnte.
                 unlocked.iter().find(|x| x.to > s).map_or(s, |x| x.from)
@@ -692,11 +701,11 @@ impl Day {
             }
             spans = clip(spans, s, DAY_END);
         }
-        if let Some(e) = self.end {
+        if let Some(e) = end {
             // Feierabend nach einem Sperren: die Zeit seit dem letzten Sperren davor zählt mit.
-            let from_start = |to: i64| to.max(self.start.unwrap_or(0));
+            let from_start = |to: i64| to.max(start.unwrap_or(0));
             let last = if unlocked.is_empty() {
-                spans.last().map(|x| from_start(x.to)).unwrap_or(self.start.unwrap_or(e))
+                spans.last().map(|x| from_start(x.to)).unwrap_or(start.unwrap_or(e))
             } else {
                 // Vor dem ersten Entsperren gibt es kein Sperren, ab dem etwas zählen könnte.
                 unlocked.iter().rev().find(|x| x.from < e).map_or(e, |x| from_start(x.to))
@@ -729,6 +738,18 @@ impl Day {
         let mut out = clip(all.clone(), 0, r.frame_from);
         out.extend(clip(all, r.frame_to, DAY_END));
         out
+    }
+
+    /// Arbeitsabschnitte samt der Zeit außerhalb des Arbeitszeitrahmens – für die Regeln des
+    /// Arbeitszeitgesetzes (Ruhezeit, Höchstarbeitszeit, Pausen), die nach der tatsächlichen
+    /// Arbeit fragen und nicht danach, was gezählt wird. Abschnitte außerhalb des Rahmens unter
+    /// einer Minute (kurz entsperrt in der Nacht) bleiben wie beim Hinweis dazu außen vor;
+    /// ebenso, was an einem freien Tag erfasst, aber nicht gezählt ist, und was nach dem
+    /// Feierabend liegt.
+    pub fn actual_spans(&self, s: &Settings) -> Vec<Span> {
+        let mut all = self.spans(s);
+        all.extend(self.outside_frame_spans(s).into_iter().filter(|x| x.len() >= 60));
+        union(all)
     }
 
     /// An einem freien Tag erfasst, aber nicht gezählt (ohne „Heute erfassen“, siehe
@@ -826,6 +847,17 @@ impl Day {
             longest = longest.max(current);
         }
         longest
+    }
+}
+
+/// Verträgt sich ein manueller Arbeitsbeginn `start` mit einem manuellen Feierabend `end`? Der
+/// Beginn muss vor dem Feierabend liegen – sonst zählte der Tag gar nichts, und Arbeit ohne
+/// Mac entfiele auf beiden Seiten. Fehlt eine der beiden Angaben, passt es immer. Das prüfen
+/// Menü, Inspektor und Wochenansicht, bevor sie Beginn oder Feierabend festlegen.
+pub fn bounds_in_order(start: Option<i64>, end: Option<i64>) -> bool {
+    match (start, end) {
+        (Some(s), Some(e)) => s < e,
+        _ => true,
     }
 }
 
@@ -1535,5 +1567,47 @@ mod tests {
         let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 21).unwrap());
         d.free_day = Some(FreeDay::Stopped);
         assert!(!d.is_empty() && d.record(&st()).is_none());
+    }
+
+    #[test]
+    fn uncounted_free_day_ignores_start_and_end() {
+        // Samstag, erfasst 09:30–11:00, Beginn 09:00 und Feierabend 12:00 von Hand.
+        let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 21).unwrap());
+        d.add_period(h(9, 30), h(11, 0));
+        d.start = Some(h(9, 0));
+        d.end = Some(h(12, 0));
+        d.free_day = Some(FreeDay::Counted);
+        assert_eq!(d.spans(&st()), [Span::new(h(9, 0), h(12, 0))]);
+        // „Erfasste Zeit zählen“ aus: Es zählt nichts mehr – nicht etwa die ganze Spanne
+        // zwischen Beginn und Feierabend.
+        d.free_day = Some(FreeDay::Uncounted);
+        assert!(d.spans(&st()).is_empty());
+        assert_eq!(d.uncounted_auto_spans(&st()), [Span::new(h(9, 30), h(11, 0))]);
+        // Arbeit ohne Mac zählt wie immer; Beginn und Feierabend bleiben stehen und gelten
+        // wieder, sobald die erfasste Zeit zählt.
+        d.add_work(h(14, 0), h(15, 0), "Meeting");
+        assert_eq!(d.spans(&st()), [Span::new(h(14, 0), h(15, 0))]);
+        d.free_day = Some(FreeDay::Counted);
+        assert_eq!(d.spans(&st()), [Span::new(h(9, 0), h(12, 0)), Span::new(h(14, 0), h(15, 0))]);
+    }
+
+    #[test]
+    fn start_must_precede_end() {
+        assert!(bounds_in_order(None, None) && bounds_in_order(Some(h(8, 0)), None) && bounds_in_order(None, Some(h(8, 0))));
+        assert!(bounds_in_order(Some(h(8, 0)), Some(h(8, 1))));
+        assert!(!bounds_in_order(Some(h(8, 0)), Some(h(8, 0))) && !bounds_in_order(Some(h(18, 0)), Some(h(12, 0))));
+    }
+
+    #[test]
+    fn actual_spans_include_time_outside_the_frame() {
+        let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 16).unwrap());
+        d.add_period(h(3, 0), h(3, 0) + 30); // kurzer Blick in der Nacht: bleibt außen vor
+        d.add_period(h(5, 0), h(8, 0));
+        d.add_period(h(21, 0), h(23, 0));
+        assert_eq!(d.spans(&st()), [Span::new(h(7, 0), h(8, 0)), Span::new(h(21, 0), h(22, 0))]);
+        assert_eq!(d.actual_spans(&st()), [Span::new(h(5, 0), h(8, 0)), Span::new(h(21, 0), h(23, 0))]);
+        // Nach dem Feierabend ist Schluss – auch für die tatsächliche Arbeitszeit.
+        d.end = Some(h(21, 30));
+        assert_eq!(d.actual_spans(&st()), [Span::new(h(5, 0), h(8, 0)), Span::new(h(21, 0), h(21, 30))]);
     }
 }

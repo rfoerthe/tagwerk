@@ -13,7 +13,8 @@
 //! Arbeit ohne Mac (Telefonat, Meeting …) ist schraffiert; ein Klick darauf bietet an, sie
 //! wieder zu löschen. Ein Klick auf einen freien Bereich öffnet einen Dialog, um Arbeit ohne
 //! Mac einzutragen (von, bis, Grund): in einer Pause ist die ganze Pause vorgeschlagen, vor
-//! dem Arbeitsbeginn und nach dem Feierabend eine halbe Stunde ab dem Klick. Über das
+//! dem Arbeitsbeginn und nach dem Feierabend eine halbe Stunde ab dem Klick. Den Vorschlag
+//! nimmt der Dialog unverändert an, auch wenn er kürzer ist als die Mindestdauer. Über das
 //! Kontextmenü lässt sich für einen Arbeitstag eine Abwesenheit eintragen (Urlaub,
 //! Sonderurlaub, Krank, Feiertag, Zeitausgleich); sie liegt als Band über dem Arbeitszeitrahmen des Tages. Der Tag
 //! in Bearbeitung (in „Tage“ ausgewählt, siehe [`Selection`]) trägt sein Datum auf einer
@@ -22,8 +23,11 @@
 //! Arbeitsbeginn und Feierabend lassen sich mit der Maus verschieben: An der Oberkante des
 //! ersten bzw. der Unterkante des letzten Abschnitts erscheint ein Griff. Beim Ziehen rastet
 //! die Zeit auf 5 Minuten ein (mit ⌥ auf die Minute) und am erfassten Wert – dorthin
-//! gezogen, gilt wieder die automatische Erfassung. Esc bricht ab. Arbeitsbeginn und
-//! Feierabend tragen eine türkise Linie, manuell festgelegte kräftiger und mit einem Punkt.
+//! gezogen, gilt wieder die automatische Erfassung. Ändert sich die Arbeitszeit anders als
+//! die Uhrzeit (etwa neben abgesetzter Arbeit ohne Mac), nennt das Schild es dazu. Esc
+//! bricht ab. Der Dialog „… ändern“ hält dieselben Grenzen ein (siehe [`bound_problem`]).
+//! Arbeitsbeginn und Feierabend tragen eine türkise Linie, manuell festgelegte kräftiger
+//! und mit einem Punkt.
 
 use crate::day::{fmt_clock, secs_of, Absence, AbsenceKind, Activity, Day, FreeDay, Span, DAY_END};
 use crate::palette;
@@ -314,9 +318,16 @@ fn column(days: &[Day], snap: &Snapshot, date: NaiveDate) -> Column {
     let gaps = day.pauses(s);
     let absence = day.absence.map(|a| (a.short(), a.label()));
     // Einträge, aber keine Arbeitszeit (z. B. nur eine Pause): Das Soll zählt trotzdem.
-    let raw_work = day.record(s).map_or(0, |r| r.work_secs);
-    let missing = (day.absence.is_none() && raw_work <= 0)
-        .then(|| s.counted_target(day, raw_work, today))
+    let rec = day.record(s).unwrap_or(crate::day::DayRecord {
+        date,
+        first_start: 0,
+        last_end: 0,
+        work_secs: 0,
+        shown_work_secs: 0,
+        shown_pause_secs: 0,
+    });
+    let missing = (day.absence.is_none() && rec.work_secs <= 0)
+        .then(|| s.counted_target(day, &rec, today))
         .filter(|t| *t > 0);
     let locked = day.locks_entries();
     Column { date, blocks, work_secs, pause_secs, warnings, manual, gaps, absence, missing, locked, edges }
@@ -811,6 +822,8 @@ struct Context {
     absence: Option<Option<Absence>>,
     /// Hat der Tag Einträge außer der Abwesenheit? Dann geht nur ein halber Tag.
     busy: bool,
+    /// Tag ohne Soll (freier Tag): Eine eingetragene Abwesenheit lässt sich nur entfernen.
+    no_target: bool,
     /// Der Tag lässt sich leeren („Alle Einträge löschen …“): Er hat Einträge außer der
     /// Abwesenheit.
     clearable: bool,
@@ -879,6 +892,8 @@ struct Drag {
     snapped: bool,
     /// Arbeit ohne Mac, die mit dem neuen Wert entfiele.
     cut: Vec<Span>,
+    /// Änderung der Arbeitszeit des Tages mit dem neuen Wert (Sekunden, wie angezeigt).
+    work_diff: i64,
     /// Alle Tage (für die Hinweise) mit dem Tag in der Vorschau; `day` ist der Tag vorher.
     days: Vec<Day>,
     day: Day,
@@ -1076,7 +1091,7 @@ define_class!(
                 g.borrow().as_ref().filter(|g| g.active).map(|g| DragShow {
                     col: g.col,
                     bound: g.bound,
-                    label: drag_label(g.bound, g.at, g.edges.get(g.bound).0, g.edges.get(g.bound).1),
+                    label: drag_label(g.bound, g.at, g.edges.get(g.bound).0, g.edges.get(g.bound).1, g.work_diff),
                     cut: g.cut.clone(),
                 })
             });
@@ -1294,12 +1309,15 @@ fn drag_limits(e: &Edges, bound: Bound, s: &WorkRules, limit: Option<i64>, grid:
 
 /// Uhrzeit beim Ziehen an der Stelle `raw`: auf 5 Minuten (`fine`: auf die Minute) innerhalb
 /// von `limits`; näher als `magnet` am Wert ohne manuelle Angabe (`auto`) rastet sie dort ein
-/// (zweiter Wert `true`).
+/// (zweiter Wert `true`). Der Fangbereich reicht höchstens einen halben Rasterschritt weit –
+/// sonst wären die Rasterwerte gleich neben dem erfassten Wert (08:10 und 08:15 neben
+/// 08:12) nicht mehr erreichbar, auch mit ⌥ nicht.
 fn drag_value(raw: i64, auto: Option<i64>, magnet: i64, fine: bool, (lo, hi): (i64, i64)) -> (i64, bool) {
+    let step = if fine { 60 } else { 300 };
+    let magnet = magnet.min(step / 2);
     if let Some(a) = auto.filter(|a| (lo..=hi).contains(a) && (raw - a).abs() <= magnet) {
         return (a, true);
     }
-    let step = if fine { 60 } else { 300 };
     (((raw + step / 2).div_euclid(step) * step).clamp(lo, hi), false)
 }
 
@@ -1316,9 +1334,20 @@ fn drag_result(e: &Edges, bound: Bound, at: i64) -> Option<Option<i64>> {
     Some(Some(at))
 }
 
+/// `+25 Min.`, `−1:05 h` (Minuten mit Vorzeichen).
+fn fmt_diff(minutes: i64) -> String {
+    let sign = if minutes > 0 { "+" } else { "−" };
+    let m = minutes.abs();
+    if m < 60 { format!("{sign}{m} Min.") } else { format!("{sign}{}:{:02} h", m / 60, m % 60) }
+}
+
 /// `Beginn 07:30 · +25 Min.` – die Uhrzeit beim Ziehen und wie weit sie vom Wert vorher
-/// (`before`) abweicht; am Wert ohne manuelle Angabe `· automatisch`.
-fn drag_label(bound: Bound, at: i64, before: i64, auto: Option<i64>) -> String {
+/// (`before`) abweicht; am Wert ohne manuelle Angabe `· automatisch`. `work_diff` ist die
+/// Änderung der Arbeitszeit des Tages (Sekunden, nach den angezeigten Minuten). Weicht sie
+/// von der Verschiebung ab, nennt das Schild sie dazu (`· Arbeitszeit +1:45 h`): etwa wenn
+/// ein manueller Feierabend nach abgesetzter Arbeit ohne Mac die Zeit seit dem letzten
+/// Sperren mitzählen lässt (siehe [`Day::set_end`]) oder Arbeit ohne Mac entfällt.
+fn drag_label(bound: Bound, at: i64, before: i64, auto: Option<i64>, work_diff: i64) -> String {
     let what = match bound {
         Bound::Start => "Beginn",
         Bound::End => "Feierabend",
@@ -1328,11 +1357,90 @@ fn drag_label(bound: Bound, at: i64, before: i64, auto: Option<i64>) -> String {
     if Some(at) == auto {
         text.push_str(" · automatisch");
     } else if diff != 0 {
-        let sign = if diff > 0 { "+" } else { "−" };
-        let m = diff.abs();
-        text.push_str(&if m < 60 { format!(" · {sign}{m} Min.") } else { format!(" · {sign}{}:{:02} h", m / 60, m % 60) });
+        text.push_str(&format!(" · {}", fmt_diff(diff)));
+    }
+    // So viel mehr Arbeitszeit ergäbe die Verschiebung allein.
+    let expected = match bound {
+        Bound::Start => -diff,
+        Bound::End => diff,
+    };
+    let work = work_diff.div_euclid(60);
+    if work != expected {
+        if work == 0 {
+            text.push_str(" · Arbeitszeit unverändert");
+        } else {
+            text.push_str(&format!(" · Arbeitszeit {}", fmt_diff(work)));
+        }
     }
     text
+}
+
+/// Was der Dialog „… ändern“ für `bound` mit der eingegebenen Uhrzeit `at` (minutengenau)
+/// speichert – wie [`drag_result`]: `Ok(None)` = nichts ändern (auch „Übernehmen“ ohne
+/// Änderung: Der Wert bleibt automatisch, es gibt keinen Schritt zum Widerrufen),
+/// `Ok(Some(None))` = wieder automatisch (die Minute des erfassten Werts), sonst die Uhrzeit.
+/// Es gelten dieselben Grenzen wie beim Ziehen (siehe [`bound_problem`]); `Err` nennt, warum
+/// die Uhrzeit nicht geht.
+fn dialog_result(e: &Edges, bound: Bound, at: i64, s: &WorkRules, limit: Option<i64>) -> Result<Option<Option<i64>>, String> {
+    let (current, auto, _) = e.get(bound);
+    // Das Feld zeigt nur Minuten: dieselbe Minute ist derselbe Wert.
+    let at = if at / 60 == current / 60 {
+        current
+    } else if auto.is_some_and(|a| a / 60 == at / 60) {
+        auto.unwrap_or(at)
+    } else {
+        at
+    };
+    match drag_result(e, bound, at) {
+        // Zurück auf den erfassten Wert geht immer (wie „zurücksetzen“).
+        r @ (None | Some(None)) => Ok(r),
+        Some(Some(at)) => match bound_problem(e, bound, at, s, limit) {
+            Some(text) => Err(text),
+            None => Ok(Some(Some(at))),
+        },
+    }
+}
+
+/// Warum sich `bound` nicht auf `at` legen lässt (`None`: Es geht). Dieselben Grenzen wie
+/// beim Ziehen ([`drag_limits`], ohne das sichtbare Raster): nicht in der Zukunft (`limit`,
+/// siehe [`free_limit`]), Arbeitsbeginn vor Feierabend ([`crate::day::bounds_in_order`], wie
+/// im Menü und im Inspektor), im Arbeitszeitrahmen und mindestens [`MIN_DAY`] vom anderen
+/// Ende entfernt.
+fn bound_problem(e: &Edges, bound: Bound, at: i64, s: &WorkRules, limit: Option<i64>) -> Option<String> {
+    let what = match bound {
+        Bound::Start => "Der Arbeitsbeginn",
+        Bound::End => "Der Feierabend",
+    };
+    let Some(limit) = limit else {
+        return Some("An künftigen Tagen lassen sich keine Zeiten eintragen.".to_string());
+    };
+    if at > limit {
+        return Some(format!("{what} kann nicht in der Zukunft liegen."));
+    }
+    let (start, end) = match bound {
+        Bound::Start => (at, e.end),
+        Bound::End => (e.start, at),
+    };
+    if !crate::day::bounds_in_order(Some(start), Some(end)) {
+        return Some(match bound {
+            Bound::Start => format!("Der Arbeitsbeginn muss vor dem Feierabend ({} Uhr) liegen.", fmt_clock(e.end)),
+            Bound::End => format!("Der Feierabend muss nach dem Arbeitsbeginn ({} Uhr) liegen.", fmt_clock(e.start)),
+        });
+    }
+    if !(s.frame_from..=s.frame_to).contains(&at) {
+        return Some(format!(
+            "{what} muss im Arbeitszeitrahmen von {} bis {} Uhr liegen – nur dort zählt Arbeitszeit (siehe Einstellungen).",
+            fmt_clock(s.frame_from),
+            fmt_clock(s.frame_to)
+        ));
+    }
+    match drag_limits(e, bound, s, Some(limit), (0, DAY_END)) {
+        Some((lo, hi)) if (lo..=hi).contains(&at) => None,
+        _ => Some(format!(
+            "Zwischen Arbeitsbeginn und Feierabend müssen mindestens {} Minuten liegen.",
+            MIN_DAY / 60
+        )),
+    }
 }
 
 /// Den Tag `day` auf den neuen Wert für `bound` setzen; gibt zurück, welche Arbeit ohne Mac
@@ -1356,6 +1464,9 @@ fn preview(d: &mut Data, g: &mut Drag) {
     g.days[i] = day;
     let Some(snap) = d.snap.as_ref() else { return };
     let col = column(&g.days, snap, g.date);
+    // Wie im Tageskopf: nach den angezeigten Uhrzeiten.
+    let before = g.day.record(&snap.settings).map_or(0, |r| r.shown_work_secs);
+    g.work_diff = col.work_secs - before;
     if let Some(c) = d.cols.get_mut(g.col) {
         *c = col;
     }
@@ -1417,6 +1528,7 @@ fn begin_drag(view: &WeekView, p: NSPoint) -> bool {
             at,
             snapped: false,
             cut: Vec::new(),
+            work_diff: 0,
             day: snap.days.iter().find(|x| x.date == c.date)?.clone(),
             days: snap.days.clone(),
         })
@@ -1610,20 +1722,22 @@ fn show_bound_dialog(date: NaiveDate, bound: Bound) {
             return;
         }
         let Some(at) = records::picker_secs(&field) else { return };
-        let problem = match bound {
-            Bound::Start if at >= e.end => Some("Der Arbeitsbeginn muss vor dem Feierabend liegen."),
-            Bound::End if at <= e.start => Some("Der Feierabend muss nach dem Arbeitsbeginn liegen."),
-            _ => None,
-        };
-        if let Some(text) = problem {
-            // Erst wenn das Sheet geschlossen ist.
-            let win = win.clone();
-            let block = RcBlock::new(move |_timer| records::show_info_sheet(&win, title, text));
-            unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.0, false, &block) };
+        let Some((rules, now)) = DATA.with(|d| {
+            let d = d.try_borrow().ok()?;
+            let snap = d.snap.as_ref()?;
+            Some((*snap.settings.rules(date), input_now(snap.now)))
+        }) else {
             return;
-        }
-        if let Some(at) = drag_result(&e, bound, at) {
-            set_bound(date, bound, at);
+        };
+        match dialog_result(&e, bound, at, &rules, free_limit(date, now)) {
+            Err(text) => {
+                // Erst wenn das Sheet geschlossen ist.
+                let win = win.clone();
+                let block = RcBlock::new(move |_timer| records::show_info_sheet(&win, title, &text));
+                unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.0, false, &block) };
+            }
+            Ok(Some(at)) => set_bound(date, bound, at),
+            Ok(None) => {}
         }
     });
     alert.beginSheetModalForWindow_completionHandler(&window, Some(&handler));
@@ -1676,6 +1790,9 @@ fn editable() -> bool {
 /// Vorschlag für Arbeit ohne Mac bei einem Klick um `at` in die Spalte `c`: in einer Pause
 /// die ganze Pause, vor dem Arbeitsbeginn und nach dem Feierabend 30 Minuten (bzw. die
 /// Mindestdauer `min_work`, wenn sie länger ist) ab dem Klick, auf 5 Minuten abgerundet.
+/// Stößt das an „jetzt“ (bzw. 23:59) und bliebe kürzer als die Mindestdauer, beginnt der
+/// Vorschlag früher, soweit der freie Bereich reicht – sonst ist es der ganze freie Bereich.
+/// Was hier vorgeschlagen ist, nimmt der Dialog unverändert an (siehe [`work_input`]).
 /// `None` auf einem Abschnitt und in der Zukunft.
 fn free_preset(c: &Column, at: i64, now: NaiveDateTime, min_work: i64) -> Option<Span> {
     if c.locked {
@@ -1689,7 +1806,14 @@ fn free_preset(c: &Column, at: i64, now: NaiveDateTime, min_work: i64) -> Option
         return Some(*gap);
     }
     let from = at / 300 * 300;
-    Some(Span::new(from, (from + FREE_PRESET.max(min_work)).min(limit)))
+    let to = (from + FREE_PRESET.max(min_work)).min(limit);
+    if records::shown_len(from, to) >= min_work {
+        return Some(Span::new(from, to));
+    }
+    // Nach vorn verlängern, aber nicht in einen Abschnitt hinein.
+    let area_from = free_spans(c, now).into_iter().find(|s| (s.from..s.to).contains(&at)).map_or(from, |s| s.from);
+    let earlier = (to / 60 * 60 - min_work).div_euclid(300) * 300;
+    Some(Span::new(earlier.max(area_from).min(from), to))
 }
 
 /// Bis zu welcher Uhrzeit sich am Tag `date` Arbeit ohne Mac eintragen lässt: heute bis
@@ -1700,6 +1824,40 @@ fn free_limit(date: NaiveDate, now: NaiveDateTime) -> Option<i64> {
         std::cmp::Ordering::Equal => Some(secs_of(now.time())),
         std::cmp::Ordering::Greater => None,
     }
+}
+
+/// „Jetzt“ für die Prüfung einer Eingabe: die Uhr – der Stand der Wochenansicht (`snap_now`)
+/// kann älter sein, eigenständig gestartet etwa bis zur nächsten Änderung.
+fn input_now(snap_now: NaiveDateTime) -> NaiveDateTime {
+    snap_now.max(chrono::Local::now().naive_local())
+}
+
+/// Eingabe im Dialog „Arbeit ohne Mac eintragen“ prüfen: von `f` bis `t` (minutengenau) am
+/// Tag mit den Pausen `pauses`, eingetragen bis höchstens `limit` (siehe [`free_limit`]).
+/// Gibt den Abschnitt zurück, der eingetragen wird, sonst den Grund der Ablehnung.
+///
+/// Die Mindestdauer `min_work` schützt nur vor versehentlichen Einträgen (siehe
+/// [`rules::MIN_WORK_RANGE`]): Der unveränderte Vorschlag `preset` und eine Eingabe, die
+/// genau eine Pause füllt, gelten auch kürzer – dann sekundengenau wie Vorschlag bzw. Pause,
+/// damit kein Rest der Pause übrig bleibt.
+fn work_input(f: i64, t: i64, preset: Span, pauses: &[Span], min_work: i64, limit: Option<i64>) -> Result<Span, String> {
+    let Some(limit) = limit else {
+        return Err("An künftigen Tagen lässt sich keine Arbeit ohne Mac eintragen.".to_string());
+    };
+    if t <= f {
+        return Err("Das Ende muss nach dem Beginn liegen.".to_string());
+    }
+    if t > limit {
+        return Err("Das Ende kann nicht in der Zukunft liegen.".to_string());
+    }
+    let same = |sp: &Span| sp.from / 60 == f / 60 && sp.to / 60 == t / 60;
+    if let Some(sp) = std::iter::once(&preset).chain(pauses).find(|sp| same(sp)) {
+        return Ok(*sp);
+    }
+    if records::shown_len(f, t) < min_work {
+        return Err(records::min_work_text(min_work));
+    }
+    Ok(Span::new(f, t))
 }
 
 /// Freie Bereiche einer Spalte (vor dem Arbeitsbeginn, Pausen, nach dem Feierabend), in
@@ -1811,32 +1969,36 @@ fn show_add_work(date: NaiveDate, preset: Span, error: Option<(&str, Span, Activ
         }
         let activity = records::popup_activity(&reason);
         let (Some(f), Some(t)) = (records::picker_secs(&from), records::picker_secs(&to)) else { return };
-        let min_work = DATA.with(|d| d.try_borrow().ok()?.snap.as_ref().map(|s| s.settings.min_work)).unwrap_or(0);
-        let problem = if t <= f {
-            Some("Das Ende muss nach dem Beginn liegen.".to_string())
-        } else if records::shown_len(f, t) < min_work {
-            Some(records::min_work_text(min_work))
-        } else {
-            None
-        };
-        if let Some(text) = problem {
-            // Erneut fragen; erst wenn das Sheet geschlossen ist.
-            let block = RcBlock::new(move |_timer| {
-                show_add_work(date, preset, Some((&text, Span::new(f, t), activity)))
-            });
-            unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.0, false, &block) };
+        let Some(checked) = DATA.with(|d| {
+            let d = d.try_borrow().ok()?;
+            let snap = d.snap.as_ref()?;
+            let pauses = snap.days.iter().find(|x| x.date == date).map(|x| x.pauses(&snap.settings)).unwrap_or_default();
+            let limit = free_limit(date, input_now(snap.now));
+            Some(work_input(f, t, preset, &pauses, snap.settings.min_work, limit))
+        }) else {
             return;
-        }
+        };
+        let entered = match checked {
+            Ok(span) => span,
+            Err(text) => {
+                // Erneut fragen; erst wenn das Sheet geschlossen ist.
+                let block = RcBlock::new(move |_timer| {
+                    show_add_work(date, preset, Some((&text, Span::new(f, t), activity)))
+                });
+                unsafe { NSTimer::scheduledTimerWithTimeInterval_repeats_block(0.0, false, &block) };
+                return;
+            }
+        };
         // Kurze Lücken zu benachbarter Arbeit ohne Mac gehören zum neuen Abschnitt.
         let (span, note) = DATA
             .with(|d| {
                 let d = d.try_borrow().ok()?;
                 let snap = d.snap.as_ref()?;
                 let min = snap.settings.rules(date).min_pause;
-                let j = snap.days.iter().find(|x| x.date == date)?.join_work_gaps(f, t, min);
+                let j = snap.days.iter().find(|x| x.date == date)?.join_work_gaps(entered.from, entered.to, min);
                 Some((j.span, j.note(min)))
             })
-            .unwrap_or((Span::new(f, t), None));
+            .unwrap_or((entered, None));
         if let Some(add) = ADD_WORK.with(|c| c.get()) {
             add(date, span.from, span.to, activity);
         }
@@ -1870,6 +2032,7 @@ fn context_at(view: &WeekView, p: NSPoint) -> Option<Context> {
             // An freien Tagen gibt es kein Soll – höchstens eine Abwesenheit zum Entfernen.
             (snap.settings.is_workday(c.date) || current.is_some()).then_some(current)
         });
+        let no_target = d.snap.as_ref().is_some_and(|s| !s.settings.is_workday(c.date));
         // Heute zählen für die Abwesenheit nur Einträge von Hand (siehe `Day::accepts_absence`).
         let today = d.snap.as_ref().is_some_and(|s| s.now.date() == c.date);
         let busy = day.is_some_and(|x| x.blocks_full_absence(today));
@@ -1885,6 +2048,7 @@ fn context_at(view: &WeekView, p: NSPoint) -> Option<Context> {
             time,
             absence,
             busy,
+            no_target,
             clearable,
             counting,
             edges: c.edges,
@@ -2009,18 +2173,31 @@ struct AbsenceItem {
 /// Hinweis im Untermenü, wenn der Tag Einträge hat.
 const ABSENCE_BLOCKED: &str = "Ganztags erst nach „Alle Einträge löschen“";
 
+/// Hinweis im Untermenü an einem Tag ohne Soll mit Abwesenheit.
+const ABSENCE_FREE_DAY: &str = "Freier Tag: nur entfernen";
+
 /// Punkte im Untermenü „Abwesenheit“ (`busy`: Der Tag hat andere Einträge – dann gehen
-/// ganze Tage erst, wenn sie gelöscht sind, siehe [`Day::accepts_absence`]).
-fn absence_entries(current: Option<Absence>, busy: bool) -> Vec<AbsenceItem> {
+/// ganze Tage erst, wenn sie gelöscht sind, siehe [`Day::accepts_absence`]). An einem Tag
+/// ohne Soll (`no_target`) lässt sich keine Abwesenheit eintragen, eine vorhandene nur
+/// entfernen: Dann gibt es nur „Keine“ und die eingetragene.
+fn absence_entries(current: Option<Absence>, busy: bool, no_target: bool) -> Vec<AbsenceItem> {
     let item = |title: String, tag: isize, checked: bool, enabled: bool| AbsenceItem { title, tag, checked, enabled };
     let mut out = vec![item("Keine".to_string(), 0, current.is_none(), true), item(String::new(), -1, false, false)];
-    for (i, kind) in AbsenceKind::ALL.iter().enumerate() {
+    if no_target {
+        if let Some(a) = current {
+            out.push(item(a.label(), absence_tag(a), true, true));
+        }
+        out.push(item(String::new(), -1, false, false));
+        out.push(item(ABSENCE_FREE_DAY.to_string(), -1, false, false));
+        return out;
+    }
+    for kind in AbsenceKind::ALL.iter() {
         // Halbe Tage gibt es bei Urlaub, Krankheit und Feiertag.
         let halves: &[bool] = if kind.allows_half() { &[false, true] } else { &[false] };
         for &half in halves {
             let a = Absence::new(*kind, half);
             let checked = current == Some(a);
-            out.push(item(a.label(), 1 + 2 * i as isize + half as isize, checked, checked || half || !busy));
+            out.push(item(a.label(), absence_tag(a), checked, checked || half || !busy));
         }
     }
     if busy {
@@ -2028,6 +2205,12 @@ fn absence_entries(current: Option<Absence>, busy: bool) -> Vec<AbsenceItem> {
         out.push(item(ABSENCE_BLOCKED.to_string(), -1, false, false));
     }
     out
+}
+
+/// Tag des Menüpunkts für `a` im Untermenü „Abwesenheit“ (siehe [`absence_of_tag`]).
+fn absence_tag(a: Absence) -> isize {
+    let i = AbsenceKind::ALL.iter().position(|k| *k == a.kind).unwrap_or(0);
+    1 + 2 * i as isize + a.half as isize
 }
 
 /// Wahl im Untermenü „Abwesenheit“ (`Some(None)`: keine).
@@ -2061,7 +2244,7 @@ fn context_menu(ctx: &Context) -> Option<Retained<NSMenu>> {
             Some(a) if a == sel!(setAbsence:) => {
                 let sub = NSMenu::new(mtm);
                 sub.setAutoenablesItems(false);
-                for e in absence_entries(ctx.absence.flatten(), ctx.busy) {
+                for e in absence_entries(ctx.absence.flatten(), ctx.busy, ctx.no_target) {
                     if e.title.is_empty() {
                         sub.addItem(&NSMenuItem::separatorItem(mtm));
                         continue;
@@ -3334,6 +3517,7 @@ pub fn drag_first_start() {
             at: (edges.start + 20 * 60) / 300 * 300,
             snapped: false,
             cut: Vec::new(),
+            work_diff: 0,
             days: snap.days.clone(),
             day,
         };
@@ -3505,8 +3689,10 @@ mod tests {
         assert_eq!(free_preset(c, h(18, 2), at(20, 0), M), Some(Span::new(h(18, 0), h(18, 30))));
         // Auf einem Abschnitt nichts.
         assert_eq!(free_preset(c, h(9, 0), at(20, 0), M), None);
-        // Heute nicht in der Zukunft; das Ende höchstens jetzt.
-        assert_eq!(free_preset(c, h(17, 50), at(18, 0), M), Some(Span::new(h(17, 50), h(18, 0))));
+        // Heute nicht in der Zukunft; das Ende höchstens jetzt. Kurz vor jetzt bliebe der
+        // Vorschlag unter der Mindestdauer: Er beginnt dann früher.
+        assert_eq!(free_preset(c, h(17, 50), at(18, 0), M), Some(Span::new(h(17, 45), h(18, 0))));
+        assert_eq!(free_preset(c, h(17, 2), at(17, 10), M), Some(Span::new(h(17, 0), h(17, 10))), "nicht in den Abschnitt");
         assert_eq!(free_preset(c, h(18, 5), at(18, 0), M), None);
         // Zukünftige Tage nicht, ein freier Tag in der Vergangenheit schon.
         assert_eq!(free_preset(&cols[2], h(9, 0), at(20, 0), M), None);
@@ -3519,8 +3705,8 @@ mod tests {
         assert_eq!(free_spans(c, at(18, 0)).last(), Some(&Span::new(h(17, 0), h(18, 0))));
         assert!(free_spans(&cols[2], at(20, 0)).is_empty());
         assert_eq!(free_spans(&cols[0], at(20, 0)), vec![Span::new(0, h(23, 59))]);
-        // Bis höchstens 23:59.
-        assert_eq!(free_preset(&cols[0], h(23, 50), at(20, 0), M), Some(Span::new(h(23, 50), h(23, 59))));
+        // Bis höchstens 23:59 (und dafür früher).
+        assert_eq!(free_preset(&cols[0], h(23, 50), at(20, 0), M), Some(Span::new(h(23, 40), h(23, 59))));
         // Längere Mindestdauer: Vorschlag mindestens so lang.
         assert_eq!(free_preset(c, h(18, 2), at(20, 0), 45 * 60), Some(Span::new(h(18, 0), h(18, 45))));
     }
@@ -3564,6 +3750,7 @@ mod tests {
             time: None,
             absence: None,
             busy: false,
+            no_target: false,
             clearable: false,
             counting: None,
             edges: None,
@@ -3595,7 +3782,7 @@ mod tests {
         let full = Context { absence: Some(None), busy: true, clearable: true, ..plain.clone() };
         assert_eq!(titles(&full, true), ["Di, 17.11.2026", "", "Tag bearbeiten", "Abwesenheit", "Alle Einträge löschen …"]);
         let half = Absence::new(AbsenceKind::Vacation, true);
-        let subs = absence_entries(Some(half), false);
+        let subs = absence_entries(Some(half), false, false);
         let names: Vec<&str> = subs.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(
             names,
@@ -3603,17 +3790,23 @@ mod tests {
         );
         assert_eq!(subs.iter().filter(|e| e.checked).map(|e| e.title.as_str()).collect::<Vec<_>>(), ["Urlaub (halber Tag)"]);
         assert!(subs.iter().all(|e| e.enabled || e.title.is_empty()), "leerer Tag: alles wählbar");
-        assert!(absence_entries(None, false)[0].checked, "„Keine“ abgehakt");
+        assert!(absence_entries(None, false, false)[0].checked, "„Keine“ abgehakt");
         // Jeder Punkt führt zu genau seiner Abwesenheit.
         for e in subs.iter().filter(|e| !e.title.is_empty()) {
             let choice = absence_of_tag(e.tag).unwrap();
             assert_eq!(choice.map_or("Keine".to_string(), Absence::label), e.title);
         }
         // Mit Einträgen: nur „Keine“ und halbe Tage, dazu der Hinweis.
-        let busy = absence_entries(None, true);
+        let busy = absence_entries(None, true, false);
         let enabled: Vec<&str> = busy.iter().filter(|e| e.enabled).map(|e| e.title.as_str()).collect();
         assert_eq!(enabled, ["Keine", "Urlaub (halber Tag)", "Krank (halber Tag)", "Feiertag (halber Tag)"]);
         assert_eq!(busy.last().map(|e| (e.title.as_str(), e.tag, e.enabled)), Some((ABSENCE_BLOCKED, -1, false)));
+        // Freier Tag (ohne Soll): nur entfernen – „Keine“ und die eingetragene.
+        let free = absence_entries(Some(Absence::new(AbsenceKind::Holiday, false)), true, true);
+        let shown: Vec<(&str, bool)> = free.iter().map(|e| (e.title.as_str(), e.enabled)).collect();
+        assert_eq!(shown, [("Keine", true), ("", false), ("Feiertag", true), ("", false), (ABSENCE_FREE_DAY, false)]);
+        assert_eq!(absence_of_tag(free[0].tag), Some(None));
+        assert_eq!(absence_of_tag(free[2].tag), Some(Some(Absence::new(AbsenceKind::Holiday, false))));
         assert_eq!(absence_of_tag(-1), None);
         assert_eq!(absence_of_tag(99), None);
         // Auf dem einzigen Abschnitt: Arbeitsbeginn (manuell, also auch zurücksetzen) und Feierabend.
@@ -3693,7 +3886,8 @@ mod tests {
         assert_eq!(drag_value(h(7, 32) + 40, None, magnet, false, limits), (h(7, 35), false));
         assert_eq!(drag_value(h(7, 32) + 40, None, magnet, true, limits), (h(7, 33), false));
         // Nahe am erfassten Wert rastet die Kante dort ein (auch zwischen den Rasterlinien).
-        assert_eq!(drag_value(h(8, 9), Some(h(8, 12) + 23), magnet, false, limits), (h(8, 12) + 23, true));
+        assert_eq!(drag_value(h(8, 11), Some(h(8, 12) + 23), magnet, false, limits), (h(8, 12) + 23, true));
+        assert_eq!(drag_value(h(8, 14), Some(h(8, 12) + 23), magnet, false, limits), (h(8, 12) + 23, true));
         assert_eq!(drag_value(h(8, 30), Some(h(8, 12) + 23), magnet, false, limits), (h(8, 30), false));
         // Nicht über die Grenzen hinaus.
         assert_eq!(drag_value(h(5, 0), None, magnet, false, limits), (h(7, 0), false));
@@ -3713,10 +3907,16 @@ mod tests {
         assert_eq!(drag_result(&manual, Bound::Start, h(7, 45)), Some(Some(h(7, 45))));
         assert_eq!(drag_result(&manual, Bound::End, h(17, 30)), Some(Some(h(17, 30))));
 
-        assert_eq!(drag_label(Bound::Start, h(7, 30), h(7, 5), Some(h(7, 5))), "Beginn 07:30 · +25 Min.");
-        assert_eq!(drag_label(Bound::End, h(15, 55), h(17, 0), None), "Feierabend 15:55 · −1:05 h");
-        assert_eq!(drag_label(Bound::Start, h(7, 5) + 12, h(7, 30), Some(h(7, 5) + 12)), "Beginn 07:05 · automatisch");
-        assert_eq!(drag_label(Bound::End, h(17, 0), h(17, 0), None), "Feierabend 17:00");
+        assert_eq!(drag_label(Bound::Start, h(7, 30), h(7, 5), Some(h(7, 5)), -25 * 60), "Beginn 07:30 · +25 Min.");
+        assert_eq!(drag_label(Bound::End, h(15, 55), h(17, 0), None, -65 * 60), "Feierabend 15:55 · −1:05 h");
+        assert_eq!(drag_label(Bound::Start, h(7, 5) + 12, h(7, 30), Some(h(7, 5) + 12), 25 * 60), "Beginn 07:05 · automatisch");
+        assert_eq!(drag_label(Bound::End, h(17, 0), h(17, 0), None, 0), "Feierabend 17:00");
+        // Ändert sich die Arbeitszeit anders als die Uhrzeit, nennt das Schild es dazu.
+        assert_eq!(
+            drag_label(Bound::End, h(19, 15), h(19, 30), None, 105 * 60),
+            "Feierabend 19:15 · −15 Min. · Arbeitszeit +1:45 h"
+        );
+        assert_eq!(drag_label(Bound::Start, h(9, 0), h(8, 0), None, 0), "Beginn 09:00 · +1:00 h · Arbeitszeit unverändert");
     }
 
     #[test]
@@ -3749,6 +3949,7 @@ mod tests {
             at: h(16, 30),
             snapped: false,
             cut: Vec::new(),
+            work_diff: 0,
             days: s.days.clone(),
             day: d,
         };
@@ -3763,6 +3964,169 @@ mod tests {
         preview(&mut data, &mut g);
         assert_eq!(data.cols[1].edges.unwrap().end, h(17, 0));
         assert!(g.cut.is_empty());
+        assert_eq!(g.work_diff, 0);
+        // Das Schild nennt nur die Verschiebung, wenn die Arbeitszeit ihr folgt.
+        g.at = h(16, 30);
+        preview(&mut data, &mut g);
+        assert_eq!(g.work_diff, -30 * 60);
+        assert_eq!(drag_label(g.bound, g.at, e.end, e.auto_end, g.work_diff), "Feierabend 16:30 · −30 Min.");
+    }
+
+    /// Den Tag `d` (Dienstag, 17.11.2026, in der Vergangenheit) in der Woche zeigen und
+    /// `bound` wie beim Ziehen auf `at` legen.
+    fn drag_to(d: Day, bound: Bound, at: i64) -> (Data, Drag) {
+        let s = snap(vec![d.clone()], date(2026, 11, 18).and_hms_opt(9, 0, 0).unwrap(), false);
+        let mut data =
+            Data { snap: Some(s.clone()), monday: date(2026, 11, 16), cols: Vec::new(), hours: (7, 22), weights: [1.0; 7], full_frame: false };
+        data.rebuild();
+        let edges = data.cols[1].edges.unwrap();
+        let mut g = Drag {
+            col: 1,
+            date: d.date,
+            bound,
+            edges,
+            y0: 0.0,
+            offset: 0.0,
+            active: true,
+            at,
+            snapped: false,
+            cut: Vec::new(),
+            work_diff: 0,
+            days: s.days.clone(),
+            day: d,
+        };
+        preview(&mut data, &mut g);
+        (data, g)
+    }
+
+    #[test]
+    fn dragging_at_detached_work_without_mac_shows_the_real_change() {
+        // Meldung: Arbeit ohne Mac abgesetzt nach der erfassten Zeit (Mac um 17:00 gesperrt),
+        // den Feierabend an ihrem Ende 15 Minuten früher gezogen. Ein manueller Feierabend
+        // zählt ab dem letzten Sperren davor – die Pause 17:00–19:00 wird Arbeitszeit.
+        let mut d = Day::new(date(2026, 11, 17));
+        d.add_period(h(9, 0), h(17, 0));
+        d.add_work(h(19, 0), h(19, 30), "Meeting");
+        let s = Settings::default();
+        assert_eq!(d.record(&s).unwrap().work_secs, h(8, 30));
+        let (data, g) = drag_to(d.clone(), Bound::End, h(19, 15));
+        assert_eq!(g.edges.end, h(19, 30), "die Kante sitzt am Ende der Arbeit ohne Mac");
+        // Vorschau und Speichern rechnen gleich: +1:45 h statt −15 Min.
+        let mut saved = d.clone();
+        saved.set_end(Some(h(19, 15)));
+        assert_eq!(saved.record(&s).unwrap().work_secs, h(10, 15));
+        assert_eq!(data.cols[1].work_secs, h(10, 15));
+        assert_eq!(g.work_diff, h(1, 45));
+        let e = g.edges;
+        assert_eq!(
+            drag_label(g.bound, g.at, e.end, e.auto_end, g.work_diff),
+            "Feierabend 19:15 · −15 Min. · Arbeitszeit +1:45 h"
+        );
+        // Ebenso vor der erfassten Zeit: Beginn 07:15 zählt bis zum ersten Entsperren um 09:00.
+        let mut d = Day::new(date(2026, 11, 17));
+        d.add_period(h(9, 0), h(17, 0));
+        d.add_work(h(7, 0), h(7, 30), "Telefonat");
+        let (data, g) = drag_to(d, Bound::Start, h(7, 15));
+        assert_eq!(data.cols[1].work_secs, h(9, 45));
+        let e = g.edges;
+        assert_eq!(
+            drag_label(g.bound, g.at, e.start, e.auto_start, g.work_diff),
+            "Beginn 07:15 · +15 Min. · Arbeitszeit +1:15 h"
+        );
+    }
+
+    #[test]
+    fn magnet_leaves_the_neighbouring_values_reachable() {
+        // Meldung: Bei 40 Punkten je Stunde fängt der Magnet (6 Punkte) 9 Minuten um den
+        // erfassten Wert – 08:05 bis 08:20 waren neben 08:12 nicht zu erreichen, auch mit ⌥ nicht.
+        let limits = (h(7, 0), h(16, 55));
+        let auto = Some(h(8, 12) + 23);
+        let magnet = (MAGNET / 40.0 * 3600.0) as i64;
+        assert_eq!(magnet, 9 * 60);
+        for (raw, want) in [(h(8, 5), h(8, 5)), (h(8, 9), h(8, 10)), (h(8, 15), h(8, 15)), (h(8, 20), h(8, 20))] {
+            assert_eq!(drag_value(raw, auto, magnet, false, limits), (want, false));
+        }
+        assert_eq!(drag_value(h(8, 12), auto, magnet, false, limits), (h(8, 12) + 23, true));
+        // Mit ⌥ jede Minute daneben, der erfasste Wert selbst nur noch ganz nah.
+        for m in [10, 11, 13, 14] {
+            assert_eq!(drag_value(h(8, m), auto, magnet, true, limits), (h(8, m), false));
+        }
+        assert_eq!(drag_value(h(8, 12) + 30, auto, magnet, true, limits), (h(8, 12) + 23, true));
+    }
+
+    #[test]
+    fn bound_dialog_follows_the_drag_limits() {
+        let s = &WorkRules::DEFAULT; // Rahmen 07:00–22:00
+        let past = Some(DAY_END - 60);
+        let auto = edges(h(8, 12) + 23, h(17, 0) + 41);
+        // „Übernehmen“ ohne Änderung: Das Feld zeigt 08:12 – das bleibt automatisch.
+        assert_eq!(dialog_result(&auto, Bound::Start, h(8, 12), s, past), Ok(None));
+        assert_eq!(dialog_result(&auto, Bound::End, h(17, 0), s, past), Ok(None));
+        assert_eq!(dialog_result(&auto, Bound::Start, h(7, 30), s, past), Ok(Some(Some(h(7, 30)))));
+        // Manuell: derselbe Wert ändert nichts, die Minute des erfassten Werts setzt zurück.
+        let manual = Edges { start: h(7, 30), manual_start: true, ..auto };
+        assert_eq!(dialog_result(&manual, Bound::Start, h(7, 30), s, past), Ok(None));
+        assert_eq!(dialog_result(&manual, Bound::Start, h(8, 12), s, past), Ok(Some(None)));
+        // Abgelehnt mit Grund: Reihenfolge, Rahmen, Mindestabstand, Zukunft.
+        let err = |bound, at, limit| dialog_result(&auto, bound, at, s, limit).unwrap_err();
+        assert_eq!(err(Bound::Start, h(17, 30), past), "Der Arbeitsbeginn muss vor dem Feierabend (17:00 Uhr) liegen.");
+        assert_eq!(err(Bound::End, h(8, 0), past), "Der Feierabend muss nach dem Arbeitsbeginn (08:12 Uhr) liegen.");
+        assert!(err(Bound::Start, h(6, 30), past).starts_with("Der Arbeitsbeginn muss im Arbeitszeitrahmen von 07:00 bis 22:00 Uhr"));
+        assert!(err(Bound::End, h(22, 30), past).starts_with("Der Feierabend muss im Arbeitszeitrahmen"));
+        assert_eq!(err(Bound::Start, h(16, 57), past), "Zwischen Arbeitsbeginn und Feierabend müssen mindestens 5 Minuten liegen.");
+        assert_eq!(err(Bound::End, h(17, 30), Some(h(17, 20) + 5)), "Der Feierabend kann nicht in der Zukunft liegen.");
+        assert_eq!(err(Bound::Start, h(7, 30), None), "An künftigen Tagen lassen sich keine Zeiten eintragen.");
+        // Genau die Uhrzeiten, die sich auch ziehen lassen (ohne Raster).
+        for bound in [Bound::Start, Bound::End] {
+            for limit in [past, Some(h(12, 0) + 30)] {
+                let (lo, hi) = drag_limits(&auto, bound, s, limit, (0, DAY_END)).unwrap();
+                for at in (0..DAY_END).step_by(60) {
+                    let unchanged = at / 60 == auto.get(bound).0 / 60;
+                    let ok = dialog_result(&auto, bound, at, s, limit).is_ok();
+                    assert_eq!(ok, unchanged || (lo..=hi).contains(&at), "{bound:?} {}", fmt_clock(at));
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn work_dialog_accepts_its_own_presets() {
+        const MIN: i64 = 30 * 60;
+        let past = Some(DAY_END - 60);
+        // Vorschlag: die Pause 12:00:37–12:20:10 (20 Min., kürzer als die Mindestdauer).
+        let gap = Span::new(h(12, 0) + 37, h(12, 20) + 10);
+        assert_eq!(work_input(h(12, 0), h(12, 20), gap, &[gap], MIN, past), Ok(gap), "sekundengenau die Pause");
+        // Geändert und zu kurz: abgelehnt; lang genug: so eingetragen.
+        assert_eq!(work_input(h(12, 5), h(12, 20), gap, &[gap], MIN, past), Err(records::min_work_text(MIN)));
+        assert_eq!(work_input(h(11, 50), h(12, 20), gap, &[gap], MIN, past), Ok(Span::new(h(11, 50), h(12, 20))));
+        // Eine andere Pause genau gefüllt: auch kürzer.
+        let other = Span::new(h(15, 0), h(15, 20));
+        let preset = Span::new(h(18, 0), h(18, 30));
+        assert_eq!(work_input(h(15, 0), h(15, 20), preset, &[gap, other], MIN, past), Ok(other));
+        // Ende vor Beginn, Zukunft.
+        assert_eq!(work_input(h(12, 20), h(12, 0), gap, &[gap], MIN, past), Err("Das Ende muss nach dem Beginn liegen.".to_string()));
+        assert_eq!(
+            work_input(h(17, 0), h(17, 40), preset, &[], MIN, Some(h(17, 30))),
+            Err("Das Ende kann nicht in der Zukunft liegen.".to_string())
+        );
+        assert!(work_input(h(9, 0), h(10, 0), preset, &[], MIN, None).is_err());
+        // Vorschläge aus der Spalte: Pause und kurz vor jetzt – beide werden angenommen.
+        let mut d = Day::new(date(2026, 11, 17));
+        d.add_period(h(8, 0), h(12, 0) + 37);
+        d.add_period(h(12, 20) + 10, h(17, 0));
+        let now = date(2026, 11, 17).and_hms_opt(17, 50, 27).unwrap();
+        let s = Snapshot { settings: Settings { min_work: MIN, ..Settings::default() }, ..snap(vec![d], now, false) };
+        let cols = columns(&s, date(2026, 11, 16));
+        let limit = free_limit(cols[1].date, now);
+        let pauses = cols[1].gaps.clone();
+        let in_pause = free_preset(&cols[1], h(12, 10), now, MIN).unwrap();
+        assert_eq!(in_pause, gap);
+        let late = free_preset(&cols[1], h(17, 40), now, MIN).unwrap();
+        assert_eq!(late, Span::new(h(17, 20), h(17, 50) + 27), "nach vorn verlängert auf die Mindestdauer");
+        for preset in [in_pause, late] {
+            let shown = (preset.from / 60 * 60, preset.to / 60 * 60);
+            assert_eq!(work_input(shown.0, shown.1, preset, &pauses, MIN, limit), Ok(preset));
+        }
     }
 
     #[test]
@@ -3919,7 +4283,8 @@ mod tests {
         let s = snap(vec![d], date(2026, 11, 17).and_hms_opt(9, 30, 0).unwrap(), true);
         let cols = columns(&s, date(2026, 11, 16));
         assert!(cols[1].blocks[0].running);
-        assert_eq!(week_summary(&s, date(2026, 11, 16), &cols), "Woche: 1:30 h  ·  Pausen: 0:00 h  ·  Saldo −6:18 h");
+        // Der laufende Tag steht bei null, bis das Soll erreicht ist.
+        assert_eq!(week_summary(&s, date(2026, 11, 16), &cols), "Woche: 1:30 h  ·  Pausen: 0:00 h  ·  Saldo +0:00 h");
         assert_eq!(week_summary(&s, date(2026, 11, 23), &columns(&s, date(2026, 11, 23))), "Woche: –");
     }
 }

@@ -229,39 +229,58 @@ define_class!(
             let tag = sender.map(|s| s.tag()).unwrap_or(0);
             if tag == TAG_RESET {
                 act(|s, t| {
-                    s.tracker.set_start(t, None);
+                    // Ohne Beginn gibt es nichts abzulehnen.
+                    let _ = s.tracker.set_start(t, None);
                 });
                 return;
             }
-            let initial = with_state(|s| s.tracker.today(now()).first_start).flatten();
+            let (initial, end) = with_state(|s| {
+                let info = s.tracker.today(now());
+                (info.first_start, match info.mode {
+                    Mode::Closed(end) => Some(end),
+                    Mode::Auto => None,
+                })
+            })
+            .unwrap_or((None, None));
+            // Nach Feierabend: Der Beginn muss davor liegen.
             let Some(at) = chosen_time(
                 tag,
                 "Arbeitsbeginn festlegen",
                 "Ab wann zählt die Arbeitszeit heute? Ein früherer Beginn als das erste Entsperren wird mitgezählt.",
                 initial,
+                (None, end.map(|e| e - 60)),
             ) else {
                 return;
             };
-            act(|s, t| {
-                let cut = s.tracker.set_start(t, Some(secs(at)));
-                notify_cut_work(&cut, "vor dem Arbeitsbeginn");
+            act(|s, t| match s.tracker.set_start(t, Some(secs(at))) {
+                Ok(cut) => notify_cut_work(&cut, "vor dem Arbeitsbeginn"),
+                Err(why) => notify_refused("Arbeitsbeginn nicht geändert", why),
             });
         }
 
         #[unsafe(method(closeDay:))]
         fn close_day(&self, sender: Option<&NSMenuItem>) {
             let tag = sender.map(|s| s.tag()).unwrap_or(0);
+            // Der Feierabend liegt nach dem manuellen Arbeitsbeginn und im Arbeitszeitrahmen.
+            let earliest = with_state(|s| {
+                let t = now();
+                let info = s.tracker.today(t);
+                let frame_from = s.tracker.settings.rules(t.date()).frame_from;
+                info.first_start.filter(|_| info.start_manual).map_or(frame_from, |start| start.max(frame_from))
+            });
             let Some(at) = chosen_time(
                 tag,
                 "Feierabend",
-                "Wann war heute Arbeitsende? Danach wird bis morgen nichts mehr erfasst.",
+                "Wann war heute Arbeitsende? Danach zählt bis morgen nichts mehr – bis der Feierabend \
+                 wieder aufgehoben ist.",
                 None,
+                (earliest.map(|e| e + 60), None),
             ) else {
                 return;
             };
-            act(|s, t| {
-                let cut = s.tracker.close_day(t, secs(at));
-                notify_cut_work(&cut, "nach dem Feierabend");
+            act(|s, t| match s.tracker.close_day(t, secs(at)) {
+                Ok(cut) => notify_cut_work(&cut, "nach dem Feierabend"),
+                Err(why) => notify_refused("Kein Feierabend eingetragen", why),
             });
         }
 
@@ -320,14 +339,20 @@ define_class!(
                     && !s.tracker.on_break()
                     && !s.tracker.on_away()
                     && !(s.tracker.on_idle() && left_alone)
-                    && s.tracker.paused_since.is_some_and(|p| p.date() == t.date())
+                    && s.tracker.paused_since.is_some()
                 {
-                    // Entsperrt, aber nicht erfasst (z. B. Feierabend im Fenster zurückgenommen
-                    // oder zurück nach Inaktivität).
+                    // Entsperrt, aber nicht erfasst (z. B. zurück nach Inaktivität – auch wenn
+                    // sie gestern begonnen hat und der Mac über Nacht nie gesperrt war).
                     dirty |= s.tracker.start(t);
                 }
-                if dirty || (s.tracker.is_running() && s.last_save.elapsed().as_secs() >= 60) {
+                // Auch Arbeit ohne Mac wird regelmäßig gesichert, nicht erst an ihrem Ende.
+                let ongoing = s.tracker.is_running() || s.tracker.on_away();
+                if dirty || (ongoing && s.last_save.elapsed().as_secs() >= 60) {
                     s.persist(t);
+                }
+                // Vergessenes „Zurück am Mac“: melden, sobald wieder jemand am Mac ist.
+                if !locked {
+                    s.report_forgotten_away();
                 }
                 s.refresh();
             });
@@ -406,7 +431,8 @@ fn pause_for(reason: PauseReason) {
     });
 }
 
-/// Fortsetzen nach Entsperren/Aufwachen (nicht nach Feierabend).
+/// Fortsetzen nach Entsperren/Aufwachen. Auch nach Feierabend wird wieder aufgezeichnet
+/// (gezählt wird davon nichts, solange er steht).
 fn resume_auto() {
     with_state(|s| {
         let t = now();
@@ -419,8 +445,15 @@ fn resume_auto() {
                 s.ask_about_lock(from, t);
             }
         }
+        s.report_forgotten_away();
         s.refresh();
     });
+}
+
+/// Arbeitsbeginn oder Feierabend aus dem Menü wurde nicht übernommen: Das meldet eine
+/// Mitteilung, denn das Menü ist dann schon zu.
+fn notify_refused(title: &str, why: crate::tracker::Refused) {
+    notify::post_text("entry-refused", title, &why.text());
 }
 
 /// Arbeitsbeginn oder Feierabend aus dem Menü hat Arbeit ohne Mac gekürzt (die letzte Angabe
@@ -445,10 +478,10 @@ fn lock_answered(answer: notify::LockAnswer) {
         let Some((date, from, to)) = s.asked_lock.take() else { return };
         match answer {
             notify::LockAnswer::Work(activity) => s.tracker.add_work(date, from, to, activity.note()),
-            notify::LockAnswer::CloseDay if date == t.date() => {
-                let cut = s.tracker.close_day(t, from);
-                notify_cut_work(&cut, "nach dem Feierabend");
-            }
+            notify::LockAnswer::CloseDay if date == t.date() => match s.tracker.close_day(t, from) {
+                Ok(cut) => notify_cut_work(&cut, "nach dem Feierabend"),
+                Err(why) => notify_refused("Kein Feierabend eingetragen", why),
+            },
             notify::LockAnswer::CloseDay => {}
         }
     });
@@ -553,12 +586,23 @@ fn from_nsdate(d: &NSDate) -> Option<NaiveDateTime> {
 
 /// Zeitpunkt aus einem Menü-Eintrag: `tag >= 0` = vor so vielen Minuten,
 /// [`TAG_ASK`] = Uhrzeit im Dialog wählen. Immer heute und nicht in der Zukunft.
-fn chosen_time(tag: isize, message: &str, info: &str, initial: Option<i64>) -> Option<NaiveDateTime> {
+fn chosen_time(
+    tag: isize,
+    message: &str,
+    info: &str,
+    initial: Option<i64>,
+    limits: (Option<i64>, Option<i64>),
+) -> Option<NaiveDateTime> {
     let t = now();
     let midnight = t.date().and_hms_opt(0, 0, 0).unwrap();
     if tag >= 0 {
         return Some((t - Duration::minutes(tag as i64)).max(midnight));
     }
+    // Die Auswahl reicht von Mitternacht bis jetzt – enger, wenn `limits` (früheste und
+    // späteste Uhrzeit in Sekunden) es verlangt und dabei etwas übrig bleibt.
+    let at = |s: i64| midnight + Duration::seconds(s.clamp(0, day::DAY_END - 60));
+    let (lo, hi) = (limits.0.map_or(midnight, at).min(t), limits.1.map_or(t, at).min(t));
+    let (midnight, t) = if lo <= hi { (lo, hi) } else { (midnight, t) };
     let initial = initial
         .and_then(|s| t.date().and_hms_opt(0, 0, 0).map(|m| m + Duration::seconds(s)))
         .unwrap_or(t)
@@ -585,7 +629,7 @@ fn chosen_time(tag: isize, message: &str, info: &str, initial: Option<i64>) -> O
     let picked = from_nsdate(&picker.dateValue())?;
     // Nur die Uhrzeit zählt; heute, nicht in der Zukunft.
     let picked = t.date().and_time(picked.time());
-    Some(picked.clamp(midnight, now()))
+    Some(picked.clamp(midnight, t.min(now())))
 }
 
 impl AppState {
@@ -598,8 +642,8 @@ impl AppState {
         if !settings.ask_after_lock || !long || from.date() != to.date() || !settings.rules(from.date()).in_frame(secs(from)) {
             return;
         }
-        // Freier Tag ohne „Heute erfassen“: Es zählt ohnehin nichts.
-        if self.tracker.counting(to.date()) == Some(false) {
+        // Freier Tag ohne „Heute erfassen“ oder schon Feierabend: Es zählt ohnehin nichts.
+        if self.tracker.counting(to.date()) == Some(false) || matches!(self.tracker.mode(to), Mode::Closed(_)) {
             return;
         }
         let span = Span::new(secs(from), secs(to));
@@ -608,6 +652,22 @@ impl AppState {
             "Das zählt als Pause. War es Arbeit ohne Mac oder schon Feierabend?",
         );
         self.asked_lock = asked.then_some((from.date(), span.from, span.to));
+    }
+
+    /// Arbeit ohne Mac, die gestern niemand beendet hat (siehe [`Tracker::forgotten`]): einmal
+    /// melden – das Ende ist nur geschätzt und lässt sich in „Aufzeichnungen“ richtigstellen.
+    fn report_forgotten_away(&mut self) {
+        let Some((date, block)) = self.tracker.forgotten.take() else { return };
+        notify::post_text(
+            "away-forgotten",
+            "„Zurück am Mac“ vergessen?",
+            &format!(
+                "Am {} lief „Ohne Mac weiterarbeiten“ bis zum Ende des Arbeitszeitrahmens weiter: {}. \
+                 Stimmt das Ende nicht, lässt es sich im Fenster „Aufzeichnungen“ korrigieren.",
+                store::fmt_date_short(date),
+                block.describe()
+            ),
+        );
     }
 
     /// Übernimmt Änderungen, die das Fenster „Aufzeichnungen“ (oder `--import`) in die
@@ -761,7 +821,10 @@ impl AppState {
         let free = matches!(status, store::Status::FreeDay);
         let uncounted = counting == Some(false);
         self.items.start.setHidden(absent || uncounted);
-        self.items.pause.setHidden(closed || absent || uncounted);
+        // Was läuft, lässt sich immer beenden – auch wenn „Heute erfassen“ inzwischen aus ist
+        // (Arbeit ohne Mac zählt auch dann, und eine Unterbrechung steht weiter im Status).
+        let ends_something = away || self.tracker.on_break();
+        self.items.pause.setHidden(closed || absent || (uncounted && !ends_something));
         let (title, symbol) = if running {
             ("Arbeit unterbrechen", "pause.fill")
         } else if away {
@@ -797,7 +860,10 @@ impl AppState {
         }
         // Wie die übrigen Steuerpunkte erst, wenn die erfasste Zeit zählt.
         self.items.count_pause.setHidden(self.items.count_pause_list.is_empty() || absent || uncounted);
-        self.items.close.setHidden(closed || absent || uncounted);
+        // Vor dem Arbeitszeitrahmen zählt heute noch nichts: Es gibt nichts zu beenden (kurz
+        // nach Mitternacht sperrte ein Feierabend sonst den ganzen neuen Tag).
+        let before_frame = secs(t) <= self.tracker.settings.rules(t.date()).frame_from;
+        self.items.close.setHidden(closed || absent || uncounted || before_frame);
         self.items.reopen.setHidden(!closed || absent);
         if week_view::is_visible() {
             week_view::update(self.week_snapshot(t));
@@ -856,7 +922,9 @@ impl AppState {
             days: self.tracker.snapshot(t),
             settings: self.tracker.settings.clone(),
             now: t,
-            running: self.tracker.is_running() || self.tracker.on_away(),
+            // Nach Feierabend wird zwar weiter aufgezeichnet, aber nichts läuft mehr mit.
+            running: (self.tracker.is_running() || self.tracker.on_away())
+                && !matches!(self.tracker.mode(t), Mode::Closed(_)),
         }
     }
 }
@@ -1179,8 +1247,12 @@ fn run_hotkey(action: hotkey::Action) {
 /// „Arbeit unterbrechen“ ↔ „Weiter arbeiten“; bei Arbeit ohne Mac „Zurück am Mac“.
 fn toggle_pause() {
     act(|s, t| {
-        // Freier Tag, der nicht zählt: Es gibt nichts zu unterbrechen (auch nicht per Kurzbefehl).
-        if s.tracker.counting(t.date()) == Some(false) {
+        // Freier Tag, der nicht zählt: Es gibt nichts zu unterbrechen (auch nicht per
+        // Kurzbefehl) – nur zu beenden, was schon läuft. Nach Feierabend ebenso wenig.
+        let ends_something = s.tracker.on_away() || s.tracker.on_break();
+        if (s.tracker.counting(t.date()) == Some(false) && !ends_something)
+            || matches!(s.tracker.mode(t), Mode::Closed(_))
+        {
             return;
         }
         if s.tracker.is_running() {
@@ -1419,7 +1491,7 @@ fn schedule_menu_screenshot(path: std::path::PathBuf) {
             s.tracker.go_away(t, Activity::Meeting);
         }),
         Ok("closed") => act(|s, t| {
-            s.tracker.close_day(t, secs(t));
+            let _ = s.tracker.close_day(t, secs(t));
         }),
         _ => {}
     }
@@ -1856,7 +1928,7 @@ mod tests {
                 status_title("Außerhalb des Arbeitszeitrahmens (07:00–22:00 Uhr)", IconKind::Outside),
                 status_title("Feierabend um 17:30 Uhr", IconKind::Closed),
                 error_title(&db_error_text("Speichern fehlgeschlagen", "database is locked")),
-                warning_title(&rules::Warning::LongStretch { work: 7 * 3600 }.text()),
+                warning_title(&rules::Warning::LongStretch { work: 7 * 3600, outside: false }.text()),
                 rich(&[("Heute gearbeitet:  ", Tone::Label), ("3:57 h", Tone::Value), ("  von 7:48 h", Tone::Muted)]),
                 rich(&[("Pausen heute:  ", Tone::Label), ("0:35 h", Tone::Value)]),
                 rich(&[("Beginn heute:  ", Tone::Label), ("12:42 Uhr", Tone::Value), ("  (manuell)", Tone::Muted)]),

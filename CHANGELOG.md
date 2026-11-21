@@ -6,6 +6,118 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Zusammenfassung
+Eine Prüfung der Rechen- und Bedienlogik hat 28 Unstimmigkeiten ergeben; sie sind behoben.
+Die wichtigsten: Nach dem Feierabend geht keine Zeit mehr verloren, der laufende Tag zieht
+Wochensaldo und Zeitkonto nicht mehr morgens ins Minus, und die Hinweise zu Ruhezeit,
+Pausen und Höchstarbeitszeit sehen auch die Arbeit außerhalb des Arbeitszeitrahmens.
+**Salden können sich dadurch ändern** – siehe „Geändert“.
+
+### Geändert
+- Saldo des laufenden Tages: Heute zählt das Soll nur, soweit es schon erarbeitet ist. Der
+  Tag steht bei +0:00, bis das Soll erreicht ist, und danach im Plus; Wochensaldo und
+  Zeitkonto fallen nicht mehr mit der ersten Arbeitssekunde um das Tagessoll. Was fehlt,
+  zählt mit dem Feierabend oder ab dem nächsten Tag. Zeitausgleich zählt weiter sofort.
+- Feierabend: Danach zeichnet Tagwerk weiter auf, zählt aber nichts mehr. „Feierabend
+  aufheben“ bringt damit die Zeit dazwischen zurück – bisher war sie eine Pause. Der Dialog
+  sagt jetzt „Danach zählt bis morgen nichts mehr“.
+- Tagessoll in ganzen Minuten: Geht die Wochenarbeitszeit nicht auf volle Minuten auf
+  (38,5 Std. an vier Tagen), bekommen die Arbeitstage der Reihe nach 9:37, 9:38, 9:37 und
+  9:38 Std. statt je 9:37:30. Ein halber Abwesenheitstag hat das halbe Soll, auf ganze
+  Minuten abgerundet. Tagessalden summieren sich damit ohne Rest zur Woche; bei solchen
+  Wochenarbeitszeiten ändern sich frühere Tagessalden um bis zu eine Minute.
+- Hinweise zu Pausen, Ruhezeit und Höchstarbeitszeit rechnen zusätzlich mit der Zeit
+  außerhalb des Arbeitszeitrahmens. Ergibt sich ein Verstoß erst so, steht „mit der Zeit
+  außerhalb des Arbeitszeitrahmens“ dabei. Abschnitte unter einer Minute, die Zeit nach dem
+  Feierabend und nicht gezählte Zeit an freien Tagen bleiben außen vor.
+- Arbeit an einem abgewählten Arbeitstag bekommt denselben Hinweis wie Arbeit am
+  Wochenende: „Arbeit an einem freien Tag – zählt nicht im Saldo“ bzw. „… zählt ohne Soll
+  als Mehrarbeit“.
+- Vergessenes „Zurück am Mac“: Wählt es bis Mitternacht niemand, endet die Arbeit ohne Mac
+  mit dem Arbeitszeitrahmen statt um Mitternacht, und beim nächsten Entsperren nennt eine
+  Mitteilung den Eintrag, damit sich das Ende richtigstellen lässt.
+- CSV: Ein Tag ohne Saldo (Arbeit an einem freien Tag, die nicht zählt) hat im Feld „Saldo“
+  nichts mehr statt „+0:00“.
+- Import: Vor dem Import sichert Tagwerk den Stand eigens
+  (`backups/tagwerk-JJJJ-MM-TT-vor-import-HHMMSS.db`). Tage, die das Fenster nicht zuließe,
+  werden übersprungen und genannt: Zeiten in der Zukunft, ein Arbeitsbeginn, der nicht vor
+  dem Feierabend liegt, eine ganztägige Abwesenheit neben anderen Einträgen.
+
+### Behoben
+- Feierabend kurz nach Mitternacht sperrte den neuen Tag, bis ihn jemand aufhob. Vor
+  Beginn des Arbeitszeitrahmens bietet das Menü keinen Feierabend mehr an.
+- Ein Arbeitsbeginn nach dem Feierabend (oder ein Feierabend vor dem Arbeitsbeginn) ließ
+  den Tag auf 0:00 h fallen und kürzte Arbeit ohne Mac endgültig. Menü, Inspektor und
+  Wochenansicht lehnen das jetzt ab; im Menü sagt eine Mitteilung, warum.
+- „Feierabend → Jetzt“ während „Arbeit unterbrechen“ machte die Unterbrechung zu
+  Arbeitszeit. Der Tag endet jetzt mit der Unterbrechung.
+- Inaktivität: Blieb der Mac über Nacht ohne Sperre, lief die Erfassung am Morgen nicht von
+  selbst weiter.
+- „Erfasste Zeit zählen“ bzw. „Heute erfassen“ abschalten konnte die Arbeitszeit erhöhen:
+  Waren Arbeitsbeginn und Feierabend von Hand gesetzt, zählte die ganze Spanne dazwischen.
+  Ohne den Haken gelten beide nicht mehr.
+- Rückwirkend geänderte Arbeitstage: Ein Tag, der als freier Tag „nicht gezählt“ markiert
+  war und nachträglich Arbeitstag wurde, bekam das volle Soll bei null gezählter Arbeit;
+  ein Tag nur mit der Markierung fiel ganz aus dem Soll. An Arbeitstagen gilt die
+  Markierung nicht mehr.
+- Markdown-Export: Der Saldo rechnete sekundengenau und wich von Fenster, CSV und PDF ab;
+  die Summenzeile passte nicht zu den Zeilen.
+- PDF: Die Fußzeile nannte „nur Tage mit Arbeitszeit“, obwohl das Soll auch Arbeitstage
+  ohne Eintrag enthält.
+- „Heute erfassen“ abwählen während „Ohne Mac weiterarbeiten“ oder einer Unterbrechung
+  blendete „Zurück am Mac“ bzw. „Weiter arbeiten“ aus, obwohl beides weiterlief.
+- Während „Ohne Mac weiterarbeiten“ wurde nicht regelmäßig gespeichert.
+- Wochenansicht: Der Dialog „Arbeitsbeginn ändern“ bzw. „Feierabend ändern“ hält jetzt
+  dieselben Grenzen ein wie das Ziehen (Arbeitszeitrahmen, nicht in der Zukunft, mindestens
+  5 Minuten zum anderen Ende) und nennt den Grund einer Ablehnung; „Übernehmen“ ohne
+  Änderung macht den erfassten Wert nicht mehr zu einem manuellen.
+- Wochenansicht: Der Dialog „Arbeit ohne Mac eintragen“ lehnte den eigenen Vorschlag ab,
+  wenn er kürzer war als die Mindestdauer. Der Vorschlag und eine genau gefüllte Pause
+  gelten jetzt immer; kurz vor „jetzt“ beginnt der Vorschlag früher.
+- Wochenansicht: Beim Ziehen neben abgesetzter Arbeit ohne Mac zeigte das Schild „−15 Min.“,
+  obwohl die Arbeitszeit um 1:45 h stieg. Das Schild nennt jetzt die tatsächliche Änderung
+  („· Arbeitszeit +1:45 h“).
+- Wochenansicht: Der Magnet am erfassten Wert fing so weit, dass die Uhrzeiten daneben
+  nicht erreichbar waren, auch mit ⌥ nicht.
+- Wochenansicht: An einem freien Tag mit Abwesenheit ließ sich eine andere eintragen; jetzt
+  lässt sie sich dort nur entfernen.
+- Inspektor: Zeiten in der Zukunft ließen sich eintragen, wenn ein künftiger Tag gewählt
+  war. An künftigen Tagen geht jetzt nur eine Abwesenheit, heute nichts nach der jetzigen
+  Uhrzeit; der Inspektor sagt es über dem betroffenen Feld.
+- Widerrufen (⌘Z) stellte den ganzen Korrekturstand des Tages wieder her und überschrieb
+  damit, was inzwischen im Menü geändert wurde (Feierabend, „Ohne Mac weiterarbeiten“,
+  „Heute erfassen“). Es nimmt jetzt nur zurück, was der Schritt selbst geändert hat, meldet,
+  was deshalb geblieben ist, und lässt einen Tag unverändert, der sonst unzulässig würde.
+- Inspektor: Ein halber Abwesenheitstag für heute ging nur über „ganztags“ – mit Löschen
+  der erfassten Zeit. „Ganzer Tag/Halber Tag“ lässt sich jetzt vorab wählen, und die
+  Rückfrage bietet „Halben Tag eintragen“ an.
+- Inspektor: An freien Tagen ließ sich eine Abwesenheit eintragen; ein ganztägiger
+  „Feiertag“ am Samstag sperrte dann Tag und Erfassung. Wie in der Wochenansicht geht das
+  nicht mehr; eine vorhandene lässt sich entfernen.
+- „Tag bearbeiten“: Ein Eintrag weit vor dem ersten erfassten Tag ließ alle Arbeitstage
+  dazwischen als fehlend zählen – das Zeitkonto fiel um Hunderte Stunden. Vor dem ersten
+  solchen Eintrag fragt jetzt ein Dialog nach und nennt die Folge.
+- Export-Dialog: Die Vorschau zählte Urlaubstage als Arbeitstage und summierte anders als
+  die Datei. Sie nimmt ihre Zahlen jetzt aus derselben Übersicht wie CSV und PDF.
+- „Arbeitstage“ bedeutete je Stelle etwas anderes. Überall sind es jetzt die Tage mit
+  Arbeitszeit; die Wochenzeile zählte bisher jeden Tag mit Eintrag.
+- Inspektor: Der Haken „Erfasste Zeit zählen“ erklärt, dass die Zeit als Arbeitszeit zählt,
+  und sagt, ob sie an diesem Tag auch in Saldo und Zeitkonto eingeht.
+- Einstellungen: Der Hinweis im Blatt „Arbeitszeit ändern“ wertete beim Verschieben eines
+  Stands nur das neue Datum aus. Er nennt jetzt die Tage, für die wirklich andere Regeln
+  gelten, und warnt, sobald vergangene darunter sind.
+- Einstellungen: „Standardwerte“ fragt nach und nennt, was zurückgesetzt wird und was
+  bleibt.
+- Einstellungen: Die Erklärung zur Nachfrage nach langer Sperre nennt die Dauer, die heute
+  gilt (30 Min., bei längerer Mindestpause diese), und dass nur Sperren im
+  Arbeitszeitrahmen desselben Tages gemeint sind.
+- Einstellungen: Als Ende des Arbeitszeitrahmens lässt sich 24:00 einstellen; Beginn und
+  Ende sind dafür Textfelder.
+- Einstellungen: Der Schalter für Arbeit an freien Tagen heißt „Arbeit an freien Tagen in
+  Saldo und Zeitkonto einrechnen“ (Spalte „Freie Tage“: „im Saldo“) – „zählen“ meint in der
+  App jetzt nur noch „als Arbeitszeit zählen“. Das Tagessoll steht in „Std.“ und bei
+  ungeraden Wochenarbeitszeiten als Spanne („9:37 bis 9:38 Std.“).
+
 ## [1.6.0] - 2026-11-21
 
 ### Zusammenfassung
