@@ -139,6 +139,10 @@ pub struct Settings {
     /// Arbeitstage der Woche als Bits (Bit 0 = Montag … Bit 4 = Freitag); das Wochensoll
     /// verteilt sich gleichmäßig auf sie.
     pub workdays: u8,
+    /// Automatische Erfassung zählt nur an Arbeitstagen: An Samstag, Sonntag und freien
+    /// Wochentagen wird sie aufgezeichnet, zählt aber erst nach „Heute erfassen“ (siehe
+    /// [`crate::day::Day::free_day`]).
+    pub auto_workdays_only: bool,
     /// Ohne Eingabe so lange (Sekunden) gilt der Mac als verlassen, die Erfassung hält an
     /// (0 = aus).
     pub idle_secs: i64,
@@ -166,6 +170,7 @@ impl Default for Settings {
             show_time: false,
             hotkeys: false,
             workdays: ALL_WORKDAYS,
+            auto_workdays_only: true,
             idle_secs: 0,
             ask_after_lock: false,
             notify_limit: true,
@@ -191,6 +196,7 @@ impl Settings {
             hotkeys: self.hotkeys,
             // Ohne Arbeitstag gäbe es kein Soll: dann wieder Montag bis Freitag.
             workdays: if self.workdays & ALL_WORKDAYS == 0 { ALL_WORKDAYS } else { self.workdays & ALL_WORKDAYS },
+            auto_workdays_only: self.auto_workdays_only,
             idle_secs: if self.idle_secs <= 0 { 0 } else { self.idle_secs.clamp(IDLE_RANGE.0, IDLE_RANGE.1) },
             ask_after_lock: self.ask_after_lock,
             notify_limit: self.notify_limit,
@@ -214,6 +220,12 @@ impl Settings {
     pub fn is_workday(&self, date: NaiveDate) -> bool {
         let day = date.weekday().num_days_from_monday();
         day < 5 && self.workdays & (1 << day) != 0
+    }
+
+    /// Zählt die automatische Erfassung an `date` von selbst? Sonst markiert die Erfassung den
+    /// Tag beim ersten Entsperren als nicht gezählt, bis „Heute erfassen“ gewählt ist.
+    pub fn auto_counts_on(&self, date: NaiveDate) -> bool {
+        !self.auto_workdays_only || self.is_workday(date)
     }
 
     /// Anzahl der Arbeitstage pro Woche (1 bis 5).

@@ -17,7 +17,9 @@
 
 use crate::about;
 use crate::palette;
-use crate::day::{fmt_clock, secs_of, Absence, AbsenceKind, Activity, Break, Day, DayRecord, Span, WorkBlock, DAY_END};
+use crate::day::{
+    fmt_clock, secs_of, Absence, AbsenceKind, Activity, Break, Day, DayRecord, FreeDay, Span, WorkBlock, DAY_END,
+};
 use crate::rules::{self, Settings, Warning};
 use crate::settings_window;
 use crate::snapshot;
@@ -443,6 +445,8 @@ struct Corrections {
     breaks: Vec<Break>,
     work: Vec<WorkBlock>,
     absence: Option<Absence>,
+    /// Freier Tag: Was gilt für die automatische Erfassung (siehe [`Day::free_day`])?
+    free_day: Option<FreeDay>,
     /// Automatisch erfasste Zeiten (`None`: bleiben unberührt).
     periods: Option<Vec<Span>>,
 }
@@ -455,6 +459,7 @@ impl Corrections {
             breaks: day.breaks.clone(),
             work: day.work.clone(),
             absence: day.absence,
+            free_day: day.free_day,
             periods: None,
         }
     }
@@ -470,6 +475,7 @@ impl Corrections {
         day.breaks = self.breaks.clone();
         day.work = self.work.clone();
         day.absence = self.absence;
+        day.free_day = self.free_day;
         if let Some(periods) = &self.periods {
             day.periods = periods.clone();
         }
@@ -1480,6 +1486,7 @@ fn refresh_summary() {
         Some(Status::Break(since)) => format!("Pause seit {} Uhr", since.format("%H:%M")),
         Some(Status::Away(since, _)) => format!("Ohne Mac seit {} Uhr", since.format("%H:%M")),
         Some(Status::Outside) => "Außerhalb des Arbeitszeitrahmens".to_string(),
+        Some(Status::FreeDay) => "Freier Tag – Erfassung zählt nicht".to_string(),
         Some(Status::Closed) => "Feierabend".to_string(),
         Some(Status::Absent) => "Heute abwesend".to_string(),
         None => "Menüleisten-App nicht aktiv".to_string(),
@@ -1546,6 +1553,8 @@ enum Edit {
     CutWork(i64, i64),
     /// Abwesenheit eintragen, ändern oder (`None`) entfernen.
     SetAbsence(Option<Absence>),
+    /// Freier Tag: Die erfasste Zeit zählt bzw. zählt nicht (siehe [`Day::free_day`]).
+    SetCounting(bool),
     /// Alle Einträge des Tages löschen – manuelle wie automatisch erfasste.
     ClearDay,
 }
@@ -1561,6 +1570,8 @@ impl Edit {
             Edit::AddWork(..) => "Arbeit ohne Mac eintragen",
             Edit::RemoveWork(_) | Edit::CutWork(..) => "Arbeit ohne Mac entfernen",
             Edit::SetAbsence(_) => "Abwesenheit ändern",
+            Edit::SetCounting(true) => "Erfasste Zeit zählen",
+            Edit::SetCounting(false) => "Erfasste Zeit nicht zählen",
             Edit::ClearDay => "Alle Einträge löschen",
         }
     }
@@ -1626,7 +1637,15 @@ fn save(date: NaiveDate, edit: Edit, rebuild: bool) -> Result<Option<Bound>, Str
                     d.absence = a;
                 }
                 Edit::SetAbsence(_) => {}
-                Edit::ClearDay => *d = Day::new(date),
+                Edit::SetCounting(on) => d.free_day = Some(if on { FreeDay::Counted } else { FreeDay::Uncounted }),
+                Edit::ClearDay => {
+                    // Heute an einem freien Tag: Die Erfassung bleibt danach aus, auch wenn
+                    // „Heute erfassen“ gewählt war – bis es wieder gewählt ist (sonst ginge sie
+                    // sofort weiter, und der Tag wäre gleich wieder da).
+                    let free = d.free_day.filter(|_| today);
+                    *d = Day::new(date);
+                    d.free_day = free.map(|_| FreeDay::Stopped);
+                }
             }
             change = Some((before, snapshot(d)));
         }))
@@ -2405,7 +2424,9 @@ fn clear_day_text(day: &Day, is_today: bool) -> String {
         None => "nichts".to_string(),
     };
     let mut text = format!("Das betrifft {list}.");
-    if is_today {
+    if is_today && day.free_day.is_some() {
+        text.push_str(" Die automatische Erfassung bleibt heute aus, bis im Menü „Heute erfassen“ gewählt ist.");
+    } else if is_today {
         text.push_str(" Die automatische Erfassung läuft danach ab jetzt weiter.");
     }
     text.push_str(" ⌘Z nimmt das zurück.");
@@ -2660,6 +2681,14 @@ fn week_add_work(date: NaiveDate, from: i64, to: i64, activity: Activity) {
                 show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e);
             }
         }
+    }
+}
+
+/// Freier Tag aus der Wochenansicht: Die erfasste Zeit zählt (oder nicht mehr) – direkt in
+/// die Datenbank wie die Abwesenheit, mit ⌘Z zu widerrufen.
+fn week_set_counting(date: NaiveDate, on: bool) {
+    if let Err(e) = save(date, Edit::SetCounting(on), true) {
+        show_info_sheet(&ui().window, "Speichern fehlgeschlagen", &e);
     }
 }
 
@@ -3674,6 +3703,7 @@ pub fn show(status: Status, embed: Embed) {
         Some(week_set_bound),
         Some(week_set_absence),
         Some(confirm_clear_day),
+        Some(week_set_counting),
     );
     week_view::set_open_day(Some(open_day));
     week_view::set_selection(Some(week_view::Selection { get: selected_day, set: select_day }));
@@ -3762,7 +3792,7 @@ pub fn run(screenshot: Option<PathBuf>, week: bool) -> Result<(), String> {
     let ui = build(shot);
     if shot {
         // Bildschirmfotos nur zum Ansehen.
-        week_view::set_actions(None, None, None, None, None);
+        week_view::set_actions(None, None, None, None, None, None);
     } else {
         week_view::set_actions(
             Some(week_add_work),
@@ -3770,6 +3800,7 @@ pub fn run(screenshot: Option<PathBuf>, week: bool) -> Result<(), String> {
             Some(week_set_bound),
             Some(week_set_absence),
             Some(confirm_clear_day),
+            Some(week_set_counting),
         );
         week_view::set_open_day(Some(open_day));
     }
@@ -3884,6 +3915,19 @@ mod tests {
              1 Eintrag Arbeit ohne Mac und die Abwesenheit „Urlaub (halber Tag)“. \
              Die automatische Erfassung läuft danach ab jetzt weiter. ⌘Z nimmt das zurück."
         );
+        // Heute an einem freien Tag, der nicht zählt: Die Erfassung bleibt aus.
+        let mut sat = Day::new(date(21));
+        sat.add_period(10 * 3600, 12 * 3600);
+        sat.free_day = Some(FreeDay::Uncounted);
+        assert_eq!(
+            clear_day_text(&sat, true),
+            "Das betrifft 1 automatisch erfasste Zeit. Die automatische Erfassung bleibt heute aus, bis im \
+             Menü „Heute erfassen“ gewählt ist. ⌘Z nimmt das zurück."
+        );
+        // Auch mit „Heute erfassen“: Der Haken fällt mit weg.
+        sat.free_day = Some(FreeDay::Counted);
+        assert!(clear_day_text(&sat, true).contains("bleibt heute aus"));
+        assert!(clear_day_text(&sat, false).ends_with("Das betrifft 1 automatisch erfasste Zeit. ⌘Z nimmt das zurück."));
     }
 
     #[test]

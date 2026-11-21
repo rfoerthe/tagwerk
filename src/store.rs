@@ -7,12 +7,17 @@
 //!   Versionen; wird beim Laden ignoriert),
 //! - `day_marks` – manuell festgelegter Arbeitsbeginn und Feierabend,
 //! - `work_blocks` – Arbeit ohne Mac (Telefonat, Meeting …) mit Notiz,
+//! - `absences`  – Abwesenheiten (Urlaub, krank …),
+//! - `auto_counting` – freie Tage: Was gilt für die automatische Erfassung (siehe `Day::free_day`;
+//!   `counts`: 0 nicht gezählt, 1 gezählt, 2 nicht erfasst)?
 //! - `settings`  – Einstellungen (Schlüssel → ganze Zahl, Zeiten in Sekunden).
 //!
 //! Die Markdown-Datei früherer Versionen (`tagwerk.md`) wird beim ersten Öffnen der
 //! Datenbank einmalig übernommen und danach in `tagwerk.md.importiert` umbenannt.
 
-use crate::day::{self, fmt_clock, fmt_clock_s, parse_clock, Absence, AbsenceKind, Activity, Break, Day, Span, DAY_END};
+use crate::day::{
+    self, fmt_clock, fmt_clock_s, parse_clock, Absence, AbsenceKind, Activity, Break, Day, FreeDay, Span, DAY_END,
+};
 use crate::rules::{self, Settings};
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Weekday};
 use rusqlite::{params, Connection, TransactionBehavior};
@@ -79,6 +84,14 @@ const SCHEMA_ABSENCES: &str = "
         half INTEGER NOT NULL DEFAULT 0
     ) WITHOUT ROWID;
 ";
+/// Freie Tage, an denen die automatische Erfassung (nicht) zählt – wie `absences` ohne neue
+/// Schema-Version: Ältere Versionen lassen die Tabelle unberührt und zählen alles.
+const SCHEMA_FREE_DAYS: &str = "
+    CREATE TABLE IF NOT EXISTS auto_counting (
+        date TEXT PRIMARY KEY,
+        counts INTEGER NOT NULL
+    ) WITHOUT ROWID;
+";
 const KEY_MIN_PAUSE: &str = "min_pause_s";
 const KEY_MIN_WORK: &str = "min_work_s";
 const KEY_WEEKLY: &str = "weekly_target_s";
@@ -89,6 +102,7 @@ const KEY_SHOW_TIME: &str = "menubar_time";
 const KEY_HOTKEYS: &str = "global_hotkeys";
 const KEY_WORKDAYS: &str = "workdays";
 const KEY_IDLE: &str = "idle_s";
+const KEY_AUTO_WORKDAYS_ONLY: &str = "auto_workdays_only";
 const KEY_ASK_AFTER_LOCK: &str = "ask_after_lock";
 const KEY_NOTIFY_LIMIT: &str = "notify_limit";
 const KEY_NOTIFY_BREAK: &str = "notify_break";
@@ -104,6 +118,7 @@ const KIND_BREAK: &str = "Pause";
 const KIND_END: &str = "Feierabend";
 const KIND_WORK: &str = "Arbeit ohne Mac";
 const KIND_ABSENCE: &str = "Abwesenheit";
+const KIND_COUNTING: &str = "Erfassung";
 
 /// `$HOME/Library/Application Support/Tagwerk` (zum Testen per `TAGWERK_DIR` änderbar).
 pub fn data_dir() -> PathBuf {
@@ -233,6 +248,7 @@ impl Db {
                 KEY_HOTKEYS => s.hotkeys = value != 0,
                 KEY_WORKDAYS => s.workdays = value.clamp(0, 255) as u8,
                 KEY_IDLE => s.idle_secs = value,
+                KEY_AUTO_WORKDAYS_ONLY => s.auto_workdays_only = value != 0,
                 KEY_ASK_AFTER_LOCK => s.ask_after_lock = value != 0,
                 KEY_NOTIFY_LIMIT => s.notify_limit = value != 0,
                 KEY_NOTIFY_BREAK => s.notify_break = value != 0,
@@ -260,6 +276,7 @@ impl Db {
             (KEY_HOTKEYS, s.hotkeys as i64),
             (KEY_WORKDAYS, s.workdays as i64),
             (KEY_IDLE, s.idle_secs),
+            (KEY_AUTO_WORKDAYS_ONLY, s.auto_workdays_only as i64),
             (KEY_ASK_AFTER_LOCK, s.ask_after_lock as i64),
             (KEY_NOTIFY_LIMIT, s.notify_limit as i64),
             (KEY_NOTIFY_BREAK, s.notify_break as i64),
@@ -303,7 +320,7 @@ impl Db {
             let rows: i64 = self.conn.query_row(
                 "SELECT (SELECT count(*) FROM periods) + (SELECT count(*) FROM breaks)
                       + (SELECT count(*) FROM day_marks) + (SELECT count(*) FROM work_blocks)
-                      + (SELECT count(*) FROM absences)",
+                      + (SELECT count(*) FROM absences) + (SELECT count(*) FROM auto_counting)",
                 [],
                 |r| r.get(0),
             )?;
@@ -334,8 +351,9 @@ fn init_schema(conn: &mut Connection, dir: &Path) -> Result<()> {
         )
         .into());
     }
-    // Kommt ohne neue Version dazu (siehe `SCHEMA_ABSENCES`).
+    // Kommen ohne neue Version dazu (siehe `SCHEMA_ABSENCES`).
     tx.execute_batch(SCHEMA_ABSENCES)?;
+    tx.execute_batch(SCHEMA_FREE_DAYS)?;
     let mut imported_file = None;
     if version < SCHEMA_VERSION {
         tx.execute_batch(SCHEMA_SETTINGS)?;
@@ -423,6 +441,16 @@ fn load_between(conn: &Connection, from: &str, to: &str) -> Result<Vec<Day>> {
         }
     }
 
+    let mut stmt = conn.prepare("SELECT date, counts FROM auto_counting WHERE date BETWEEN ?1 AND ?2 ORDER BY date")?;
+    let rows = stmt.query_map([from, to], |r| Ok((r.get::<_, String>(0)?, r.get(1)?)))?;
+    for row in rows {
+        let (date, state): (String, i64) = row?;
+        // Unbekannter Zustand (aus einer neueren Version): zählt wie immer.
+        if let (Some(date), Some(state)) = (parse(date), FreeDay::from_id(state)) {
+            day::day_mut(&mut days, date).free_day = Some(state);
+        }
+    }
+
     days.retain(|d| !d.is_empty());
     Ok(days)
 }
@@ -430,6 +458,7 @@ fn load_between(conn: &Connection, from: &str, to: &str) -> Result<Vec<Day>> {
 fn delete_day(conn: &Connection, date: NaiveDate) -> Result<()> {
     let key = date_key(date);
     conn.execute("DELETE FROM absences WHERE date = ?1", [&key])?;
+    conn.execute("DELETE FROM auto_counting WHERE date = ?1", [&key])?;
     conn.execute("DELETE FROM periods WHERE date = ?1", [&key])?;
     conn.execute("DELETE FROM breaks WHERE date = ?1", [&key])?;
     conn.execute("DELETE FROM day_marks WHERE date = ?1", [&key])?;
@@ -473,6 +502,9 @@ fn write_day(conn: &Connection, d: &Day) -> Result<()> {
             "INSERT INTO absences (date, kind, half) VALUES (?1, ?2, ?3)",
             params![key, a.kind.id(), a.half as i64],
         )?;
+    }
+    if let Some(f) = d.free_day {
+        conn.execute("INSERT INTO auto_counting (date, counts) VALUES (?1, ?2)", params![key, f.id()])?;
     }
     Ok(())
 }
@@ -600,6 +632,12 @@ pub fn parse_file(text: &str) -> Vec<Day> {
             }
             Section::Corrections if cells.len() >= 3 => {
                 let kind = cells[1].to_lowercase();
+                if kind.contains("erfassung") {
+                    // Ohne Uhrzeiten; was gilt, steht in der Notiz.
+                    let note = cells.get(4).copied().unwrap_or("");
+                    day::day_mut(&mut days, date).free_day = Some(FreeDay::parse(note));
+                    continue;
+                }
                 if kind.contains("abwesen") {
                     // Ohne Uhrzeiten; die Art steht in der Notiz.
                     if let Some(a) = cells.get(4).and_then(|c| Absence::parse(c)) {
@@ -954,7 +992,7 @@ pub fn export_markdown(
     }
 
     s.push_str(&format!("\n{HEAD_CORRECTIONS}\n\n"));
-    s.push_str("Manuell festgelegt. Art: Arbeitsbeginn, Pause, Arbeit ohne Mac (z. B. Telefonat oder Meeting), Feierabend oder Abwesenheit (Urlaub, Krank, Feiertag, Zeitausgleich).\n\n");
+    s.push_str("Manuell festgelegt. Art: Arbeitsbeginn, Pause, Arbeit ohne Mac (z. B. Telefonat oder Meeting), Feierabend, Abwesenheit (Urlaub, Krank, Feiertag, Zeitausgleich) oder Erfassung (freier Tag: erfasste Zeit gezählt oder nicht).\n\n");
     s.push_str("| Datum | Art | Von | Bis | Notiz |\n");
     s.push_str("|:------|:----|:---:|:---:|:------|\n");
     for d in &days {
@@ -982,6 +1020,9 @@ pub fn export_markdown(
         }
         if let Some(a) = d.absence {
             s.push_str(&format!("| {date} | {KIND_ABSENCE} | – | – | {} |\n", a.label()));
+        }
+        if let Some(f) = d.free_day {
+            s.push_str(&format!("| {date} | {KIND_COUNTING} | – | – | {} |\n", f.label()));
         }
     }
 
@@ -1012,6 +1053,8 @@ pub enum Status {
     Away(NaiveDateTime, Activity),
     /// Außerhalb des Arbeitszeitrahmens: es wird nichts gezählt.
     Outside,
+    /// Freier Tag ohne „Heute erfassen“: es wird erfasst, aber nicht gezählt.
+    FreeDay,
     Closed,
     /// Heute ganztägig abwesend (Urlaub, Krank …): es wird nichts erfasst.
     Absent,
@@ -1027,6 +1070,7 @@ impl Status {
             Status::Break(since) => format!("break {}", since.format(STATUS_TIME)),
             Status::Away(since, a) => format!("away {} {}", since.format(STATUS_TIME), a.key()),
             Status::Outside => "outside".into(),
+            Status::FreeDay => "free".into(),
             Status::Closed => "closed".into(),
             Status::Absent => "absent".into(),
         }
@@ -1043,6 +1087,7 @@ impl Status {
                 Some(Status::Away(since, Activity::from_key(words.next().unwrap_or(""))))
             }
             "outside" => Some(Status::Outside),
+            "free" => Some(Status::FreeDay),
             "closed" => Some(Status::Closed),
             "absent" => Some(Status::Absent),
             _ => None,
@@ -1078,6 +1123,7 @@ mod tests {
             Status::Away(since, Activity::Meeting),
             Status::Away(since, Activity::Other),
             Status::Outside,
+            Status::FreeDay,
             Status::Closed,
             Status::Absent,
         ] {
@@ -1225,6 +1271,7 @@ mod tests {
             show_time: true,
             hotkeys: true,
             workdays: 0b0_1111,
+            auto_workdays_only: false,
             idle_secs: 10 * 60,
             ask_after_lock: true,
             notify_limit: false,
@@ -1369,6 +1416,37 @@ mod tests {
         let backup = Connection::open(bdir.join("tagwerk-2026-10-20.db")).unwrap();
         let n: i64 = backup.query_row("SELECT count(*) FROM periods", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 19);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn free_day_counting_survives_database_and_export() {
+        let dir = temp_dir("counting");
+        // Samstag nicht gezählt, Sonntag gezählt.
+        let mut sat = Day::new(date(21));
+        sat.add_period(h(10, 0), h(12, 0));
+        sat.free_day = Some(FreeDay::Uncounted);
+        let mut sun = Day::new(date(22));
+        sun.add_period(h(9, 0), h(10, 0));
+        sun.free_day = Some(FreeDay::Counted);
+        let days = vec![sat, sun];
+        let mut db = Db::open_in(&dir).unwrap();
+        db.save_days(&days, &[], now()).unwrap();
+        assert_eq!(db.load().unwrap(), days);
+        // Die Schema-Version bleibt – ältere Versionen öffnen die Datenbank weiter.
+        let version: i32 = db.conn.query_row("PRAGMA user_version", [], |r| r.get(0)).unwrap();
+        assert_eq!(version, SCHEMA_VERSION);
+        // Einträge löschen löscht auch die Entscheidung.
+        db.edit_day(date(22), now(), |d| *d = Day::new(date(22))).unwrap();
+        assert_eq!(db.load().unwrap(), days[..1]);
+
+        let evening = date(22).and_hms_opt(18, 0, 0).unwrap();
+        let md = export_markdown(&days, date(16), date(22), evening, &st());
+        assert!(md.contains("| Sa, 21.11.2026 | Erfassung | – | – | freier Tag, nicht gezählt |"), "{md}");
+        assert!(md.contains("| So, 22.11.2026 | Erfassung | – | – | freier Tag, gezählt |"), "{md}");
+        assert_eq!(parse_file(&md), days);
+        // Nur der Sonntag zählt.
+        assert!(md.contains("| So, 22.11.2026 | 09:00:00 | 10:00:00 | 01:00:00 |"), "{md}");
         let _ = fs::remove_dir_all(&dir);
     }
 }

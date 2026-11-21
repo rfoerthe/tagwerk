@@ -25,7 +25,7 @@
 //! gezogen, gilt wieder die automatische Erfassung. Esc bricht ab. Arbeitsbeginn und
 //! Feierabend tragen eine türkise Linie, manuell festgelegte kräftiger und mit einem Punkt.
 
-use crate::day::{fmt_clock, secs_of, Absence, AbsenceKind, Activity, Day, Span, DAY_END};
+use crate::day::{fmt_clock, secs_of, Absence, AbsenceKind, Activity, Day, FreeDay, Span, DAY_END};
 use crate::palette;
 use crate::records;
 use crate::rules::{self, Settings, Warning};
@@ -72,6 +72,9 @@ enum Kind {
     Work,
     /// Außerhalb des Arbeitszeitrahmens – erfasst, aber nicht gezählt.
     Outside,
+    /// Freier Tag ohne „Heute erfassen“ – erfasst, aber nicht gezählt (siehe
+    /// [`Day::free_day`]).
+    FreeDay,
 }
 
 /// Ein Abschnitt im Kalender.
@@ -282,6 +285,13 @@ fn column(days: &[Day], snap: &Snapshot, date: NaiveDate) -> Column {
         from: sp.from,
         to: sp.to,
         kind: Kind::Outside,
+        running: false,
+        notes: Vec::new(),
+    }));
+    blocks.extend(day.uncounted_auto_spans(s).into_iter().filter(|x| x.len() >= 60).map(|sp| Block {
+        from: sp.from,
+        to: sp.to,
+        kind: Kind::FreeDay,
         running: false,
         notes: Vec::new(),
     }));
@@ -627,7 +637,7 @@ fn block_pieces(r: NSRect, b: &Block, f: &Fonts) -> Vec<Piece> {
     let (end, end_part) = if b.running { ("jetzt".to_string(), None) } else { (fmt_clock(b.to), Some(Part::End)) };
     let detail = match b.kind {
         Kind::Work => store::fmt_hm(records::shown_len(b.from, b.to)),
-        Kind::Outside => "nicht gezählt".to_string(),
+        Kind::Outside | Kind::FreeDay => "nicht gezählt".to_string(),
     };
     let mut push = |text: &str, x: f64, line: usize, style: Style, part: Option<Part>| -> f64 {
         let w = text_width(text, f.get(style));
@@ -728,6 +738,8 @@ thread_local! {
     static SET_ABSENCE: Cell<Option<SetAbsence>> = const { Cell::new(None) };
     /// Alle Einträge eines Tages löschen (nach Rückfrage) – stellt „Aufzeichnungen“ bereit.
     static CLEAR_DAY: Cell<Option<ClearDay>> = const { Cell::new(None) };
+    /// Erfasste Zeit an einem freien Tag zählen oder nicht – stellt „Aufzeichnungen“ bereit.
+    static SET_COUNTING: Cell<Option<SetCounting>> = const { Cell::new(None) };
     /// Einen Tag in der Ansicht „Tage“ öffnen – stellt „Aufzeichnungen“ bereit.
     static OPEN_DAY: Cell<Option<OpenDay>> = const { Cell::new(None) };
     /// Der Tag in Bearbeitung (in „Aufzeichnungen“ ausgewählt) und wie er sich wählen lässt.
@@ -792,6 +804,9 @@ struct Context {
     /// Der Tag lässt sich leeren („Alle Einträge löschen …“): Er hat Einträge außer der
     /// Abwesenheit.
     clearable: bool,
+    /// Freier Tag: Zählt die erfasste Zeit (siehe [`Day::free_day`])? `None`: kein
+    /// freier Tag mit Markierung, oder sie lässt sich hier nicht ändern.
+    counting: Option<bool>,
     /// Arbeitsbeginn und Feierabend des Tages und welche davon sich hier ändern lassen.
     edges: Option<Edges>,
     bounds: Vec<Bound>,
@@ -811,6 +826,9 @@ pub type SetAbsence = fn(NaiveDate, Option<Absence>);
 
 /// Alle Einträge eines Tages löschen (fragt vorher nach).
 pub type ClearDay = fn(NaiveDate);
+
+/// Erfasste Zeit an einem freien Tag zählen bzw. nicht zählen: Tag, an oder aus.
+pub type SetCounting = fn(NaiveDate, bool);
 /// Arbeitsbeginn bzw. Feierabend festlegen: Tag, Grenze, Uhrzeit (`None`: wieder automatisch).
 pub type SetBound = fn(NaiveDate, Bound, Option<i64>);
 
@@ -937,6 +955,15 @@ define_class!(
             let choice = sender.and_then(|s| absence_of_tag(s.tag()));
             if let (Some(ctx), Some(absence), Some(f)) = (pending, choice, SET_ABSENCE.with(|c| c.get())) {
                 f(ctx.date, absence);
+            }
+        }
+
+        /// Kontextmenü eines freien Tages: erfasste Zeit zählen bzw. nicht mehr zählen.
+        #[unsafe(method(toggleCounting:))]
+        fn toggle_counting(&self, _sender: Option<&NSMenuItem>) {
+            let pending = PENDING.with(|p| p.borrow_mut().take());
+            if let (Some(Context { date, counting: Some(on), .. }), Some(f)) = (pending, SET_COUNTING.with(|c| c.get())) {
+                f(date, !on);
             }
         }
 
@@ -1838,6 +1865,9 @@ fn context_at(view: &WeekView, p: NSPoint) -> Option<Context> {
         let busy = day.is_some_and(|x| x.blocks_full_absence(today));
         // Nur mit Einträgen außer der Abwesenheit – die allein entfernt „Abwesenheit → Keine“.
         let clearable = CLEAR_DAY.with(|c| c.get()).is_some() && day.is_some_and(Day::has_entries);
+        let counting = SET_COUNTING
+            .with(|c| c.get())
+            .and_then(|_| day.filter(|x| !x.locks_entries()).and_then(|x| x.free_day).map(FreeDay::counts));
         let mut ctx = Context {
             date: c.date,
             work: None,
@@ -1846,6 +1876,7 @@ fn context_at(view: &WeekView, p: NSPoint) -> Option<Context> {
             absence,
             busy,
             clearable,
+            counting,
             edges: c.edges,
             bounds: Vec::new(),
         };
@@ -1904,6 +1935,10 @@ fn context_entries(ctx: &Context, can_open: bool) -> Vec<(String, Option<Sel>)> 
     if ctx.preset.is_some() {
         out.push(("Arbeit ohne Mac eintragen …".to_string(), Some(sel!(addWorkHere:))));
     }
+    if ctx.counting.is_some() {
+        // Mit Häkchen, wenn die erfasste Zeit zählt (siehe `context_menu`).
+        out.push((COUNTING_ITEM.to_string(), Some(sel!(toggleCounting:))));
+    }
     if ctx.absence.is_some() {
         // Wird zum Untermenü mit den Arten (siehe `context_menu`).
         out.push((ABSENCE_MENU.to_string(), Some(sel!(setAbsence:))));
@@ -1945,6 +1980,9 @@ fn context_entries(ctx: &Context, can_open: bool) -> Vec<(String, Option<Sel>)> 
 
 /// Titel des Untermenüs zur Abwesenheit.
 const ABSENCE_MENU: &str = "Abwesenheit";
+
+/// Eintrag im Kontextmenü eines freien Tages (mit Häkchen, wenn die erfasste Zeit zählt).
+const COUNTING_ITEM: &str = "Erfasste Zeit zählen";
 
 /// Punkt im Untermenü „Abwesenheit“.
 #[derive(Clone, Debug, PartialEq)]
@@ -2033,7 +2071,12 @@ fn context_menu(ctx: &Context) -> Option<Retained<NSMenu>> {
                 unsafe { item.setAction(None) };
                 item.setSubmenu(Some(&sub));
             }
-            Some(_) => unsafe { item.setTarget(Some(&controller)) },
+            Some(a) => {
+                unsafe { item.setTarget(Some(&controller)) };
+                if a == sel!(toggleCounting:) {
+                    item.setState(if ctx.counting == Some(true) { NSControlStateValueOn } else { NSControlStateValueOff });
+                }
+            }
             None => item.setEnabled(false),
         }
         menu.addItem(&item);
@@ -2116,6 +2159,7 @@ fn ax_items(cols: &[Column]) -> Vec<(usize, AxPart, String)> {
             let len = spoken_dur(records::shown_len(b.from, b.to));
             let mut text = match (b.kind, b.running) {
                 (Kind::Outside, _) => format!("Nicht gezählt, außerhalb des Arbeitszeitrahmens: {}, {len}", range(sp)),
+                (Kind::FreeDay, _) => format!("Nicht gezählt, freier Tag: {}, {len}", range(sp)),
                 (Kind::Work, true) => format!("Arbeit seit {} Uhr, läuft, bisher {len}", fmt_clock(b.from)),
                 (Kind::Work, false) => format!("Arbeit {}, {len}", range(sp)),
             };
@@ -2706,7 +2750,7 @@ fn draw(
         let (tint, bar) = match b.kind {
             Kind::Work if b.running => (accent.colorWithAlphaComponent(0.13), &accent),
             Kind::Work => (accent.colorWithAlphaComponent(0.22), &accent),
-            Kind::Outside => (orange.colorWithAlphaComponent(0.16), &orange),
+            Kind::Outside | Kind::FreeDay => (orange.colorWithAlphaComponent(0.16), &orange),
         };
         round_fill(bx.rect, 4.0, &tint);
         // Arbeit ohne Mac schraffiert.
@@ -2955,6 +2999,12 @@ fn update_tooltips(view: &WeekView) {
                 if b.kind == Kind::Outside {
                     text.push_str("\naußerhalb des Arbeitszeitrahmens – nicht gezählt");
                 }
+                if b.kind == Kind::FreeDay {
+                    text.push_str("\nfreier Tag – erfasst, aber nicht gezählt");
+                    if SET_COUNTING.with(|c| c.get()).is_some() {
+                        text.push_str("\nRechtsklick: „Erfasste Zeit zählen“.");
+                    }
+                }
                 for n in &b.notes {
                     text.push_str(&format!("\n{n}"));
                 }
@@ -3194,7 +3244,7 @@ pub fn set_selection(selection: Option<Selection>) {
 }
 
 /// Wie sich Arbeit ohne Mac eintragen und löschen, Arbeitsbeginn und Feierabend festlegen,
-/// die Abwesenheit wählen und ein Tag leeren lassen (ohne sie nur ansehen, etwa für
+/// die Abwesenheit wählen, ein Tag leeren und an freien Tagen die erfasste Zeit zählen lassen (ohne sie nur ansehen, etwa für
 /// Bildschirmfotos).
 pub fn set_actions(
     add_work: Option<AddWork>,
@@ -3202,11 +3252,13 @@ pub fn set_actions(
     set_bound: Option<SetBound>,
     set_absence: Option<SetAbsence>,
     clear_day: Option<ClearDay>,
+    set_counting: Option<SetCounting>,
 ) {
     ADD_WORK.with(|c| c.set(add_work));
     REMOVE_WORK.with(|c| c.set(remove_work));
     SET_ABSENCE.with(|c| c.set(set_absence));
     CLEAR_DAY.with(|c| c.set(clear_day));
+    SET_COUNTING.with(|c| c.set(set_counting));
     SET_BOUND.with(|c| c.set(set_bound));
 }
 
@@ -3323,6 +3375,26 @@ mod tests {
         assert_eq!(outside, vec![(h(5, 40), h(7, 0)), (h(22, 0), h(22, 30))]);
         assert_eq!(cols[1].warnings.len(), 1);
         assert!(cols[1].warnings[0].contains("außerhalb des Arbeitszeitrahmens"));
+    }
+
+    #[test]
+    fn free_day_shows_uncounted_time() {
+        // Samstag ohne „Heute erfassen“: die erfasste Zeit als eigener, nicht gezählter Block.
+        let mut d = Day::new(date(2026, 11, 21));
+        d.add_period(h(10, 0), h(12, 0));
+        d.free_day = Some(FreeDay::Uncounted);
+        let now = date(2026, 11, 22).and_hms_opt(9, 0, 0).unwrap();
+        let cols = columns(&snap(vec![d.clone()], now, false), date(2026, 11, 16));
+        let kinds: Vec<(Kind, i64, i64)> = cols[5].blocks.iter().map(|b| (b.kind, b.from, b.to)).collect();
+        assert_eq!(kinds, vec![(Kind::FreeDay, h(10, 0), h(12, 0))]);
+        assert_eq!(cols[5].work_secs, 0);
+        // Volle Breite, weil es etwas zu sehen gibt.
+        assert_eq!(column_weights(&Settings::default(), &cols)[5], 1.0);
+        // Gezählt: ein normaler Abschnitt.
+        d.free_day = Some(FreeDay::Counted);
+        let cols = columns(&snap(vec![d], now, false), date(2026, 11, 16));
+        assert_eq!(cols[5].blocks.iter().map(|b| b.kind).collect::<Vec<_>>(), vec![Kind::Work]);
+        assert_eq!(cols[5].work_secs, h(2, 0));
     }
 
     #[test]
@@ -3473,10 +3545,14 @@ mod tests {
             absence: None,
             busy: false,
             clearable: false,
+            counting: None,
             edges: None,
             bounds: Vec::new(),
         };
         assert_eq!(titles(&plain, true), ["Di, 17.11.2026", "", "Tag bearbeiten"]);
+        // Freier Tag mit Markierung: erfasste Zeit zählen (mit Häkchen, siehe `context_menu`).
+        let free_day = Context { counting: Some(false), ..plain.clone() };
+        assert_eq!(titles(&free_day, true), ["Di, 17.11.2026", "", "Tag bearbeiten", COUNTING_ITEM]);
         // Ohne Fenster „Aufzeichnungen“ bzw. in der Zukunft gibt es dort nichts zu tun.
         assert!(context_entries(&plain, false).is_empty());
         // Freier Bereich: eintragen.

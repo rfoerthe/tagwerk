@@ -5,7 +5,7 @@
 //! eingestellten Mindestdauer).
 
 use crate::about;
-use crate::day::{self, fmt_clock, Activity, Mode, Span, WorkBlock};
+use crate::day::{self, fmt_clock, Activity, FreeDay, Mode, Span, WorkBlock};
 use crate::glyphs;
 use crate::hotkey;
 use crate::login_item;
@@ -24,7 +24,8 @@ use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel}
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{
     NSAlert, NSAlertFirstButtonReturn, NSApplication,
-    NSApplicationActivationPolicy, NSAttributedStringAttachmentConveniences, NSColor, NSDatePicker,
+    NSApplicationActivationPolicy, NSAttributedStringAttachmentConveniences, NSColor, NSControlStateValueOff,
+    NSControlStateValueOn, NSDatePicker,
     NSDatePickerElementFlags, NSDatePickerStyle, NSFont, NSFontAttributeName, NSFontWeightRegular,
     NSFontWeightSemibold, NSForegroundColorAttributeName, NSImage, NSImageSymbolConfiguration, NSLineBreakMode, NSMenu,
     NSMenuDelegate, NSMenuItem, NSMutableParagraphStyle, NSParagraphStyleAttributeName, NSStatusBar, NSStatusItem,
@@ -68,6 +69,8 @@ struct MenuItems {
     hints: Vec<InfoLine>,
     /// Fehler beim Speichern oder Lesen der Datenbank (sonst ausgeblendet).
     error: InfoLine,
+    /// „Heute erfassen“ an einem freien Tag (Häkchen: Die erfasste Zeit zählt).
+    count_day: Retained<NSMenuItem>,
     /// „Arbeit unterbrechen“, „Weiter arbeiten“ bzw. „Zurück am Mac“.
     pause: Retained<NSMenuItem>,
     /// „Ohne Mac weiterarbeiten“ (mit Untermenü Meeting, Telefonat, Sonstiges).
@@ -181,6 +184,19 @@ define_class!(
         #[unsafe(method(togglePause:))]
         fn toggle_pause(&self, _sender: Option<&AnyObject>) {
             toggle_pause();
+        }
+
+        /// „Heute erfassen“ an einem freien Tag ein- bzw. ausschalten.
+        #[unsafe(method(countDay:))]
+        fn count_day(&self, _sender: Option<&AnyObject>) {
+            act(|s, t| {
+                let on = s.tracker.counting(t.date()) != Some(true);
+                s.tracker.set_counting(t.date(), on);
+                // Nach dem Löschen aller Einträge war die Erfassung aus: ab jetzt wieder.
+                if on && !screen_locked() {
+                    s.tracker.start(t);
+                }
+            });
         }
 
         /// „Ohne Mac weiterarbeiten“ (Tag = Art der Arbeit).
@@ -578,6 +594,10 @@ impl AppState {
         if !settings.ask_after_lock || !long || from.date() != to.date() || !settings.in_frame(secs(from)) {
             return;
         }
+        // Freier Tag ohne „Heute erfassen“: Es zählt ohnehin nichts.
+        if self.tracker.counting(to.date()) == Some(false) {
+            return;
+        }
         let span = Span::new(secs(from), secs(to));
         let asked = notify::ask_lock(
             &format!("Gesperrt von {}", pause_title(span)),
@@ -728,8 +748,16 @@ impl AppState {
         }
         // Ganztägig abwesend: nichts zu erfassen, also auch nichts zu steuern.
         let absent = matches!(status, store::Status::Absent);
-        self.items.start.setHidden(absent);
-        self.items.pause.setHidden(closed || absent);
+        // Freier Tag: „Heute erfassen“ mit Häkchen, sobald die erfasste Zeit zählt – nach
+        // Feierabend nicht mehr (wie die übrigen Steuerpunkte). Solange sie nicht zählt, ist
+        // „Heute erfassen“ der einzige Einstieg: Die übrigen Steuerpunkte erscheinen erst danach.
+        let counting = self.tracker.counting(t.date());
+        self.items.count_day.setHidden(counting.is_none() || closed || absent);
+        self.items.count_day.setState(if counting == Some(true) { NSControlStateValueOn } else { NSControlStateValueOff });
+        let free = matches!(status, store::Status::FreeDay);
+        let uncounted = counting == Some(false);
+        self.items.start.setHidden(absent || uncounted);
+        self.items.pause.setHidden(closed || absent || uncounted);
         let (title, symbol) = if running {
             ("Arbeit unterbrechen", "pause.fill")
         } else if away {
@@ -741,7 +769,7 @@ impl AppState {
             self.items.pause.setTitle(&ns(title));
             set_item_symbol(&self.items.pause, symbol, title);
         }
-        self.items.away.setHidden(closed || away || absent);
+        self.items.away.setHidden(closed || away || absent || uncounted);
         let pauses = self.tracker.pauses_today(t);
         if pauses != self.items.count_pause_list {
             self.items.count_pause_menu.removeAllItems();
@@ -764,7 +792,7 @@ impl AppState {
             self.items.count_pause_list = pauses;
         }
         self.items.count_pause.setHidden(self.items.count_pause_list.is_empty() || absent);
-        self.items.close.setHidden(closed || absent);
+        self.items.close.setHidden(closed || absent || uncounted);
         self.items.reopen.setHidden(!closed || absent);
         if week_view::is_visible() {
             week_view::update(self.week_snapshot(t));
@@ -777,6 +805,7 @@ impl AppState {
                 IconKind::Away => "Arbeit ohne Mac",
                 IconKind::Paused => "pausiert",
                 IconKind::Break => "Pause",
+                IconKind::Outside if free => "freier Tag, Erfassung zählt nicht",
                 IconKind::Outside => "außerhalb des Arbeitszeitrahmens",
                 IconKind::Closed => "Feierabend",
                 IconKind::Absent => "heute abwesend",
@@ -857,6 +886,10 @@ fn status_line(tracker: &Tracker, t: NaiveDateTime) -> (String, IconKind) {
         ),
         (store::Status::Away(since, activity), _) => (away_text(since, t, activity), IconKind::Away),
         (store::Status::Break(since), _) => (break_text(since, t, settings.min_pause), IconKind::Break),
+        (store::Status::FreeDay, _) if tracker.free_day(t.date()) == Some(FreeDay::Stopped) => {
+            ("Freier Tag – Erfassung aus".to_string(), IconKind::Outside)
+        }
+        (store::Status::FreeDay, _) => ("Freier Tag – Erfassung zählt nicht".to_string(), IconKind::Outside),
         (store::Status::Outside, _) => {
             (format!("Außerhalb des Arbeitszeitrahmens ({})", settings.frame_text()), IconKind::Outside)
         }
@@ -1141,6 +1174,10 @@ fn run_hotkey(action: hotkey::Action) {
 /// „Arbeit unterbrechen“ ↔ „Weiter arbeiten“; bei Arbeit ohne Mac „Zurück am Mac“.
 fn toggle_pause() {
     act(|s, t| {
+        // Freier Tag, der nicht zählt: Es gibt nichts zu unterbrechen (auch nicht per Kurzbefehl).
+        if s.tracker.counting(t.date()) == Some(false) {
+            return;
+        }
         if s.tracker.is_running() {
             s.tracker.take_break(t);
         } else {
@@ -1498,6 +1535,7 @@ pub fn run(screenshot: Option<std::path::PathBuf>) {
         account: InfoLine::new(mtm),
         hints: (0..6).map(|_| InfoLine::wrapping(mtm)).collect(),
         error: InfoLine::wrapping(mtm),
+        count_day: menu_item(mtm, "Heute erfassen", Some(sel!(countDay:)), "", &controller),
         pause: menu_item(mtm, "", Some(sel!(togglePause:)), "p", &controller),
         start: start_item.clone(),
         start_reset,
@@ -1516,6 +1554,7 @@ pub fn run(screenshot: Option<std::path::PathBuf>) {
     let quit = menu_item(mtm, "Tagwerk beenden", Some(sel!(quit:)), "q", &controller);
 
     for (item, symbol, desc) in [
+        (&items.count_day, "calendar.badge.clock", "Heute erfassen"),
         (&items.away, "figure.walk", "Ohne Mac weiterarbeiten"),
         (&items.count_pause, "arrow.uturn.backward.circle", "Pause als Arbeitszeit zählen"),
         (&start_item, "sunrise", "Arbeitsbeginn"),
@@ -1537,6 +1576,7 @@ pub fn run(screenshot: Option<std::path::PathBuf>) {
         menu.addItem(&line.item);
     }
     menu.addItem(&NSMenuItem::separatorItem(mtm));
+    menu.addItem(&items.count_day);
     menu.addItem(&items.pause);
     menu.addItem(&items.away);
     menu.addItem(&items.count_pause);

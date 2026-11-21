@@ -13,6 +13,10 @@
 //! 3. Manuell eingetragene Pausen werden abgezogen.
 //! 4. Gezählt wird nur, was im Arbeitszeitrahmen liegt.
 //!
+//! An freien Tagen (Samstag, Sonntag, abgewählte Arbeitstage) zählt die automatische Erfassung
+//! nur nach „Heute erfassen“ ([`Day::free_day`]); bis dahin ist sie erfasst, aber nicht
+//! gezählt – wie Zeit außerhalb des Arbeitszeitrahmens. Einträge von Hand zählen immer.
+//!
 //! So lässt sich jede Korrektur nachvollziehen und wieder zurücknehmen; geänderte
 //! Einstellungen wirken auch auf frühere Tage.
 //!
@@ -298,6 +302,63 @@ pub struct Day {
     pub work: Vec<WorkBlock>,
     /// Abwesenheit (Urlaub, krank, Feiertag, Zeitausgleich) – ändert nur das Soll.
     pub absence: Option<Absence>,
+    /// Freier Tag: Was gilt für die automatische Erfassung (gesetzt beim ersten Entsperren,
+    /// siehe [`Settings::auto_counts_on`])? `None`: Sie zählt wie immer (auch an allen Tagen
+    /// früherer Versionen) – so ändern geänderte Einstellungen keine vergangenen Tage.
+    pub free_day: Option<FreeDay>,
+}
+
+/// Was an einem freien Tag (Wochenende, abgewählter Arbeitstag) für die automatische
+/// Erfassung gilt.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FreeDay {
+    /// Erfasst, aber nicht gezählt.
+    Uncounted,
+    /// „Heute erfassen“: Die erfasste Zeit zählt.
+    Counted,
+    /// Alle Einträge gelöscht: Bis „Heute erfassen“ wird nichts mehr erfasst.
+    Stopped,
+}
+
+impl FreeDay {
+    /// Zählt die automatisch erfasste Zeit?
+    pub fn counts(self) -> bool {
+        self == FreeDay::Counted
+    }
+
+    /// Kennung in der Datenbank.
+    pub fn id(self) -> i64 {
+        match self {
+            FreeDay::Uncounted => 0,
+            FreeDay::Counted => 1,
+            FreeDay::Stopped => 2,
+        }
+    }
+
+    pub fn from_id(id: i64) -> Option<Self> {
+        [FreeDay::Uncounted, FreeDay::Counted, FreeDay::Stopped].into_iter().find(|f| f.id() == id)
+    }
+
+    /// Notiz im Markdown-Export.
+    pub fn label(self) -> &'static str {
+        match self {
+            FreeDay::Uncounted => "freier Tag, nicht gezählt",
+            FreeDay::Counted => "freier Tag, gezählt",
+            FreeDay::Stopped => "freier Tag, nicht erfasst",
+        }
+    }
+
+    /// Aus der Notiz im Export (siehe [`FreeDay::label`]).
+    pub fn parse(text: &str) -> Self {
+        let text = text.to_lowercase();
+        if text.contains("nicht erfasst") {
+            FreeDay::Stopped
+        } else if text.contains("nicht") {
+            FreeDay::Uncounted
+        } else {
+            FreeDay::Counted
+        }
+    }
 }
 
 /// Zustand eines Tages aus Sicht der manuellen Entscheidungen.
@@ -344,7 +405,16 @@ impl DayRecord {
 
 impl Day {
     pub fn new(date: NaiveDate) -> Self {
-        Self { date, periods: Vec::new(), start: None, end: None, breaks: Vec::new(), work: Vec::new(), absence: None }
+        Self {
+            date,
+            periods: Vec::new(),
+            start: None,
+            end: None,
+            breaks: Vec::new(),
+            work: Vec::new(),
+            absence: None,
+            free_day: None,
+        }
     }
 
     pub fn has_corrections(&self) -> bool {
@@ -355,8 +425,20 @@ impl Day {
             || self.absence.is_some()
     }
 
+    /// Nichts zu speichern (auch keine Entscheidung zur Erfassung an einem freien Tag).
     pub fn is_empty(&self) -> bool {
-        self.periods.is_empty() && !self.has_corrections()
+        self.periods.is_empty() && !self.has_corrections() && self.free_day.is_none()
+    }
+
+    /// Zählt die automatisch erfasste Zeit (siehe [`Day::free_day`])?
+    pub fn periods_count(&self) -> bool {
+        self.free_day.is_none_or(FreeDay::counts)
+    }
+
+    /// Automatisch erfasste Zeiten, die zählen (an einem freien Tag ohne „Heute erfassen“
+    /// keine).
+    fn counted_periods(&self) -> Vec<Span> {
+        if self.periods_count() { self.periods.clone() } else { Vec::new() }
     }
 
     /// Gibt es Einträge außer der Abwesenheit (erfasste Zeiten oder Korrekturen)?
@@ -562,7 +644,7 @@ impl Day {
     /// Arbeitsabschnitte ohne den Arbeitszeitrahmen (Schritte 1–3).
     fn unframed_spans(&self, min_pause: i64) -> Vec<Span> {
         let manual: Vec<Span> = self.work.iter().map(WorkBlock::span).collect();
-        let mut base = self.periods.clone();
+        let mut base = self.counted_periods();
         base.extend(manual.iter().copied());
         let mut spans = fill_gaps(base, min_pause);
         // Ein manueller Beginn zählt bis zum ersten Entsperren danach, ein manueller Feierabend
@@ -571,7 +653,7 @@ impl Day {
         // ändert daran nichts (sonst hinge der Tag von einem frühen oder späten Blick auf
         // den Mac ab). Bezug ist das Entsperren bzw. Sperren – auch wenn davor bzw. danach
         // Arbeit ohne Mac liegt (sonst verkürzte sie den Tag).
-        let unlocked = fill_gaps(self.periods.clone(), min_pause);
+        let unlocked = fill_gaps(self.counted_periods(), min_pause);
         if let Some(s) = self.start {
             // Beginn vor einem Entsperren: die Zeit bis zum ersten Entsperren danach zählt mit.
             let first = if unlocked.is_empty() {
@@ -622,16 +704,32 @@ impl Day {
         out
     }
 
+    /// An einem freien Tag erfasst, aber nicht gezählt (ohne „Heute erfassen“, siehe
+    /// [`Day::free_day`]): die automatisch erfasste Zeit, soweit nicht Einträge von Hand
+    /// sie ohnehin zählen lassen – auch außerhalb des Arbeitszeitrahmens.
+    pub fn uncounted_auto_spans(&self, s: &Settings) -> Vec<Span> {
+        if self.periods_count() {
+            return Vec::new();
+        }
+        let mut out = fill_gaps(self.periods.clone(), s.min_pause);
+        for sp in self.unframed_spans(s.min_pause) {
+            out = subtract(out, sp);
+        }
+        out
+    }
+
     /// Erstes Entsperren und letztes Sperren im Arbeitszeitrahmen (ohne manuelle Angaben;
-    /// kurze Sperren zählen wie überall zur Arbeitszeit).
+    /// kurze Sperren zählen wie überall zur Arbeitszeit). An einem freien Tag ohne „Heute
+    /// erfassen“ keines.
     pub fn auto_bounds_in_frame(&self, s: &Settings) -> Option<(i64, i64)> {
-        let spans = clip(fill_gaps(self.periods.clone(), s.min_pause), s.frame_from, s.frame_to);
+        let spans = clip(fill_gaps(self.counted_periods(), s.min_pause), s.frame_from, s.frame_to);
         Some((spans.first()?.from, spans.last()?.to))
     }
 
     /// Tabellenzeile für diesen Tag (`None`, wenn es nichts anzuzeigen gibt).
     pub fn record(&self, s: &Settings) -> Option<DayRecord> {
-        if self.is_empty() {
+        // Nur die Entscheidung zur Erfassung, noch nichts erfasst: keine Zeile.
+        if !self.has_entries() && self.absence.is_none() {
             return None;
         }
         let spans = self.spans(s);
@@ -1347,5 +1445,56 @@ mod tests {
         assert_eq!(parse_clock("24:01"), None);
         assert_eq!(parse_clock("abc"), None);
         assert_eq!(fmt_clock_s(DAY_END), "24:00:00");
+    }
+
+    #[test]
+    fn free_day_counts_only_after_choosing_to() {
+        // Samstag: entsperrt 10:00–12:00, dazu ein Telefonat von Hand 14:00–14:30.
+        let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 21).unwrap());
+        d.add_period(h(10, 0), h(12, 0));
+        d.add_work(h(14, 0), h(14, 30), "Telefonat");
+        // Ohne Markierung (frühere Versionen, Einstellung aus): Alles zählt.
+        assert_eq!(d.spans(&st()), vec![Span::new(h(10, 0), h(12, 0)), Span::new(h(14, 0), h(14, 30))]);
+        assert!(d.uncounted_auto_spans(&st()).is_empty());
+
+        // Nicht gezählt: nur das Telefonat; die erfasste Zeit steht daneben als „nicht gezählt“.
+        d.free_day = Some(FreeDay::Uncounted);
+        assert_eq!(d.spans(&st()), vec![Span::new(h(14, 0), h(14, 30))]);
+        assert_eq!(d.uncounted_auto_spans(&st()), vec![Span::new(h(10, 0), h(12, 0))]);
+        assert_eq!(d.auto_bounds_in_frame(&st()), None);
+        assert_eq!(d.record(&st()).unwrap().work_secs, h(0, 30));
+        // Ein Telefonat in der erfassten Zeit zählt, der Rest nicht.
+        d.add_work(h(11, 0), h(11, 15), "Telefonat");
+        assert_eq!(
+            d.uncounted_auto_spans(&st()),
+            vec![Span::new(h(10, 0), h(11, 0)), Span::new(h(11, 15), h(12, 0))]
+        );
+
+        // „Heute erfassen“: wieder alles.
+        d.free_day = Some(FreeDay::Counted);
+        assert_eq!(d.record(&st()).unwrap().work_secs, h(2, 30));
+        assert!(d.uncounted_auto_spans(&st()).is_empty());
+    }
+
+    #[test]
+    fn free_day_mark_alone_is_kept_but_no_record() {
+        let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 21).unwrap());
+        d.free_day = Some(FreeDay::Uncounted);
+        assert!(!d.is_empty(), "die Entscheidung bleibt gespeichert");
+        assert!(!d.has_entries());
+        assert_eq!(d.record(&st()), None);
+    }
+
+    #[test]
+    fn free_day_labels_round_trip() {
+        for f in [FreeDay::Uncounted, FreeDay::Counted, FreeDay::Stopped] {
+            assert_eq!(FreeDay::parse(f.label()), f);
+            assert_eq!(FreeDay::from_id(f.id()), Some(f));
+        }
+        assert_eq!(FreeDay::from_id(7), None);
+        // Nichts erfasst, nichts zu zeigen – aber die Entscheidung bleibt gespeichert.
+        let mut d = Day::new(NaiveDate::from_ymd_opt(2026, 11, 21).unwrap());
+        d.free_day = Some(FreeDay::Stopped);
+        assert!(!d.is_empty() && d.record(&st()).is_none());
     }
 }
