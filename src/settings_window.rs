@@ -1550,8 +1550,8 @@ fn build(on_change: fn()) -> State {
                     None,
                     &caption(
                         "Am Wochenende und an den übrigen freien Tagen wird erfasst, aber erst gezählt, \
-                         wenn im Menü „Heute erfassen“ gewählt ist – nachträglich auch in der \
-                         Wochenansicht. Einträge von Hand zählen immer. Ob die Arbeit dort auch in Saldo \
+                         wenn im Menü „Heute erfassen“ gewählt ist – nachträglich auch im Fenster \
+                         „Aufzeichnungen“. Einträge von Hand zählen immer. Ob die Arbeit dort auch in Saldo \
                          und Zeitkonto eingeht, legen die Arbeitszeitregeln fest.",
                     ),
                 ),
