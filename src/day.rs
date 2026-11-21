@@ -693,14 +693,16 @@ impl Day {
 
     /// Effektive Arbeitsabschnitte nach den Einstellungen `s`.
     pub fn spans(&self, s: &Settings) -> Vec<Span> {
-        clip(self.unframed_spans(s.min_pause), s.frame_from, s.frame_to)
+        let r = s.rules(self.date);
+        clip(self.unframed_spans(r.min_pause), r.frame_from, r.frame_to)
     }
 
     /// Arbeitszeit außerhalb des Arbeitszeitrahmens (wird nicht gezählt).
     pub fn outside_frame_spans(&self, s: &Settings) -> Vec<Span> {
-        let all = self.unframed_spans(s.min_pause);
-        let mut out = clip(all.clone(), 0, s.frame_from);
-        out.extend(clip(all, s.frame_to, DAY_END));
+        let r = s.rules(self.date);
+        let all = self.unframed_spans(r.min_pause);
+        let mut out = clip(all.clone(), 0, r.frame_from);
+        out.extend(clip(all, r.frame_to, DAY_END));
         out
     }
 
@@ -711,8 +713,9 @@ impl Day {
         if self.periods_count() {
             return Vec::new();
         }
-        let mut out = fill_gaps(self.periods.clone(), s.min_pause);
-        for sp in self.unframed_spans(s.min_pause) {
+        let min_pause = s.rules(self.date).min_pause;
+        let mut out = fill_gaps(self.periods.clone(), min_pause);
+        for sp in self.unframed_spans(min_pause) {
             out = subtract(out, sp);
         }
         out
@@ -722,7 +725,8 @@ impl Day {
     /// kurze Sperren zählen wie überall zur Arbeitszeit). An einem freien Tag ohne „Heute
     /// erfassen“ keines.
     pub fn auto_bounds_in_frame(&self, s: &Settings) -> Option<(i64, i64)> {
-        let spans = clip(fill_gaps(self.counted_periods(), s.min_pause), s.frame_from, s.frame_to);
+        let r = s.rules(self.date);
+        let spans = clip(fill_gaps(self.counted_periods(), r.min_pause), r.frame_from, r.frame_to);
         Some((spans.first()?.from, spans.last()?.to))
     }
 
@@ -745,7 +749,7 @@ impl Day {
                     .or(self.end)
                     .or(self.breaks.first().map(|b| b.from))
                     .unwrap_or(0)
-                    .clamp(s.frame_from, s.frame_to);
+                    .clamp(s.rules(self.date).frame_from, s.rules(self.date).frame_to);
                 (first, first)
             }
         };
@@ -1044,7 +1048,7 @@ mod tests {
         let r = d.record(&st()).unwrap();
         assert_eq!((r.work_secs, r.pause_secs()), (h(7, 45), h(0, 15)));
         // mit 20 Min. Mindestpause zählen beide Lücken als Arbeit
-        let s = Settings { min_pause: 20 * 60, ..st() };
+        let s = st().with_rules(crate::rules::WorkRules { min_pause: 20 * 60, ..Default::default() });
         let r = d.record(&s).unwrap();
         assert_eq!((r.work_secs, r.pause_secs()), (h(8, 0), 0));
         // Rohdaten bleiben unverändert

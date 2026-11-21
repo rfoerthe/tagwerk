@@ -1,11 +1,16 @@
 //! Fenster „Einstellungen“ nach den macOS Human Interface Guidelines: nicht modal,
 //! Änderungen gelten sofort, kein „OK“/„Abbrechen“.
 //!
-//! Vier Reiter: „Allgemein“ (Anmeldung, Menüleiste, Kurzbefehle), „Arbeitszeit“ (Rahmen,
-//! Regelarbeitszeit, Arbeitstage, Zeitkonto), „Erfassung“ (Mindestpause, Arbeit ohne Mac,
-//! Inaktivität, Nachfrage nach langer Sperre) und „Mitteilungen“ (Stand der Erlaubnis, woran
+//! Vier Reiter: „Allgemein“ (Anmeldung, Menüleiste, Kurzbefehle), „Arbeitszeit“
+//! (Arbeitszeitregeln je Stand, Zeitkonto), „Erfassung“ (Arbeit ohne Mac, Inaktivität,
+//! Nachfrage nach langer Sperre, freie Tage) und „Mitteilungen“ (Stand der Erlaubnis, woran
 //! Tagwerk erinnert). Gespeichert wird in der Datenbank; die jeweils andere
 //! Tagwerk-Instanz (Menüleiste bzw. Fenster „Aufzeichnungen“) übernimmt die Werte.
+//!
+//! Ausnahme vom sofortigen Gelten sind die Arbeitszeitregeln (Rahmen, Regelarbeitszeit,
+//! Arbeitstage, Mindestpause): Sie gelten ab einem Datum, damit eine Änderung frühere Tage
+//! nicht neu rechnet. Der Reiter zeigt alle Stände als Liste; ein Blatt legt einen Stand an
+//! oder ändert ihn, gespeichert wird erst mit „Übernehmen“.
 //!
 //! „Bei Anmeldung starten“ steht nicht in der Datenbank, sondern ist das Anmeldeobjekt
 //! von macOS; „Standardwerte“ lässt es unverändert.
@@ -16,19 +21,22 @@
 //!
 //! Rechts in der Symbolleiste öffnet ein Ordner-Knopf den Datenordner im Finder.
 
-use crate::day::{secs_of, DAY_END};
+use crate::day::{fmt_clock, secs_of, DAY_END};
 use crate::glyphs;
 use crate::hotkey;
 use crate::login_item;
 use crate::notify::{self, Permission};
-use crate::rules::{self, IconSet, Settings, IDLE_RANGE, MIN_PAUSE_RANGE, MIN_WORK_RANGE, WEEKLY_RANGE};
+use crate::rules::{self, fmt_day, IconSet, Settings, WorkRules, IDLE_RANGE, MIN_PAUSE_RANGE, MIN_WORK_RANGE, WEEKLY_RANGE};
 use crate::store;
 use chrono::{DateTime, Datelike, Duration, Local, NaiveDate, NaiveDateTime, TimeZone};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::*;
-use objc2_foundation::{NSArray, NSCopying, NSDate, NSLocale, NSNotification, NSPoint, NSRect, NSSize, NSString, NSURL};
+use block2::RcBlock;
+use objc2_foundation::{
+    NSArray, NSCopying, NSDate, NSInteger, NSLocale, NSNotification, NSPoint, NSRect, NSSize, NSString, NSURL,
+};
 use std::cell::RefCell;
 
 fn ns(s: &str) -> Retained<NSString> {
@@ -79,21 +87,19 @@ struct State {
     notify_status: Retained<NSTextField>,
     notify_button: Retained<NSButton>,
     notify_note: Retained<NSTextField>,
-    frame_from: Retained<NSDatePicker>,
-    frame_to: Retained<NSDatePicker>,
-    weekly: Retained<NSTextField>,
-    weekly_stepper: Retained<NSStepper>,
-    pause: Retained<NSTextField>,
-    pause_stepper: Retained<NSStepper>,
+    /// Arbeitszeitregeln, die heute gelten (und geplante Stände).
+    rules_now: Retained<NSTextField>,
+    /// Liste aller Stände (Zeilen in [`ROWS`]).
+    rules_table: Retained<NSTableView>,
+    rules_edit: Retained<NSButton>,
+    rules_delete: Retained<NSButton>,
+    sheet: Sheet,
     work: Retained<NSTextField>,
     work_stepper: Retained<NSStepper>,
-    daily_note: Retained<NSTextField>,
     icon_popup: Retained<NSPopUpButton>,
     icon_preview: Vec<Retained<NSImageView>>,
     show_time: Retained<NSButton>,
     hotkeys: Retained<NSButton>,
-    /// Arbeitstage Montag bis Freitag (Tag der Checkbox = Bit in `Settings::workdays`).
-    workdays: Vec<Retained<NSButton>>,
     account_check: Retained<NSButton>,
     account_date: Retained<NSDatePicker>,
     carry: Retained<NSTextField>,
@@ -109,6 +115,51 @@ struct State {
     error: Retained<NSTextField>,
     on_change: fn(),
 }
+
+/// Blatt „Arbeitszeit ändern“: ein Stand der Arbeitszeitregeln. Die Felder ändern nur den
+/// Entwurf `draft`; gespeichert wird erst mit „Übernehmen“.
+struct Sheet {
+    window: Retained<NSWindow>,
+    title: Retained<NSTextField>,
+    /// Welcher Stand bearbeitet wird: `None` ein neuer, `Some(from)` der vorhandene ab `from`
+    /// (`Some(None)`: der erste, der seit jeher gilt – sein Datum steht fest).
+    editing: Option<Option<NaiveDate>>,
+    draft: WorkRules,
+    valid_from: Retained<NSDatePicker>,
+    /// Statt des Datums beim ersten Stand: „seit Beginn“.
+    begin: Retained<NSTextField>,
+    /// Was der Stand bewirkt (bis wann er gilt, ob er rückwirkend ändert …).
+    hint: Retained<NSTextField>,
+    frame_from: Retained<NSDatePicker>,
+    frame_to: Retained<NSDatePicker>,
+    weekly: Retained<NSTextField>,
+    weekly_stepper: Retained<NSStepper>,
+    /// Arbeitstage Montag bis Freitag (Tag der Checkbox = Bit in `WorkRules::workdays`).
+    workdays: Vec<Retained<NSButton>>,
+    daily_note: Retained<NSTextField>,
+    pause: Retained<NSTextField>,
+    pause_stepper: Retained<NSStepper>,
+    error: Retained<NSTextField>,
+}
+
+/// Eine Zeile der Liste der Stände.
+struct RuleRow {
+    from: Option<NaiveDate>,
+    cells: [String; 5],
+    /// Gilt heute.
+    current: bool,
+    /// Gilt erst ab einem künftigen Tag.
+    planned: bool,
+}
+
+/// Spalten der Liste: Kennung, Titel, Breite.
+const RULE_COLUMNS: [(&str, &str, f64); 5] = [
+    ("from", "Gültig ab", 86.0),
+    ("weekly", "Woche", 72.0),
+    ("days", "Arbeitstage", 108.0),
+    ("frame", "Rahmen", 98.0),
+    ("pause", "Pause ab", 60.0),
+];
 
 /// Vorgabe im Feld „Minuten ohne Eingabe“, solange die Erkennung aus ist.
 const IDLE_DEFAULT: i64 = 10 * 60;
@@ -127,10 +178,23 @@ const PREVIEW_STATES: [(glyphs::State, &str); 4] = [
 
 thread_local! {
     static STATE: RefCell<Option<State>> = const { RefCell::new(None) };
+    /// Zeilen der Liste der Stände – getrennt von `STATE`, weil die Tabelle sie auch abfragt,
+    /// während `STATE` gerade geliehen ist (beim Neuladen in `State::fill`).
+    static ROWS: RefCell<Vec<RuleRow>> = const { RefCell::new(Vec::new()) };
 }
 
 fn with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
     STATE.with(|s| s.borrow_mut().as_mut().map(f))
+}
+
+/// Wie [`with_state`], aber ohne Wirkung, solange `STATE` schon geliehen ist (Meldungen der
+/// Tabelle mitten in `State::fill`).
+fn try_with_state<R>(f: impl FnOnce(&mut State) -> R) -> Option<R> {
+    STATE.with(|s| s.try_borrow_mut().ok()?.as_mut().map(f))
+}
+
+fn today() -> NaiveDate {
+    Local::now().date_naive()
 }
 
 define_class!(
@@ -146,6 +210,28 @@ define_class!(
         #[unsafe(method(windowDidBecomeKey:))]
         fn window_did_become_key(&self, _n: &NSNotification) {
             refresh_permission();
+        }
+    }
+
+    unsafe impl NSTableViewDataSource for Controller {
+        #[unsafe(method(numberOfRowsInTableView:))]
+        fn number_of_rows(&self, _table: &NSTableView) -> NSInteger {
+            ROWS.with(|r| r.borrow().len() as NSInteger)
+        }
+    }
+
+    unsafe impl NSControlTextEditingDelegate for Controller {}
+
+    unsafe impl NSTableViewDelegate for Controller {
+        #[unsafe(method_id(tableView:viewForTableColumn:row:))]
+        fn view_for(&self, _table: &NSTableView, column: Option<&NSTableColumn>, row: NSInteger) -> Option<Retained<NSView>> {
+            let id = column.map(|c| c.identifier().to_string());
+            rule_cell(id.as_deref(), row)
+        }
+
+        #[unsafe(method(tableViewSelectionDidChange:))]
+        fn selection_changed(&self, _n: &NSNotification) {
+            try_with_state(|s| s.update_rule_buttons());
         }
     }
 
@@ -167,60 +253,136 @@ define_class!(
     }
 
     impl Controller {
-        #[unsafe(method(frameChanged:))]
-        fn frame_changed(&self, _sender: Option<&AnyObject>) {
-            let ok = with_state(|s| {
-                let (Some(from), Some(to)) = (picker_secs(&s.frame_from), picker_secs(&s.frame_to)) else {
-                    return false;
-                };
-                if to <= from {
-                    s.show_error("Das Ende des Arbeitszeitrahmens muss nach seinem Beginn liegen.");
-                    return false;
-                }
-                s.settings.frame_from = from;
-                s.settings.frame_to = to;
-                s.error.setHidden(true);
-                true
-            });
-            if ok == Some(true) {
-                save();
+        /// Liste der Stände: „Neu …“.
+        #[unsafe(method(newRules:))]
+        fn new_rules(&self, _sender: Option<&AnyObject>) {
+            open_sheet(None);
+        }
+
+        /// Liste der Stände: „Bearbeiten …“ für die gewählte Zeile.
+        #[unsafe(method(editRules:))]
+        fn edit_rules(&self, _sender: Option<&AnyObject>) {
+            if let Some(from) = with_state(|s| row_from(s.rules_table.selectedRow())).flatten() {
+                open_sheet(Some(from));
             }
         }
 
-        #[unsafe(method(weeklyChanged:))]
-        fn weekly_changed(&self, _sender: Option<&AnyObject>) {
+        /// Doppelklick auf eine Zeile: sie bearbeiten.
+        #[unsafe(method(rulesDoubleClicked:))]
+        fn rules_double_clicked(&self, _sender: Option<&AnyObject>) {
+            if let Some(from) = with_state(|s| row_from(s.rules_table.clickedRow())).flatten() {
+                open_sheet(Some(from));
+            }
+        }
+
+        /// Liste der Stände: „Löschen“ für die gewählte Zeile (nicht der erste Stand).
+        #[unsafe(method(deleteRules:))]
+        fn delete_rules(&self, _sender: Option<&AnyObject>) {
+            if let Some(Some(from)) = with_state(|s| row_from(s.rules_table.selectedRow())).flatten() {
+                confirm_delete_rules(from);
+            }
+        }
+
+        #[unsafe(method(sheetDateChanged:))]
+        fn sheet_date_changed(&self, _sender: Option<&AnyObject>) {
+            with_state(|s| s.fill_sheet());
+        }
+
+        #[unsafe(method(sheetFrameChanged:))]
+        fn sheet_frame_changed(&self, _sender: Option<&AnyObject>) {
             with_state(|s| {
-                let value = rules::parse_hours(&s.weekly.stringValue().to_string());
+                let sh = &mut s.sheet;
+                let (Some(from), Some(to)) = (picker_secs(&sh.frame_from), picker_secs(&sh.frame_to)) else {
+                    return;
+                };
+                if to <= from {
+                    show_sheet_error(sh, "Das Ende des Arbeitszeitrahmens muss nach seinem Beginn liegen.");
+                    return;
+                }
+                sh.draft.frame_from = from;
+                sh.draft.frame_to = to;
+                sh.error.setHidden(true);
+                s.fill_sheet();
+            });
+        }
+
+        #[unsafe(method(sheetWeeklyChanged:))]
+        fn sheet_weekly_changed(&self, _sender: Option<&AnyObject>) {
+            with_state(|s| {
+                let value = rules::parse_hours(&s.sheet.weekly.stringValue().to_string());
                 s.set_weekly(value);
             });
-            save();
         }
 
-        #[unsafe(method(weeklyStepped:))]
-        fn weekly_stepped(&self, _sender: Option<&AnyObject>) {
+        #[unsafe(method(sheetWeeklyStepped:))]
+        fn sheet_weekly_stepped(&self, _sender: Option<&AnyObject>) {
             with_state(|s| {
-                let value = (s.weekly_stepper.doubleValue() * 3600.0).round() as i64;
+                let value = (s.sheet.weekly_stepper.doubleValue() * 3600.0).round() as i64;
                 s.set_weekly(Some(value));
             });
-            save();
         }
 
-        #[unsafe(method(pauseChanged:))]
-        fn pause_changed(&self, _sender: Option<&AnyObject>) {
+        #[unsafe(method(sheetPauseChanged:))]
+        fn sheet_pause_changed(&self, _sender: Option<&AnyObject>) {
             with_state(|s| {
-                let value = s.pause.stringValue().to_string().trim().parse::<i64>().ok().map(|m| m * 60);
+                let value = s.sheet.pause.stringValue().to_string().trim().parse::<i64>().ok().map(|m| m * 60);
                 s.set_pause(value);
             });
-            save();
         }
 
-        #[unsafe(method(pauseStepped:))]
-        fn pause_stepped(&self, _sender: Option<&AnyObject>) {
+        #[unsafe(method(sheetPauseStepped:))]
+        fn sheet_pause_stepped(&self, _sender: Option<&AnyObject>) {
             with_state(|s| {
-                let value = s.pause_stepper.integerValue() as i64 * 60;
+                let value = s.sheet.pause_stepper.integerValue() as i64 * 60;
                 s.set_pause(Some(value));
             });
-            save();
+        }
+
+        /// Arbeitstag ein- oder ausgeschaltet (Tag der Checkbox = Bit); einer bleibt immer.
+        #[unsafe(method(sheetWorkdayChanged:))]
+        fn sheet_workday_changed(&self, sender: Option<&NSButton>) {
+            let Some(sender) = sender else { return };
+            let bit = 1u8 << sender.tag().clamp(0, 4);
+            let on = sender.state() == NSControlStateValueOn;
+            with_state(|s| {
+                let sh = &mut s.sheet;
+                let days = if on { sh.draft.workdays | bit } else { sh.draft.workdays & !bit };
+                if days & rules::ALL_WORKDAYS == 0 {
+                    show_sheet_error(sh, "Mindestens ein Arbeitstag muss bleiben.");
+                } else {
+                    sh.draft.workdays = days;
+                    sh.error.setHidden(true);
+                }
+                s.fill_sheet();
+            });
+        }
+
+        #[unsafe(method(sheetCancel:))]
+        fn sheet_cancel(&self, _sender: Option<&AnyObject>) {
+            close_sheet();
+        }
+
+        /// „Übernehmen“: Stand setzen, speichern, Blatt schließen.
+        #[unsafe(method(sheetApply:))]
+        fn sheet_apply(&self, _sender: Option<&AnyObject>) {
+            // Eine laufende Eingabe abschließen – das löst die Aktion des Felds aus.
+            if let Some(sheet) = with_state(|s| s.sheet.window.clone()) {
+                sheet.makeFirstResponder(None);
+            }
+            let ok = with_state(|s| {
+                // Ungültige Eingabe: Das Blatt bleibt offen, die Meldung steht darin.
+                if !s.sheet.error.isHidden() {
+                    return false;
+                }
+                let replaces = s.sheet.editing.flatten();
+                let from = s.sheet_from();
+                s.settings.set_rules(from, s.sheet.draft, replaces);
+                true
+            });
+            if ok == Some(true) {
+                close_sheet();
+                save();
+            }
         }
 
         #[unsafe(method(workChanged:))]
@@ -256,24 +418,6 @@ define_class!(
                 let i = s.icon_popup.indexOfSelectedItem();
                 if let Some(&set) = usize::try_from(i).ok().and_then(|i| IconSet::ALL.get(i)) {
                     s.settings.icon_set = set;
-                }
-            });
-            save();
-        }
-
-        /// Arbeitstag ein- oder ausgeschaltet (Tag der Checkbox = Bit); einer bleibt immer.
-        #[unsafe(method(workdayChanged:))]
-        fn workday_changed(&self, sender: Option<&NSButton>) {
-            let Some(sender) = sender else { return };
-            let bit = 1u8 << sender.tag().clamp(0, 4);
-            let on = sender.state() == NSControlStateValueOn;
-            with_state(|s| {
-                let days = if on { s.settings.workdays | bit } else { s.settings.workdays & !bit };
-                if days & rules::ALL_WORKDAYS == 0 {
-                    s.show_error("Mindestens ein Arbeitstag muss bleiben.");
-                } else {
-                    s.settings.workdays = days;
-                    s.error.setHidden(true);
                 }
             });
             save();
@@ -378,8 +522,14 @@ define_class!(
 
         #[unsafe(method(resetDefaults:))]
         fn reset_defaults(&self, _sender: Option<&AnyObject>) {
+            // Die Arbeitszeitregeln gelten ab heute wieder wie zu Beginn; frühere Tage behalten
+            // ihre Stände, geplante entfallen.
+            let today = today();
             with_state(|s| {
-                s.settings = Settings::default();
+                let mut fresh = Settings { work: s.settings.work.clone(), ..Settings::default() };
+                fresh.work.retain(|p| p.from.is_none_or(|f| f <= today));
+                fresh.set_rules(Some(today), WorkRules::DEFAULT, None);
+                s.settings = fresh;
                 s.error.setHidden(true);
             });
             save();
@@ -400,26 +550,16 @@ impl State {
         let s = &self.settings;
         let state = |on: bool| if on { NSControlStateValueOn } else { NSControlStateValueOff };
         self.login.setState(if login_item::enabled() { NSControlStateValueOn } else { NSControlStateValueOff });
-        self.frame_from.setDateValue(&to_nsdate(s.frame_from));
-        self.frame_to.setDateValue(&to_nsdate(s.frame_to));
-        self.weekly.setStringValue(&ns(&rules::fmt_hours(s.weekly_target)));
-        self.weekly_stepper.setDoubleValue(s.weekly_target as f64 / 3600.0);
-        self.pause.setStringValue(&ns(&(s.min_pause / 60).to_string()));
-        self.pause_stepper.setIntegerValue((s.min_pause / 60) as isize);
+        let today = today();
+        self.rules_now.setStringValue(&ns(&rules_now_text(s, today)));
+        ROWS.with(|r| *r.borrow_mut() = rule_rows(s, today));
+        self.rules_table.reloadData();
+        self.update_rule_buttons();
         self.work.setStringValue(&ns(&(s.min_work / 60).to_string()));
         self.work_stepper.setIntegerValue((s.min_work / 60) as isize);
-        self.daily_note.setStringValue(&ns(&format!(
-            "{}  ·  {} pro Arbeitstag",
-            s.week_text(),
-            store::fmt_hm(s.daily_target_workday())
-        )));
-        for (bit, check) in self.workdays.iter().enumerate() {
-            check.setState(state(s.workdays & (1 << bit) != 0));
-        }
         self.account_check.setState(state(s.account_from.is_some()));
         self.account_date.setEnabled(s.account_from.is_some());
         // Ohne Beginn als Vorschlag der 1. Januar dieses Jahres.
-        let today = Local::now().date_naive();
         let from = s.account_from.unwrap_or_else(|| today.with_month(1).and_then(|d| d.with_day(1)).unwrap_or(today));
         self.account_date.setDateValue(&day_to_nsdate(from));
         self.carry.setStringValue(&ns(&rules::fmt_signed_hm(s.account_carry)));
@@ -443,32 +583,81 @@ impl State {
         self.hotkeys.setState(state(s.hotkeys));
     }
 
+    /// „Bearbeiten …“ und „Löschen“ nach der Auswahl in der Liste (der erste Stand bleibt).
+    fn update_rule_buttons(&self) {
+        let row = self.rules_table.selectedRow();
+        self.rules_edit.setEnabled(row >= 0);
+        self.rules_delete.setEnabled(row > 0);
+    }
+
+    /// Ab wann der Stand im Blatt gilt: `None` beim ersten Stand (seit jeher), sonst das Datum.
+    fn sheet_from(&self) -> Option<NaiveDate> {
+        match self.sheet.editing {
+            Some(None) => None,
+            _ => Some(nsdate_to_day(&self.sheet.valid_from.dateValue()).unwrap_or_else(today)),
+        }
+    }
+
+    /// Felder des Blatts aus dem Entwurf neu befüllen, dazu Hinweis und Tagessoll.
+    fn fill_sheet(&self) {
+        let sh = &self.sheet;
+        let r = &sh.draft;
+        let first = sh.editing == Some(None);
+        sh.valid_from.setHidden(first);
+        sh.begin.setHidden(!first);
+        sh.frame_from.setDateValue(&to_nsdate(r.frame_from));
+        sh.frame_to.setDateValue(&to_nsdate(r.frame_to));
+        sh.weekly.setStringValue(&ns(&rules::fmt_hours(r.weekly_target)));
+        sh.weekly_stepper.setDoubleValue(r.weekly_target as f64 / 3600.0);
+        sh.pause.setStringValue(&ns(&(r.min_pause / 60).to_string()));
+        sh.pause_stepper.setIntegerValue((r.min_pause / 60) as isize);
+        sh.daily_note.setStringValue(&ns(&format!(
+            "{}  ·  {} pro Arbeitstag",
+            r.week_text(),
+            store::fmt_hm(r.daily_target_workday())
+        )));
+        for (bit, check) in sh.workdays.iter().enumerate() {
+            check.setState(if r.workdays & (1 << bit) != 0 { NSControlStateValueOn } else { NSControlStateValueOff });
+        }
+        let (text, warn) = sheet_hint(&self.settings, sh.editing, self.sheet_from(), r, today());
+        sh.hint.setStringValue(&ns(&text));
+        sh.hint.setTextColor(Some(&*if warn { NSColor::systemOrangeColor() } else { NSColor::secondaryLabelColor() }));
+    }
+
     fn set_weekly(&mut self, value: Option<i64>) {
         match value {
             Some(v) if (WEEKLY_RANGE.0..=WEEKLY_RANGE.1).contains(&v) => {
-                self.settings.weekly_target = v;
-                self.error.setHidden(true);
+                self.sheet.draft.weekly_target = v;
+                self.sheet.error.setHidden(true);
             }
-            _ => self.show_error(&format!(
-                "Die Regelarbeitszeit muss zwischen {} und {} Stunden pro Woche liegen.",
-                WEEKLY_RANGE.0 / 3600,
-                WEEKLY_RANGE.1 / 3600
-            )),
+            _ => show_sheet_error(
+                &self.sheet,
+                &format!(
+                    "Die Regelarbeitszeit muss zwischen {} und {} Stunden pro Woche liegen.",
+                    WEEKLY_RANGE.0 / 3600,
+                    WEEKLY_RANGE.1 / 3600
+                ),
+            ),
         }
+        self.fill_sheet();
     }
 
     fn set_pause(&mut self, value: Option<i64>) {
         match value {
             Some(v) if (MIN_PAUSE_RANGE.0..=MIN_PAUSE_RANGE.1).contains(&v) => {
-                self.settings.min_pause = v;
-                self.error.setHidden(true);
+                self.sheet.draft.min_pause = v;
+                self.sheet.error.setHidden(true);
             }
-            _ => self.show_error(&format!(
-                "Die Mindestpause muss zwischen {} und {} Minuten liegen.",
-                MIN_PAUSE_RANGE.0 / 60,
-                MIN_PAUSE_RANGE.1 / 60
-            )),
+            _ => show_sheet_error(
+                &self.sheet,
+                &format!(
+                    "Die Mindestpause muss zwischen {} und {} Minuten liegen.",
+                    MIN_PAUSE_RANGE.0 / 60,
+                    MIN_PAUSE_RANGE.1 / 60
+                ),
+            ),
         }
+        self.fill_sheet();
     }
 
     fn set_work(&mut self, value: Option<i64>) {
@@ -528,12 +717,219 @@ fn refresh_permission() {
     });
 }
 
+// ---------- Arbeitszeitregeln ----------
+
+/// `39 Std./Woche (Mo–Fr, 7:48 h pro Arbeitstag)  ·  Rahmen 07:00–22:00 Uhr  ·  Pausen ab 15 Min.`
+fn rules_line(r: &WorkRules) -> String {
+    format!(
+        "{} Std./Woche ({}, {} pro Arbeitstag)  ·  Rahmen {}  ·  Pausen ab {} Min.",
+        rules::fmt_hours(r.weekly_target),
+        r.workdays_text(),
+        store::fmt_hm(r.daily_target_workday()),
+        r.frame_text(),
+        r.min_pause / 60
+    )
+}
+
+/// Über der Liste: welcher Stand heute gilt und welcher als nächster geplant ist – mit dem
+/// Tagessoll, das die Liste nicht zeigt (höchstens zwei Zeilen, siehe `build`).
+fn rules_now_text(s: &Settings, today: NaiveDate) -> String {
+    let per_day = |r: &WorkRules| format!("{} pro Arbeitstag ({})", store::fmt_hm(r.daily_target_workday()), r.week_text());
+    let current = s.work.iter().rev().find(|p| p.from.is_none_or(|f| f <= today)).copied().unwrap_or(s.work[0]);
+    let since = current.from.map_or_else(|| "seit Beginn".to_string(), |f| format!("ab {}", fmt_day(f)));
+    let mut text = format!("Heute gilt der Stand {since}: {}.", per_day(&current.rules));
+    if let Some(next) = s.work.iter().find(|p| p.from.is_some_and(|f| f > today)) {
+        text.push_str(&format!("\nGeplant ab {}: {}.", fmt_day(next.from.unwrap_or(today)), per_day(&next.rules)));
+    }
+    text
+}
+
+fn rule_rows(s: &Settings, today: NaiveDate) -> Vec<RuleRow> {
+    let current = s.work.iter().rposition(|p| p.from.is_none_or(|f| f <= today));
+    s.work
+        .iter()
+        .enumerate()
+        .map(|(i, p)| {
+            let r = &p.rules;
+            RuleRow {
+                from: p.from,
+                cells: [
+                    p.from.map_or_else(|| "Beginn".to_string(), fmt_day),
+                    format!("{} Std.", rules::fmt_hours(r.weekly_target)),
+                    r.workdays_text(),
+                    format!("{}–{}", fmt_clock(r.frame_from), fmt_clock(r.frame_to)),
+                    format!("{} Min.", r.min_pause / 60),
+                ],
+                current: current == Some(i),
+                planned: p.from.is_some_and(|f| f > today),
+            }
+        })
+        .collect()
+}
+
+/// Stand der Zeile `row` (`None`: keine Zeile; `Some(None)`: der erste Stand).
+fn row_from(row: NSInteger) -> Option<Option<NaiveDate>> {
+    let row = usize::try_from(row).ok()?;
+    ROWS.with(|r| r.borrow().get(row).map(|x| x.from))
+}
+
+fn rule_cell(column: Option<&str>, row: NSInteger) -> Option<Retained<NSView>> {
+    let mtm = mtm();
+    let i = RULE_COLUMNS.iter().position(|c| Some(c.0) == column)?;
+    ROWS.with(|rows| {
+        let rows = rows.borrow();
+        let r = rows.get(usize::try_from(row).ok()?)?;
+        let text = label(&r.cells[i]);
+        let weight = if r.current { unsafe { NSFontWeightSemibold } } else { unsafe { NSFontWeightRegular } };
+        text.setFont(Some(&NSFont::monospacedDigitSystemFontOfSize_weight(NSFont::systemFontSize(), weight)));
+        if r.planned {
+            text.setTextColor(Some(&NSColor::secondaryLabelColor()));
+        }
+        text.setLineBreakMode(NSLineBreakMode::ByTruncatingTail);
+        let tip = match (r.current, r.planned) {
+            (true, _) => "Gilt heute",
+            (_, true) => "Geplant – gilt ab diesem Tag",
+            _ => "Galt früher",
+        };
+        let cell = NSTableCellView::new(mtm);
+        cell.setToolTip(Some(&ns(tip)));
+        text.setTranslatesAutoresizingMaskIntoConstraints(false);
+        cell.addSubview(&text);
+        text.centerYAnchor().constraintEqualToAnchor(&cell.centerYAnchor()).setActive(true);
+        text.leadingAnchor().constraintEqualToAnchor_constant(&cell.leadingAnchor(), 4.0).setActive(true);
+        text.trailingAnchor().constraintLessThanOrEqualToAnchor_constant(&cell.trailingAnchor(), -2.0).setActive(true);
+        unsafe { cell.setTextField(Some(&text)) };
+        Some(Retained::into_super(cell))
+    })
+}
+
+/// Hinweis im Blatt: bis wann der Stand gilt und ob er rückwirkend ändert (dann `true`:
+/// orange). `editing`/`from` wie in [`Sheet`], `draft` die Regeln im Blatt.
+fn sheet_hint(
+    s: &Settings,
+    editing: Option<Option<NaiveDate>>,
+    from: Option<NaiveDate>,
+    draft: &WorkRules,
+    today: NaiveDate,
+) -> (String, bool) {
+    // Die anderen Stände – ohne den, der gerade bearbeitet wird.
+    let others: Vec<_> = s.work.iter().filter(|p| editing != Some(p.from)).collect();
+    let next = others.iter().filter_map(|p| p.from).find(|f| from.is_none_or(|from| *f > from));
+    let Some(from) = from else {
+        return match next {
+            Some(n) => (
+                format!(
+                    "Gilt für alle Tage vor dem {}. Saldo und Aufzeichnungen dieser Tage ändern sich.",
+                    fmt_day(n)
+                ),
+                true,
+            ),
+            None => ("Gilt für alle Tage. Saldo und Aufzeichnungen ändern sich auch rückwirkend.".to_string(), true),
+        };
+    };
+    let mut parts = Vec::new();
+    parts.push(match next {
+        Some(n) => format!("Gilt vom {} bis {}.", fmt_day(from), fmt_day(n.pred_opt().unwrap_or(n))),
+        None => format!("Gilt ab {}.", fmt_day(from)),
+    });
+    let replaced = others.iter().any(|p| p.from == Some(from));
+    if replaced {
+        parts.push(format!("Ersetzt den vorhandenen Stand ab {}.", fmt_day(from)));
+    }
+    let before = others.iter().rev().find(|p| p.from.is_none_or(|f| f < from)).map(|p| p.rules);
+    if !replaced && before == Some(*draft) {
+        parts.push("Gleicht dem Stand davor – es ändert sich nichts.".to_string());
+    }
+    let past = from < today;
+    if past {
+        parts.push(format!("Rückwirkend: Saldo und Aufzeichnungen ab dem {} ändern sich.", fmt_day(from)));
+    }
+    (parts.join(" "), past || replaced)
+}
+
+fn show_sheet_error(sheet: &Sheet, text: &str) {
+    sheet.error.setStringValue(&ns(text));
+    sheet.error.setHidden(false);
+}
+
+/// Blatt öffnen: für einen neuen Stand (`None`, ab heute mit den Regeln von heute) oder den
+/// vorhandenen ab `Some(from)`.
+fn open_sheet(editing: Option<Option<NaiveDate>>) {
+    let today = today();
+    let windows = with_state(|s| {
+        if s.window.attachedSheet().is_some() {
+            return None;
+        }
+        let existing = editing.and_then(|from| s.settings.work.iter().find(|p| p.from == from).copied());
+        let (date, rules, title) = match (editing, existing) {
+            (Some(None), Some(p)) => (today, p.rules, "Arbeitszeit seit Beginn".to_string()),
+            (Some(Some(from)), Some(p)) => (from, p.rules, format!("Arbeitszeit ab {} bearbeiten", fmt_day(from))),
+            _ => (today, *s.settings.rules(today), "Arbeitszeit ändern".to_string()),
+        };
+        let sh = &mut s.sheet;
+        sh.editing = if existing.is_some() { editing } else { None };
+        sh.draft = rules;
+        sh.title.setStringValue(&ns(&title));
+        sh.valid_from.setDateValue(&day_to_nsdate(date));
+        sh.error.setHidden(true);
+        s.fill_sheet();
+        Some((s.window.clone(), s.sheet.window.clone()))
+    })
+    .flatten();
+    if let Some((window, sheet)) = windows {
+        window.beginSheet_completionHandler(&sheet, None);
+        sheet.makeFirstResponder(None);
+    }
+}
+
+fn close_sheet() {
+    if let Some((window, sheet)) = with_state(|s| (s.window.clone(), s.sheet.window.clone())) {
+        window.endSheet(&sheet);
+        sheet.orderOut(None);
+    }
+}
+
+/// Nachfrage vor dem Löschen des Stands ab `from`.
+fn confirm_delete_rules(from: NaiveDate) {
+    let Some((window, before)) = with_state(|s| {
+        let before = *s.settings.rules(from.pred_opt().unwrap_or(from));
+        (s.window.clone(), before)
+    }) else {
+        return;
+    };
+    if window.attachedSheet().is_some() {
+        return;
+    }
+    let alert = NSAlert::new(mtm());
+    alert.setAlertStyle(NSAlertStyle::Warning);
+    alert.setMessageText(&ns(&format!("Stand ab {} löschen?", fmt_day(from))));
+    let mut info = format!("Ab dem {} gilt dann wieder der Stand davor: {}.", fmt_day(from), rules_line(&before));
+    if from <= today() {
+        info.push_str(&format!(" Saldo und Aufzeichnungen ab dem {} ändern sich.", fmt_day(from)));
+    }
+    alert.setInformativeText(&ns(&info));
+    let delete = alert.addButtonWithTitle(&ns("Löschen"));
+    delete.setHasDestructiveAction(true);
+    // Return bestätigt nicht versehentlich: Standard ist „Abbrechen“.
+    delete.setKeyEquivalent(&ns(""));
+    let cancel = alert.addButtonWithTitle(&ns("Abbrechen"));
+    cancel.setKeyEquivalent(&ns("\r"));
+    let handler = RcBlock::new(move |response: NSModalResponse| {
+        if response != NSAlertFirstButtonReturn {
+            return;
+        }
+        with_state(|s| s.settings.remove_rules(from));
+        save();
+    });
+    alert.beginSheetModalForWindow_completionHandler(&window, Some(&handler));
+}
+
 /// Speichern, Felder angleichen und die App benachrichtigen.
 fn save() {
     let notify = with_state(|s| {
         s.fill();
         let result = match s.db.as_mut() {
-            Some(db) => db.save_settings(&s.settings).map_err(|e| e.to_string()),
+            Some(db) => db.save_settings(&s.settings, today()).map_err(|e| e.to_string()),
             None => Err("Die Datenbank ist nicht geöffnet.".to_string()),
         };
         match result {
@@ -565,7 +961,7 @@ fn caption(text: &str) -> Retained<NSTextField> {
     l
 }
 
-fn time_picker(target: &Controller) -> Retained<NSDatePicker> {
+fn time_picker(target: &Controller, action: Sel) -> Retained<NSDatePicker> {
     let p = NSDatePicker::new(mtm());
     p.setDatePickerStyle(NSDatePickerStyle::TextFieldAndStepper);
     p.setDatePickerElements(NSDatePickerElementFlags::HourMinute);
@@ -574,7 +970,7 @@ fn time_picker(target: &Controller) -> Retained<NSDatePicker> {
     p.setDrawsBackground(true);
     unsafe {
         p.setTarget(Some(target));
-        p.setAction(Some(sel!(frameChanged:)));
+        p.setAction(Some(action));
     }
     p
 }
@@ -712,6 +1108,208 @@ fn toolbar_item(target: &Controller, id: &NSString) -> Option<Retained<NSToolbar
     Some(item)
 }
 
+/// Breite der Liste der Stände (und der Texte darum).
+const RULES_W: f64 = 470.0;
+
+/// Wie [`caption`], aber so breit wie die Liste der Stände.
+fn wide_caption(text: &str) -> Retained<NSTextField> {
+    let l = caption(text);
+    l.setPreferredMaxLayoutWidth(RULES_W);
+    l
+}
+
+/// Liste der Stände in einer Rolle mit fester Größe (gut vier Zeilen).
+fn rules_table(target: &Controller) -> (Retained<NSScrollView>, Retained<NSTableView>) {
+    let mtm = mtm();
+    let table = NSTableView::new(mtm);
+    table.setStyle(NSTableViewStyle::Plain);
+    table.setUsesAlternatingRowBackgroundColors(true);
+    table.setAllowsMultipleSelection(false);
+    table.setAllowsEmptySelection(true);
+    table.setAllowsColumnReordering(false);
+    table.setAllowsColumnResizing(false);
+    table.setRowHeight(20.0);
+    table.setIntercellSpacing(NSSize::new(8.0, 2.0));
+    table.setColumnAutoresizingStyle(NSTableViewColumnAutoresizingStyle::LastColumnOnlyAutoresizingStyle);
+    for (id, title, width) in RULE_COLUMNS {
+        let col = NSTableColumn::initWithIdentifier(NSTableColumn::alloc(mtm), &ns(id));
+        col.setTitle(&ns(title));
+        col.setWidth(width);
+        col.setResizingMask(NSTableColumnResizingOptions::empty());
+        table.addTableColumn(&col);
+    }
+    unsafe {
+        table.setDataSource(Some(ProtocolObject::from_ref(target)));
+        table.setDelegate(Some(ProtocolObject::from_ref(target)));
+        table.setTarget(Some(target));
+        table.setDoubleAction(Some(sel!(rulesDoubleClicked:)));
+    }
+    let scroll = NSScrollView::new(mtm);
+    scroll.setDocumentView(Some(&table));
+    scroll.setHasVerticalScroller(true);
+    scroll.setAutohidesScrollers(true);
+    scroll.setBorderType(NSBorderType::BezelBorder);
+    scroll.setTranslatesAutoresizingMaskIntoConstraints(false);
+    scroll.widthAnchor().constraintEqualToConstant(RULES_W).setActive(true);
+    scroll.heightAnchor().constraintEqualToConstant(116.0).setActive(true);
+    (scroll, table)
+}
+
+/// Das Blatt „Arbeitszeit ändern“ (einmal gebaut, bei jedem Öffnen neu befüllt).
+fn build_sheet(target: &Controller) -> Sheet {
+    let mtm = mtm();
+    let title = label("");
+    title.setFont(Some(&NSFont::boldSystemFontOfSize(NSFont::systemFontSize())));
+    let valid_from = NSDatePicker::new(mtm);
+    valid_from.setDatePickerStyle(NSDatePickerStyle::TextFieldAndStepper);
+    valid_from.setDatePickerElements(NSDatePickerElementFlags::YearMonthDay);
+    valid_from.setLocale(Some(&NSLocale::localeWithLocaleIdentifier(&ns("de_DE"))));
+    valid_from.setBezeled(true);
+    valid_from.setDrawsBackground(true);
+    unsafe {
+        valid_from.setTarget(Some(target));
+        valid_from.setAction(Some(sel!(sheetDateChanged:)));
+    }
+    let begin = label("Beginn");
+    let hint = caption("");
+    let frame_from = time_picker(target, sel!(sheetFrameChanged:));
+    let frame_to = time_picker(target, sel!(sheetFrameChanged:));
+    let weekly = number_field(target, sel!(sheetWeeklyChanged:));
+    let weekly_stepper = stepper(
+        target,
+        sel!(sheetWeeklyStepped:),
+        WEEKLY_RANGE.0 as f64 / 3600.0,
+        WEEKLY_RANGE.1 as f64 / 3600.0,
+        0.5,
+    );
+    let workdays: Vec<Retained<NSButton>> = ["Mo", "Di", "Mi", "Do", "Fr"]
+        .iter()
+        .enumerate()
+        .map(|(bit, name)| {
+            let c = unsafe {
+                NSButton::checkboxWithTitle_target_action(&ns(name), Some(target), Some(sel!(sheetWorkdayChanged:)), mtm)
+            };
+            c.setTag(bit as isize);
+            c
+        })
+        .collect();
+    let daily_note = caption("");
+    let pause = number_field(target, sel!(sheetPauseChanged:));
+    let pause_stepper = stepper(
+        target,
+        sel!(sheetPauseStepped:),
+        (MIN_PAUSE_RANGE.0 / 60) as f64,
+        (MIN_PAUSE_RANGE.1 / 60) as f64,
+        1.0,
+    );
+    let error = caption("");
+    error.setTextColor(Some(&NSColor::systemRedColor()));
+    error.setHidden(true);
+    let cancel = unsafe {
+        NSButton::buttonWithTitle_target_action(&ns("Abbrechen"), Some(target), Some(sel!(sheetCancel:)), mtm)
+    };
+    cancel.setKeyEquivalent(&ns("\u{1b}"));
+    let apply = unsafe {
+        NSButton::buttonWithTitle_target_action(&ns("Übernehmen"), Some(target), Some(sel!(sheetApply:)), mtm)
+    };
+    apply.setKeyEquivalent(&ns("\r"));
+
+    let date_row = hstack(&[&valid_from, &begin]);
+    let weekly_row = hstack(&[&weekly, &weekly_stepper, &label("Stunden pro Woche")]);
+    let day_views: Vec<&NSView> = workdays.iter().map(|c| &***c as &NSView).collect();
+    let days_row = hstack(&day_views);
+    days_row.setSpacing(12.0);
+    let frame_row = hstack(&[&frame_from, &label("bis"), &frame_to, &label("Uhr")]);
+    let pause_row = hstack(&[&pause, &pause_stepper, &label("Minuten")]);
+    let row = |left: Option<&str>, right: &NSView| -> Retained<NSArray<NSView>> {
+        let left = match left {
+            Some(text) => view(&label(text)),
+            None => NSGridCell::emptyContentView(mtm),
+        };
+        NSArray::from_retained_slice(&[left, right.retain()])
+    };
+    let rows = [
+        row(Some("Gültig ab:"), &date_row),
+        row(None, &hint),
+        row(Some("Regelarbeitszeit:"), &weekly_row),
+        row(Some("Arbeitstage:"), &days_row),
+        row(None, &daily_note),
+        row(Some("Arbeitszeitrahmen:"), &frame_row),
+        row(
+            None,
+            &caption("Außerhalb dieses Zeitraums wird weder Arbeitszeit noch eine Pause gezählt."),
+        ),
+        row(Some("Mindestpause:"), &pause_row),
+        row(
+            None,
+            &caption(
+                "Ist der Mac kürzer gesperrt, zählt die Zeit weiter zur Arbeitszeit. \
+                 Nach dem Arbeitszeitgesetz zählen Pausen erst ab 15 Minuten.",
+            ),
+        ),
+    ];
+    let grid = NSGridView::gridViewWithViews(&NSArray::from_retained_slice(&rows), mtm);
+    grid.setRowAlignment(NSGridRowAlignment::FirstBaseline);
+    grid.setColumnSpacing(8.0);
+    grid.setRowSpacing(4.0);
+    grid.columnAtIndex(0).setXPlacement(NSGridCellPlacement::Trailing);
+    for r in [2, 5, 7] {
+        grid.rowAtIndex(r).setTopPadding(14.0);
+    }
+    // Knöpfe rechts, wie in Blättern üblich
+    let buttons = NSStackView::new(mtm);
+    buttons.setOrientation(NSUserInterfaceLayoutOrientation::Horizontal);
+    buttons.setSpacing(10.0);
+    buttons.addView_inGravity(&cancel, NSStackViewGravity::Trailing);
+    buttons.addView_inGravity(&apply, NSStackViewGravity::Trailing);
+    let column = NSStackView::new(mtm);
+    column.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
+    column.setAlignment(NSLayoutAttribute::Leading);
+    column.setSpacing(14.0);
+    for v in [&*title as &NSView, &grid, &error, &buttons] {
+        column.addArrangedSubview(v);
+    }
+    column.setCustomSpacing_afterView(10.0, &grid);
+    buttons.widthAnchor().constraintEqualToAnchor(&column.widthAnchor()).setActive(true);
+    column.setTranslatesAutoresizingMaskIntoConstraints(false);
+    let size = column.fittingSize();
+    let (w, h) = (size.width + 40.0, size.height + 40.0);
+    let window = unsafe {
+        NSWindow::initWithContentRect_styleMask_backing_defer(
+            NSWindow::alloc(mtm),
+            NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h)),
+            NSWindowStyleMask::Titled,
+            NSBackingStoreType::Buffered,
+            false,
+        )
+    };
+    unsafe { window.setReleasedWhenClosed(false) };
+    let root = window.contentView().expect("contentView");
+    root.addSubview(&column);
+    column.leadingAnchor().constraintEqualToAnchor_constant(&root.leadingAnchor(), 20.0).setActive(true);
+    column.trailingAnchor().constraintEqualToAnchor_constant(&root.trailingAnchor(), -20.0).setActive(true);
+    column.topAnchor().constraintEqualToAnchor_constant(&root.topAnchor(), 20.0).setActive(true);
+    column.bottomAnchor().constraintEqualToAnchor_constant(&root.bottomAnchor(), -20.0).setActive(true);
+    Sheet {
+        window,
+        title,
+        editing: None,
+        draft: WorkRules::DEFAULT,
+        valid_from,
+        begin,
+        hint,
+        frame_from,
+        frame_to,
+        weekly,
+        weekly_stepper,
+        workdays,
+        daily_note,
+        pause,
+        pause_stepper,
+        error,
+    }
+}
+
 fn build(on_change: fn()) -> State {
     let mtm = mtm();
     let controller = Controller::new(mtm);
@@ -740,15 +1338,6 @@ fn build(on_change: fn()) -> State {
     let checkbox = |title: &str, action: Sel| unsafe {
         NSButton::checkboxWithTitle_target_action(&ns(title), Some(target), Some(action), mtm)
     };
-    let workdays: Vec<Retained<NSButton>> = ["Mo", "Di", "Mi", "Do", "Fr"]
-        .iter()
-        .enumerate()
-        .map(|(bit, name)| {
-            let c = checkbox(name, sel!(workdayChanged:));
-            c.setTag(bit as isize);
-            c
-        })
-        .collect();
     let account_check = checkbox("Zählt erst ab", sel!(accountFromChanged:));
     let account_date = NSDatePicker::new(mtm);
     account_date.setDatePickerStyle(NSDatePickerStyle::TextFieldAndStepper);
@@ -785,24 +1374,19 @@ fn build(on_change: fn()) -> State {
     notify_button.setFont(Some(&NSFont::systemFontOfSize(NSFont::smallSystemFontSize())));
     notify_button.setHidden(true);
     let notify_note = caption("");
-    let frame_from = time_picker(target);
-    let frame_to = time_picker(target);
-    let weekly = number_field(target, sel!(weeklyChanged:));
-    let weekly_stepper = stepper(
-        target,
-        sel!(weeklyStepped:),
-        WEEKLY_RANGE.0 as f64 / 3600.0,
-        WEEKLY_RANGE.1 as f64 / 3600.0,
-        0.5,
-    );
-    let pause = number_field(target, sel!(pauseChanged:));
-    let pause_stepper = stepper(
-        target,
-        sel!(pauseStepped:),
-        (MIN_PAUSE_RANGE.0 / 60) as f64,
-        (MIN_PAUSE_RANGE.1 / 60) as f64,
-        1.0,
-    );
+    // Zwei Zeilen Platz (heute und geplant), auch wenn beim Aufbau noch nichts darin steht.
+    let rules_now = wide_caption("Heute\nGeplant");
+    rules_now.setTextColor(Some(&NSColor::labelColor()));
+    let (rules_scroll, rules_table) = rules_table(target);
+    let button = |title: &str, action: Sel| unsafe {
+        NSButton::buttonWithTitle_target_action(&ns(title), Some(target), Some(action), mtm)
+    };
+    let rules_new = button("Neu …", sel!(newRules:));
+    rules_new.setToolTip(Some(&ns("Neuen Stand der Arbeitszeitregeln anlegen, gültig ab einem Datum")));
+    let rules_edit = button("Bearbeiten …", sel!(editRules:));
+    let rules_delete = button("Löschen", sel!(deleteRules:));
+    rules_delete.setToolTip(Some(&ns("Ab dem Datum gilt wieder der Stand davor")));
+    let sheet = build_sheet(target);
     let work = number_field(target, sel!(workChanged:));
     let work_stepper = stepper(
         target,
@@ -811,7 +1395,6 @@ fn build(on_change: fn()) -> State {
         (MIN_WORK_RANGE.1 / 60) as f64,
         WORK_STEP as f64,
     );
-    let daily_note = caption("");
     let icon_popup = icon_popup(target);
     let (preview_row, icon_preview) = icon_preview();
     let error = caption("");
@@ -828,16 +1411,11 @@ fn build(on_change: fn()) -> State {
 
     let notify_row = hstack(&[&notify_icon, &notify_status, &notify_button]);
     notify_row.setCustomSpacing_afterView(10.0, &notify_status);
-    let frame_row = hstack(&[&frame_from, &label("bis"), &frame_to, &label("Uhr")]);
-    let weekly_row = hstack(&[&weekly, &weekly_stepper, &label("Stunden pro Woche")]);
-    let pause_row = hstack(&[&pause, &pause_stepper, &label("Minuten")]);
+    let rules_buttons = hstack(&[&rules_new, &rules_edit, &rules_delete]);
     // „Arbeit ohne Mac: mindestens 15 Minuten“ – ohne das Wort wäre nicht klar, was die Zahl ist.
     let work_row = hstack(&[&label("mindestens"), &work, &work_stepper, &label("Minuten")]);
     let bar_row = hstack(&[&icon_popup, &show_time]);
     bar_row.setSpacing(14.0);
-    let day_views: Vec<&NSView> = workdays.iter().map(|c| &***c as &NSView).collect();
-    let days_row = hstack(&day_views);
-    days_row.setSpacing(12.0);
     let account_row = hstack(&[&account_check, &account_date]);
     let carry_row = hstack(&[&carry, &label("Std.")]);
     let idle_row = hstack(&[&idle_check, &idle, &idle_stepper, &label("Minuten ohne Eingabe")]);
@@ -873,22 +1451,16 @@ fn build(on_change: fn()) -> State {
         (
             "Arbeitszeit",
             vec![
-                row(Some("Arbeitszeitrahmen:"), &frame_row),
+                row(Some("Regeln:"), &rules_now),
+                row(None, &rules_scroll),
+                row(None, &rules_buttons),
                 row(
                     None,
-                    &caption(
-                        "Gilt an jedem Tag. Außerhalb dieses Zeitraums wird weder Arbeitszeit noch eine Pause \
-                         gezählt; Arbeit am Wochenende zählt als Mehrarbeit.",
-                    ),
-                ),
-                row(Some("Regelarbeitszeit:"), &weekly_row),
-                row(Some("Arbeitstage:"), &days_row),
-                row(None, &daily_note),
-                row(
-                    None,
-                    &caption(
-                        "Die Regelarbeitszeit verteilt sich gleichmäßig auf die Arbeitstage. An den \
-                         übrigen Tagen gibt es kein Soll – Arbeit dort zählt als Mehrarbeit.",
+                    &wide_caption(
+                        "Jeder Stand gilt ab seinem Datum bis zum nächsten – eine Änderung rechnet frühere \
+                         Tage nicht neu. Die Regelarbeitszeit verteilt sich gleichmäßig auf die \
+                         Arbeitstage; an den übrigen Tagen gibt es kein Soll. Außerhalb des Rahmens wird \
+                         weder Arbeitszeit noch eine Pause gezählt.",
                     ),
                 ),
                 row(Some("Zeitkonto:"), &account_row),
@@ -901,20 +1473,12 @@ fn build(on_change: fn()) -> State {
                     ),
                 ),
             ],
-            vec![2, 3, 6],
+            vec![1, 4],
             None,
         ),
         (
             "Erfassung",
             vec![
-                row(Some("Mindestpause:"), &pause_row),
-                row(
-                    None,
-                    &caption(
-                        "Ist der Mac kürzer gesperrt, zählt die Zeit weiter zur Arbeitszeit. \
-                         Nach dem Arbeitszeitgesetz zählen Pausen erst ab 15 Minuten.",
-                    ),
-                ),
                 row(Some("Arbeit ohne Mac:"), &work_row),
                 row(
                     None,
@@ -951,7 +1515,7 @@ fn build(on_change: fn()) -> State {
                     ),
                 ),
             ],
-            vec![2, 4, 6, 8],
+            vec![2, 4, 6],
             None,
         ),
         (
@@ -1060,7 +1624,7 @@ fn build(on_change: fn()) -> State {
     let (db, settings, err) = match store::Db::open() {
         Ok(db) => {
             let s = db.load_settings();
-            (Some(db), s.as_ref().copied().unwrap_or_default(), s.err().map(|e| e.to_string()))
+            (Some(db), s.as_ref().cloned().unwrap_or_default(), s.err().map(|e| e.to_string()))
         }
         Err(e) => (None, Settings::default(), Some(e.to_string())),
     };
@@ -1074,20 +1638,17 @@ fn build(on_change: fn()) -> State {
         notify_status,
         notify_button,
         notify_note,
-        frame_from,
-        frame_to,
-        weekly,
-        weekly_stepper,
-        pause,
-        pause_stepper,
+        rules_now,
+        rules_table,
+        rules_edit,
+        rules_delete,
+        sheet,
         work,
         work_stepper,
-        daily_note,
         icon_popup,
         icon_preview,
         show_time,
         hotkeys,
-        workdays,
         account_check,
         account_date,
         carry,
@@ -1142,7 +1703,9 @@ pub fn show(on_change: fn()) {
 /// speichern und beenden (`Tagwerk --settings-screenshot <png>`; Reiter über
 /// `TAGWERK_SETTINGS_TAB=0|1|2|3`, Symbolsatz zur Ansicht
 /// über `TAGWERK_ICON_SET=0|1|2`, Erscheinungsbild über `TAGWERK_APPEARANCE=dark`, Stand der
-/// Mitteilungen über `TAGWERK_NOTIFICATIONS=allowed|denied|hidden|undetermined`).
+/// Mitteilungen über `TAGWERK_NOTIFICATIONS=allowed|denied|hidden|undetermined`; mit
+/// `TAGWERK_SETTINGS_SHEET=new|first|<Zeile>` stattdessen das Blatt „Arbeitszeit ändern“ für
+/// einen neuen Stand, den ersten oder den in der Zeile der Liste).
 /// Es wird nichts gespeichert.
 pub fn screenshot(path: &std::path::Path) -> Result<(), String> {
     let mtm = MainThreadMarker::new().ok_or("Das Fenster muss im Hauptthread laufen.")?;
@@ -1174,7 +1737,17 @@ pub fn screenshot(path: &std::path::Path) -> Result<(), String> {
         }
         s.window.orderFront(None);
     });
-    let window = with_state(|s| s.window.clone()).ok_or("kein Fenster")?;
+    let sheet = std::env::var("TAGWERK_SETTINGS_SHEET").ok();
+    if let Some(which) = &sheet {
+        let editing = match which.as_str() {
+            "new" => None,
+            "first" => Some(None),
+            row => Some(row_from(row.parse().unwrap_or(-1)).ok_or("keine solche Zeile")?),
+        };
+        open_sheet(editing);
+    }
+    let window = with_state(|s| if sheet.is_some() { s.sheet.window.clone() } else { s.window.clone() })
+        .ok_or("kein Fenster")?;
     // Das Fenster, wie es auf dem Bildschirm steht (mit Reiterleiste) – dafür muss es erst
     // einmal gezeichnet sein. Nur wenn macOS das nicht liefert, die Ansicht selbst gezeichnet.
     objc2_foundation::NSRunLoop::mainRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.8));
@@ -1196,6 +1769,56 @@ pub fn screenshot(path: &std::path::Path) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn date(d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(2026, 11, d).unwrap()
+    }
+
+    #[test]
+    fn sheet_explains_what_a_change_does() {
+        let today = date(21);
+        let mut s = Settings::default();
+        let d = WorkRules::DEFAULT;
+        let part = WorkRules { weekly_target: 32 * 3600, ..d };
+        // Neuer Stand ab heute: keine Warnung.
+        assert_eq!(sheet_hint(&s, None, Some(today), &part, today), ("Gilt ab 21.11.2026.".to_string(), false));
+        // Ohne Änderung
+        assert_eq!(
+            sheet_hint(&s, None, Some(today), &d, today).0,
+            "Gilt ab 21.11.2026. Gleicht dem Stand davor – es ändert sich nichts."
+        );
+        // Rückwirkend: orange
+        let (text, warn) = sheet_hint(&s, None, Some(date(2)), &part, today);
+        assert!(warn && text.ends_with("Rückwirkend: Saldo und Aufzeichnungen ab dem 02.11.2026 ändern sich."), "{text}");
+        // Mit einem späteren Stand gilt der neue nur bis davor; derselbe Tag ersetzt ihn.
+        s.set_rules(Some(date(30)), part, None);
+        assert_eq!(sheet_hint(&s, None, Some(date(23)), &part, today).0, "Gilt vom 23.11.2026 bis 29.11.2026.");
+        let (text, warn) = sheet_hint(&s, None, Some(date(30)), &d, today);
+        assert!(warn && text.contains("Ersetzt den vorhandenen Stand ab 30.11.2026."), "{text}");
+        // Den Stand selbst bearbeiten ersetzt nichts.
+        assert_eq!(sheet_hint(&s, Some(Some(date(30))), Some(date(30)), &part, today).0, "Gilt ab 30.11.2026.");
+        // Der erste Stand gilt bis zum nächsten.
+        assert_eq!(
+            sheet_hint(&s, Some(None), None, &d, today),
+            ("Gilt für alle Tage vor dem 30.11.2026. Saldo und Aufzeichnungen dieser Tage ändern sich.".to_string(), true)
+        );
+    }
+
+    #[test]
+    fn rule_rows_mark_today_and_planned() {
+        let mut s = Settings::default();
+        s.set_rules(Some(date(2)), WorkRules { weekly_target: 38 * 3600, ..WorkRules::DEFAULT }, None);
+        s.set_rules(Some(date(30)), WorkRules { workdays: 0b0_1111, ..WorkRules::DEFAULT }, None);
+        let rows = rule_rows(&s, date(21));
+        let flags: Vec<_> = rows.iter().map(|r| (r.cells[0].as_str(), r.current, r.planned)).collect();
+        assert_eq!(flags, vec![("Beginn", false, false), ("02.11.2026", true, false), ("30.11.2026", false, true)]);
+        assert_eq!(rows[1].cells[1..], ["38 Std.", "Mo–Fr", "07:00–22:00", "15 Min."].map(String::from));
+        assert_eq!(
+            rules_now_text(&s, date(21)),
+            "Heute gilt der Stand ab 02.11.2026: 7:36 h pro Arbeitstag (5-Tage-Woche).\n\
+             Geplant ab 30.11.2026: 9:45 h pro Arbeitstag (4-Tage-Woche)."
+        );
+    }
 
     #[test]
     fn work_stepper_moves_over_round_values() {

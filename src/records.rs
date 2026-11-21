@@ -1025,7 +1025,7 @@ define_class!(
             let (times, min) = model(|m| {
                 (
                     m.inspector.as_ref().map(|i| (picker_secs(&i.break_from), picker_secs(&i.break_to))),
-                    m.settings.min_pause,
+                    m.inspector.as_ref().map_or(0, |i| m.settings.rules(i.date).min_pause),
                 )
             });
             match times {
@@ -1064,7 +1064,7 @@ define_class!(
                     // Kurze Lücken zu benachbarter Arbeit ohne Mac gehören zum neuen Abschnitt.
                     let (span, hint) = model(|m| {
                         let date = m.inspector.as_ref()?.date;
-                        let min = m.settings.min_pause;
+                        let min = m.settings.rules(date).min_pause;
                         let j = m.day(date)?.join_work_gaps(from, to, min);
                         Some((j.span, j.note(min)))
                     })
@@ -1403,8 +1403,8 @@ fn refresh_summary() {
     let ui = ui();
     let t = now();
     let today = t.date();
-    let (texts, status, count, error, rules_text) = model(|m| {
-        let st = m.settings;
+    let (texts, status) = model(|m| {
+        let st = m.settings.clone();
         let recs: Vec<DayRecord> = m.records().into_iter().filter(|r| r.work_secs > 0).collect();
         // (Arbeit, Pausen, Tage, Soll)
         let sum = |f: &dyn Fn(NaiveDate) -> bool| {
@@ -1462,12 +1462,7 @@ fn refresh_summary() {
                 detail_balance: None,
             },
         ];
-        // Mit Filter: wie viele der Tage die Tabelle zeigt.
-        let shown = m.filter.is_active().then(|| {
-            let rows = m.rows.iter().filter(|r| matches!(r, Row::Day { .. })).count();
-            format!("Filter: {rows} von {}", plural(m.records().len(), "Tag", "Tagen"))
-        });
-        (texts, m.status, shown.unwrap_or_else(|| format!("{} erfasst", plural(recs.len(), "Arbeitstag", "Arbeitstage"))), m.error.clone(), st.summary())
+        (texts, m.status)
     });
     let detail_font = font_digits(small_size(), font_regular());
     for ((value, detail), card) in ui.cards.iter().zip(texts) {
@@ -1492,11 +1487,38 @@ fn refresh_summary() {
         None => "Menüleisten-App nicht aktiv".to_string(),
     };
     ui.window.setSubtitle(&ns(&subtitle));
-    let footer = match error {
-        Some(e) => e,
-        None => format!("{count}  ·  {rules_text}"),
+    refresh_footer();
+}
+
+/// Fußzeile neu setzen – nach jeder Änderung und wenn ein anderer Tag gewählt wird.
+fn refresh_footer() {
+    let text = model(|m| footer_text(m, now().date()));
+    ui().footer.setStringValue(&ns(&text));
+}
+
+/// Fußzeile: wie viele Arbeitstage erfasst sind (mit Filter: wie viele die Tabelle zeigt)
+/// und die Arbeitszeitregeln des gewählten Tages – ohne Auswahl die von heute.
+fn footer_text(m: &Model, today: NaiveDate) -> String {
+    if let Some(e) = &m.error {
+        return e.clone();
+    }
+    let count = if m.filter.is_active() {
+        let rows = m.rows.iter().filter(|r| matches!(r, Row::Day { .. })).count();
+        format!("Filter: {rows} von {}", plural(m.records().len(), "Tag", "Tagen"))
+    } else {
+        let worked = m.records().iter().filter(|r| r.work_secs > 0).count();
+        format!("{} erfasst", plural(worked, "Arbeitstag", "Arbeitstage"))
     };
-    ui.footer.setStringValue(&ns(&footer));
+    format!("{count}  ·  {}", rules_footer(&m.settings, m.selected, today))
+}
+
+/// Die Arbeitszeitregeln für die Fußzeile: die des Tages `selected`, mit Datum davor, wenn
+/// es nicht heute ist (ohne Auswahl die von heute).
+fn rules_footer(s: &Settings, selected: Option<NaiveDate>, today: NaiveDate) -> String {
+    match selected.filter(|d| *d != today) {
+        Some(d) => format!("Regeln am {}: {}", rules::fmt_day(d), s.rules(d).summary()),
+        None => s.rules(today).summary(),
+    }
 }
 
 /// Inhalt einer Karte der Übersicht.
@@ -1768,7 +1790,7 @@ fn saved(rebuild: bool) {
         if !rebuild {
             // Eingabe läuft weiter: Felder stehen lassen, nur die Zahlen aktualisieren.
             if let Some(date) = m.selected {
-                m.built = Some((date, m.day(date).cloned(), m.settings));
+                m.built = Some((date, m.day(date).cloned(), m.settings.clone()));
             }
         }
     });
@@ -1808,6 +1830,7 @@ fn step_history(redo: bool) {
                 Mode::Days => go_to(date),
                 Mode::Week => {
                     model(|m| m.selected = Some(date));
+                    refresh_footer();
                     refresh_week(Some(date));
                 }
             }
@@ -1895,9 +1918,14 @@ fn day_stats(date: NaiveDate, day: Option<&Day>, days: &[Day], settings: &Settin
 /// gerade kein Feld im Inspektor bearbeitet wird.
 fn refresh_inspector(force: bool) {
     let ui = ui();
+    // Die Fußzeile nennt die Regeln des gewählten Tages (ohne `force` hat sich die Auswahl
+    // nicht geändert, und `refresh_summary` setzt sie ohnehin).
+    if force {
+        refresh_footer();
+    }
     let (selected, day, unchanged) = model(|m| {
         let day = m.selected.and_then(|d| m.day(d).cloned());
-        let unchanged = m.selected.is_some_and(|d| m.built.as_ref() == Some(&(d, day.clone(), m.settings)));
+        let unchanged = m.selected.is_some_and(|d| m.built.as_ref() == Some(&(d, day.clone(), m.settings.clone())));
         (m.selected, day, unchanged)
     });
     if !force {
@@ -1951,7 +1979,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         return;
     };
     let t = now();
-    let (settings, warnings) = model(|m| (m.settings, rules::day_warnings(&m.days, date, &m.settings)));
+    let (settings, warnings) = model(|m| (m.settings.clone(), rules::day_warnings(&m.days, date, &m.settings)));
     let rec = day.as_ref().and_then(|d| d.record(&settings));
     let is_today = date == t.date();
 
@@ -2146,7 +2174,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         &format!(
             "Sperren ab {} Min. gelten automatisch als Pause, kürzere zählen zur Arbeitszeit. \
              Hier lassen sich zusätzliche Pausen eintragen.",
-            settings.min_pause / 60
+            settings.rules(date).min_pause / 60
         ),
     );
     let breaks = day.as_ref().map(|d| d.breaks.clone()).unwrap_or_default();
@@ -2190,7 +2218,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     let break_error = inspector_error_label();
     stack.addArrangedSubview(&break_error);
     pin_width(&break_error, stack, 40.0);
-    let (bf, bt) = (12 * 3600, 12 * 3600 + settings.min_pause.max(30 * 60));
+    let (bf, bt) = (12 * 3600, 12 * 3600 + settings.rules(date).min_pause.max(30 * 60));
     let break_from = time_picker(date, bf, sel!(exportRange:), target);
     let break_to = time_picker(date, bt, sel!(exportRange:), target);
     // Keine Aktion beim Ändern – übernommen wird erst mit „Hinzufügen“.
@@ -2300,7 +2328,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         Some(&end_note),
         &format!(
             "Zeiten, in denen der Mac entsperrt war. Gezählt wird nur im Arbeitszeitrahmen ({}).",
-            settings.frame_text()
+            settings.rules(date).frame_text()
         ),
     );
     let periods: Vec<Span> = day.as_ref().map(|d| d.periods.clone()).unwrap_or_default();
@@ -2656,7 +2684,7 @@ fn week_from_model() {
 fn model_snapshot() -> week_view::Snapshot {
     model(|m| week_view::Snapshot {
         days: m.days.clone(),
-        settings: m.settings,
+        settings: m.settings.clone(),
         now: now(),
         running: matches!(m.status, Some(Status::Running | Status::Away(..))),
     })
@@ -3019,7 +3047,7 @@ fn export_finished(response: NSModalResponse) {
         // Alle Tage: der Vortag für die Ruhezeit am ersten Tag, der erste erfasste Tag für das
         // Soll der Arbeitstage ohne Eintrag.
         let days = db.load().map_err(|e| format!("Lesen fehlgeschlagen: {e}"))?;
-        Ok((days, m.settings))
+        Ok((days, m.settings.clone()))
     });
     // Außerhalb des Modells: Das PDF entsteht über das Drucksystem.
     let result = loaded.and_then(|(days, settings)| {
@@ -3864,6 +3892,21 @@ mod tests {
 
     fn step(name: &'static str, d: u32, start: Option<i64>) -> Step {
         Step { name, date: date(d), before: Corrections { start, ..Corrections::default() } }
+    }
+
+    #[test]
+    fn footer_names_the_rules_of_the_selected_day() {
+        let date = |d| NaiveDate::from_ymd_opt(2026, 11, d).unwrap();
+        let mut s = Settings::default();
+        s.set_rules(Some(date(16)), rules::WorkRules { weekly_target: 32 * 3600, ..Default::default() }, None);
+        let today = date(21);
+        let now = s.rules(today).summary();
+        assert!(now.contains("32 Std./Woche"), "{now}");
+        assert_eq!(rules_footer(&s, None, today), now);
+        assert_eq!(rules_footer(&s, Some(today), today), now);
+        let before = rules_footer(&s, Some(date(13)), today);
+        assert_eq!(before, format!("Regeln am 13.11.2026: {}", rules::WorkRules::DEFAULT.summary()));
+        assert!(before.contains("39 Std./Woche"), "{before}");
     }
 
     #[test]

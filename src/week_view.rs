@@ -28,7 +28,7 @@
 use crate::day::{fmt_clock, secs_of, Absence, AbsenceKind, Activity, Day, FreeDay, Span, DAY_END};
 use crate::palette;
 use crate::records;
-use crate::rules::{self, Settings, Warning};
+use crate::rules::{self, Settings, Warning, WorkRules};
 use crate::store;
 use block2::RcBlock;
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime};
@@ -206,11 +206,18 @@ fn hour_range(s: &Settings, cols: &[Column], now: Option<i64>, compact: bool) ->
         let h0 = (from / 3600).clamp(0, 23);
         (h0, ((to + 3599) / 3600).clamp(h0 + 1, 24))
     };
-    let (frame0, frame1) = hours(s.frame_from, s.frame_to);
-    let (Some(first), Some(last), true) = (first, last, compact) else {
-        return hours(first.map_or(s.frame_from, |f| f.min(s.frame_from)), last.map_or(s.frame_to, |l| l.max(s.frame_to)));
+    // Wechselt der Rahmen in der Woche, zählt der weiteste (ohne Spalten: der neueste Stand).
+    let rules: Vec<&WorkRules> = match cols {
+        [] => vec![s.rules(NaiveDate::MAX)],
+        _ => cols.iter().map(|c| s.rules(c.date)).collect(),
     };
-    let now = now.map(|n| n.clamp(s.frame_from, s.frame_to));
+    let frame_from = rules.iter().map(|r| r.frame_from).min().unwrap_or(WorkRules::DEFAULT.frame_from);
+    let frame_to = rules.iter().map(|r| r.frame_to).max().unwrap_or(WorkRules::DEFAULT.frame_to);
+    let (frame0, frame1) = hours(frame_from, frame_to);
+    let (Some(first), Some(last), true) = (first, last, compact) else {
+        return hours(first.map_or(frame_from, |f| f.min(frame_from)), last.map_or(frame_to, |l| l.max(frame_to)));
+    };
+    let now = now.map(|n| n.clamp(frame_from, frame_to));
     let (used0, used1) = hours(now.map_or(first, |n| n.min(first)), now.map_or(last, |n| n.max(last)));
     // Eine Stunde Luft, aber nicht über den Rahmen hinaus (außer die Arbeit liegt dort).
     let mut h0 = (used0 - 1).max(frame0.min(used0));
@@ -337,7 +344,8 @@ fn edges(day: &Day, s: &Settings, work: &[Block]) -> Option<Edges> {
 /// ohne Mac gearbeitet wurde.
 fn notes(day: &Day, s: &Settings, sp: Span, first: bool, last: bool) -> Vec<String> {
     let mut out = Vec::new();
-    if first && day.start.is_some_and(|x| x.clamp(s.frame_from, s.frame_to) == sp.from) {
+    let r = s.rules(day.date);
+    if first && day.start.is_some_and(|x| x.clamp(r.frame_from, r.frame_to) == sp.from) {
         out.push("Arbeitsbeginn manuell festgelegt".to_string());
     }
     if day.breaks.iter().any(|b| b.to == sp.from) {
@@ -350,7 +358,7 @@ fn notes(day: &Day, s: &Settings, sp: Span, first: bool, last: bool) -> Vec<Stri
         let note = if block.note.is_empty() { String::new() } else { format!(" ({})", block.note) };
         out.push(format!("ohne Mac gearbeitet {} – {}{note}", fmt_clock(w.from), fmt_clock(w.to)));
     }
-    if last && day.end.is_some_and(|x| x.clamp(s.frame_from, s.frame_to) == sp.to) {
+    if last && day.end.is_some_and(|x| x.clamp(r.frame_from, r.frame_to) == sp.to) {
         out.push("Feierabend manuell festgelegt".to_string());
     }
     out
@@ -1272,7 +1280,7 @@ fn bounds_editable() -> bool {
 /// Bereich, in dem sich `bound` verschieben lässt: im Arbeitszeitrahmen (nur dort zählt
 /// Arbeit) und im sichtbaren Raster `grid`, mindestens [`MIN_DAY`] vom anderen Ende entfernt,
 /// heute höchstens bis jetzt (`limit`, siehe [`free_limit`]). Auf ganze Minuten.
-fn drag_limits(e: &Edges, bound: Bound, s: &Settings, limit: Option<i64>, grid: (i64, i64)) -> Option<(i64, i64)> {
+fn drag_limits(e: &Edges, bound: Bound, s: &WorkRules, limit: Option<i64>, grid: (i64, i64)) -> Option<(i64, i64)> {
     let limit = limit?;
     let (lo, hi) = match bound {
         Bound::Start => (s.frame_from.max(grid.0), (e.end - MIN_DAY).min(s.frame_to).min(limit)),
@@ -1362,11 +1370,11 @@ fn edge_rects(geo: &Geo, d: &Data) -> Vec<(usize, Bound, NSRect)> {
         let Some(e) = c.edges.filter(|_| !c.locked) else { continue };
         let limit = free_limit(c.date, snap.now);
         let (x, w) = (geo.x(i) + 3.0, geo.col_w(i) - 6.0);
-        if drag_limits(&e, Bound::Start, &snap.settings, limit, grid).is_some() {
+        if drag_limits(&e, Bound::Start, snap.settings.rules(c.date), limit, grid).is_some() {
             let top = geo.y(e.start) + 0.5;
             out.push((i, Bound::Start, NSRect::new(NSPoint::new(x, top - EDGE_OUT), NSSize::new(w, EDGE_OUT + EDGE_IN))));
         }
-        if !e.running && drag_limits(&e, Bound::End, &snap.settings, limit, grid).is_some() {
+        if !e.running && drag_limits(&e, Bound::End, snap.settings.rules(c.date), limit, grid).is_some() {
             let bottom = geo.y(e.end) - 0.5;
             out.push((i, Bound::End, NSRect::new(NSPoint::new(x, bottom - EDGE_IN), NSSize::new(w, EDGE_IN + EDGE_OUT))));
         }
@@ -1446,12 +1454,12 @@ fn drag_moved(view: &WeekView, p: NSPoint, fine: bool) {
     let snapped = DATA.with(|d| {
         let mut d = d.try_borrow_mut().ok()?;
         let geo = Geo::new(view.bounds(), &d);
-        let (settings, now) = d.snap.as_ref().map(|s| (s.settings, s.now))?;
+        let (settings, now) = d.snap.as_ref().map(|s| (s.settings.clone(), s.now))?;
         DRAG.with(|g| {
             let mut g = g.borrow_mut();
             let g = g.as_mut()?;
             let limit = free_limit(g.date, now);
-            let limits = drag_limits(&g.edges, g.bound, &settings, limit, (geo.h0 * 3600, geo.h1 * 3600))?;
+            let limits = drag_limits(&g.edges, g.bound, settings.rules(g.date), limit, (geo.h0 * 3600, geo.h1 * 3600))?;
             let magnet = (MAGNET / geo.hour_h * 3600.0) as i64;
             let (at, snapped) = drag_value(geo.secs_raw(p.y - g.offset), g.edges.get(g.bound).1, magnet, fine, limits);
             let newly = snapped && !g.snapped;
@@ -1542,7 +1550,7 @@ fn nudge(date: NaiveDate, bound: Bound, later: bool) -> bool {
         let d = d.try_borrow().ok()?;
         let snap = d.snap.as_ref()?;
         let e = d.cols.iter().find(|c| c.date == date)?.edges?;
-        let limits = drag_limits(&e, bound, &snap.settings, free_limit(date, snap.now), (0, DAY_END))?;
+        let limits = drag_limits(&e, bound, snap.settings.rules(date), free_limit(date, snap.now), (0, DAY_END))?;
         Some((e, limits))
     });
     let Some((e, (lo, hi))) = found else { return false };
@@ -1822,7 +1830,7 @@ fn show_add_work(date: NaiveDate, preset: Span, error: Option<(&str, Span, Activ
             .with(|d| {
                 let d = d.try_borrow().ok()?;
                 let snap = d.snap.as_ref()?;
-                let min = snap.settings.min_pause;
+                let min = snap.settings.rules(date).min_pause;
                 let j = snap.days.iter().find(|x| x.date == date)?.join_work_gaps(f, t, min);
                 Some((j.span, j.note(min)))
             })
@@ -2593,7 +2601,8 @@ fn draw(
         if !is_workday(c.date) {
             fill(NSRect::new(NSPoint::new(x, HEADER_H), NSSize::new(geo.col_w(i), geo.h - HEADER_H)), &shade);
         } else if let Some(s) = &d.snap {
-            for (a, b) in [(geo.h0 * 3600, s.settings.frame_from), (s.settings.frame_to, geo.h1 * 3600)] {
+            let r = s.settings.rules(c.date);
+            for (a, b) in [(geo.h0 * 3600, r.frame_from), (r.frame_to, geo.h1 * 3600)] {
                 if b > a {
                     let (ya, yb) = (geo.y(a), geo.y(b));
                     fill(NSRect::new(NSPoint::new(x, ya), NSSize::new(geo.col_w(i), yb - ya)), &shade);
@@ -2720,7 +2729,8 @@ fn draw(
         let band_attrs = attrs(&font(11.0, semibold), &teal, NSTextAlignment::Center);
         for (i, c) in d.cols.iter().enumerate() {
             let Some((short, long)) = &c.absence else { continue };
-            let (from, to) = (s.settings.frame_from.max(geo.h0 * 3600), s.settings.frame_to.min(geo.h1 * 3600));
+            let r = s.settings.rules(c.date);
+            let (from, to) = (r.frame_from.max(geo.h0 * 3600), r.frame_to.min(geo.h1 * 3600));
             if to <= from {
                 continue;
             }
@@ -3358,7 +3368,7 @@ mod tests {
     #[test]
     fn hours_cover_frame_and_outside_work() {
         assert_eq!(hour_range(&Settings::default(), &[], None, false), (7, 22));
-        let s = Settings { frame_from: h(6, 30), frame_to: h(18, 15), ..Settings::default() };
+        let s = Settings::default().with_rules(WorkRules { frame_from: h(6, 30), frame_to: h(18, 15), ..WorkRules::DEFAULT });
         assert_eq!(hour_range(&s, &[], None, false), (6, 19));
         // Ohne Arbeit zeigt auch das kompakte Raster den ganzen Rahmen.
         assert_eq!(hour_range(&s, &[], Some(h(10, 0)), true), (6, 19));
@@ -3425,7 +3435,7 @@ mod tests {
         let cols = columns(&snap(vec![sat], date(2026, 11, 22).and_hms_opt(9, 0, 0).unwrap(), false), date(2026, 11, 16));
         assert_eq!(column_weights(&s, &cols), [1.0, 1.0, 1.0, 1.0, 1.0, 1.0, NARROW]);
         // Vier-Tage-Woche: Der freie Freitag ist ebenfalls schmal.
-        let four = Settings { workdays: 0b0_1111, ..s };
+        let four = s.clone().with_rules(WorkRules { workdays: 0b0_1111, ..WorkRules::DEFAULT });
         assert_eq!(column_weights(&four, &cols)[4], NARROW);
     }
 
@@ -3653,19 +3663,19 @@ mod tests {
 
     #[test]
     fn dragging_snaps_and_stays_in_limits() {
-        let s = Settings::default(); // Rahmen 07:00–22:00
+        let s = &WorkRules::DEFAULT; // Rahmen 07:00–22:00
         let e = edges(h(8, 12), h(17, 0));
         let grid = (h(7, 0), h(19, 0));
         let past = Some(DAY_END - 60);
-        assert_eq!(drag_limits(&e, Bound::Start, &s, past, grid), Some((h(7, 0), h(16, 55))));
-        assert_eq!(drag_limits(&e, Bound::End, &s, past, grid), Some((h(8, 17), h(19, 0))));
+        assert_eq!(drag_limits(&e, Bound::Start, s, past, grid), Some((h(7, 0), h(16, 55))));
+        assert_eq!(drag_limits(&e, Bound::End, s, past, grid), Some((h(8, 17), h(19, 0))));
         // Heute höchstens bis jetzt (auf die Minute), in der Zukunft gar nicht.
-        assert_eq!(drag_limits(&e, Bound::End, &s, Some(h(17, 20) + 42), grid), Some((h(8, 17), h(17, 20))));
-        assert_eq!(drag_limits(&e, Bound::Start, &s, None, grid), None);
+        assert_eq!(drag_limits(&e, Bound::End, s, Some(h(17, 20) + 42), grid), Some((h(8, 17), h(17, 20))));
+        assert_eq!(drag_limits(&e, Bound::Start, s, None, grid), None);
         // Grenzen mit Sekunden: auf ganze Minuten nach innen.
         let odd = edges(h(8, 12) + 23, h(17, 0) + 41);
-        assert_eq!(drag_limits(&odd, Bound::Start, &s, past, grid), Some((h(7, 0), h(16, 55))));
-        assert_eq!(drag_limits(&odd, Bound::End, &s, past, grid), Some((h(8, 18), h(19, 0))));
+        assert_eq!(drag_limits(&odd, Bound::Start, s, past, grid), Some((h(7, 0), h(16, 55))));
+        assert_eq!(drag_limits(&odd, Bound::End, s, past, grid), Some((h(8, 18), h(19, 0))));
 
         let limits = (h(7, 0), h(16, 55));
         let magnet = 5 * 60;

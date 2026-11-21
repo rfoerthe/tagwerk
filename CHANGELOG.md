@@ -7,6 +7,20 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 ## [Unveröffentlicht]
 
 ### Hinzugefügt
+- Arbeitszeitregeln mit Gültigkeitsdatum: Regelarbeitszeit, Arbeitstage,
+  Arbeitszeitrahmen und Mindestpause gelten je Stand ab einem Datum. Eine Änderung rechnet
+  damit frühere Tage nicht mehr neu – Soll, Saldo, Zeitkonto, Pausen, Hinweise,
+  Wochenansicht und Export nehmen für jeden Tag den Stand, der an ihm galt. Der Reiter
+  „Arbeitszeit“ zeigt alle Stände als Liste (heute gültig fett, geplante grau) mit „Neu …“,
+  „Bearbeiten …“ und „Löschen“; das Blatt „Arbeitszeit ändern“ hat „Gültig ab“ (heute
+  vorbelegt) und sagt, bis wann der Stand gilt und ob er rückwirkend ändert. Auch Stände in
+  der Zukunft sind möglich. Export und PDF nennen bei einem Wechsel im Zeitraum die Regeln
+  je Stand. Die Fußzeile im Fenster „Aufzeichnungen“ nennt die Regeln des gewählten Tages
+  (in „Tage“ wie in „Woche“), ohne Auswahl die von heute. Die bisherigen Einstellungen
+  werden zum ersten Stand, der seit Beginn gilt.
+  Ältere Versionen lesen weiter die Regeln, die beim letzten Speichern galten.
+- `--settings-screenshot`: `TAGWERK_SETTINGS_SHEET=new|first|<Zeile>` nimmt das Blatt
+  „Arbeitszeit ändern“ auf.
 - Freie Tage: Am Wochenende und an abgewählten Arbeitstagen zeichnet Tagwerk weiter auf,
   zählt die automatisch erfasste Zeit aber erst nach „Heute erfassen“ im Menü – rückwirkend
   ab dem ersten Entsperren. Bis dahin heißt der Status „Freier Tag – Erfassung zählt
@@ -22,6 +36,10 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   Bilder nicht von Tag und Uhrzeit der Aufnahme abhängen.
 
 ### Geändert
+- Die Mindestpause steht nicht mehr im Reiter „Erfassung“, sondern bei den
+  Arbeitszeitregeln. „Standardwerte“ lässt frühere Stände der Arbeitszeitregeln stehen und
+  setzt sie ab heute zurück. Die Bilder der Einstellungen im README sind neu, dazu kommt
+  eines vom Blatt „Arbeitszeit ändern“.
 - Die Bilder des Menüs im README sind neu; dazu kommt eines vom freien Tag mit „Heute
   erfassen“. Der Text zum Menü nennt jetzt auch das Zeitkonto und den grauen Status.
 - Das geöffnete DMG zeigt ein gestaltetes Fenster: Titel „Tagwerk“, App-Symbol und Ordner

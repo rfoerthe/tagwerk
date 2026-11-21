@@ -287,10 +287,13 @@ zu „Woche“ zeigt die Woche des ausgewählten Tags. In der Menüleisten-App e
 </table>
 
 Erreichbar über „Einstellungen …“ in der Menüleiste oder ⌘, im Fenster „Aufzeichnungen“.
-Änderungen gelten sofort, auch für bereits erfasste Tage. Der Ordner-Knopf in der
+Änderungen gelten sofort – bis auf die **Arbeitszeitregeln** (Regelarbeitszeit,
+Arbeitstage, Arbeitszeitrahmen, Mindestpause): Sie gelten ab einem Datum, damit eine
+Änderung bereits erfasste Tage nicht neu rechnet (siehe unten). Der Ordner-Knopf in der
 Titelleiste zeigt den Datenordner im Finder. **Standardwerte** setzt alle Einstellungen
-auf allen Reitern zurück, auch Zeitkonto und Übertrag; nur „Bei Anmeldung starten“ bleibt,
-wie es ist.
+auf allen Reitern zurück, auch Zeitkonto und Übertrag; die Arbeitszeitregeln gelten ab
+heute wieder wie zu Beginn, frühere Tage behalten ihre Stände, geplante entfallen. Nur
+„Bei Anmeldung starten“ bleibt, wie es ist.
 
 Die Einstellungen stehen auf vier Reitern:
 
@@ -300,12 +303,13 @@ Die Einstellungen stehen auf vier Reitern:
 |              | Menüleiste             | Symbolsatz für die Menüleiste, mit Vorschau aller Zustände              | Tagbogen        |
 |              | Arbeitszeit von heute zeigen | Arbeitszeit von heute neben dem Symbol in der Menüleiste          | aus             |
 |              | Kurzbefehle            | ⌃⌥⌘P und ⌃⌥⌘A wirken in jeder App, auch bei geschlossenem Menü           | aus             |
-| Arbeitszeit  | Arbeitszeitrahmen      | Nur in diesem Zeitraum wird Arbeitszeit bzw. Pause gezählt – an jedem Tag | 07:00–22:00 Uhr |
-|              | Regelarbeitszeit       | Wochenarbeitszeit, daraus ergibt sich das Tagessoll                      | 39 Std.         |
-|              | Arbeitstage            | Mo bis Fr einzeln wählbar; das Wochensoll verteilt sich gleichmäßig auf sie (angezeigt als „4-Tage-Woche · 9:45 h pro Arbeitstag“) | Mo–Fr |
+| Arbeitszeit  | Regeln (je Stand, gültig ab einem Datum): | | |
+|              | – Regelarbeitszeit     | Wochenarbeitszeit, daraus ergibt sich das Tagessoll                      | 39 Std.         |
+|              | – Arbeitstage          | Mo bis Fr einzeln wählbar; das Wochensoll verteilt sich gleichmäßig auf sie (angezeigt als „4-Tage-Woche · 9:45 h pro Arbeitstag“) | Mo–Fr |
+|              | – Arbeitszeitrahmen    | Nur in diesem Zeitraum wird Arbeitszeit bzw. Pause gezählt – an jedem Tag | 07:00–22:00 Uhr |
+|              | – Mindestpause         | Ab dieser Sperrdauer gilt eine Unterbrechung als Pause                  | 15 Min.         |
 |              | Zeitkonto              | Zählt alle erfassten Tage oder erst ab einem Datum; der Übertrag ist der Saldo aus der Zeit davor (z. B. `+12:30`) | alle Tage, kein Übertrag |
-| Erfassung    | Mindestpause           | Ab dieser Sperrdauer gilt eine Unterbrechung als Pause                  | 15 Min.         |
-|              | Arbeit ohne Mac        | „mindestens … Minuten“ (1 bis 240): kürzere Abschnitte lassen sich im Fenster „Aufzeichnungen“ nicht eintragen | 15 Min. |
+| Erfassung    | Arbeit ohne Mac        | „mindestens … Minuten“ (1 bis 240): kürzere Abschnitte lassen sich im Fenster „Aufzeichnungen“ nicht eintragen | 15 Min. |
 |              | Inaktivität            | Erfassung anhalten nach so vielen Minuten ohne Eingabe                  | aus (10 Min.)   |
 |              | Lange Sperre           | Beim Entsperren nach mindestens 30 Min. Sperre nachfragen               | aus             |
 |              | Freie Tage             | Automatische Erfassung nur an Arbeitstagen zählen; am Wochenende und an abgewählten Arbeitstagen erst nach „Heute erfassen“ | ein |
@@ -314,13 +318,29 @@ Die Einstellungen stehen auf vier Reitern:
 
 - **Allgemein** – unter der Auswahl des Symbolsatzes stehen seine vier Zustände als
   Vorschau: läuft, Pause, außerhalb des Arbeitszeitrahmens oder freier Tag, Feierabend.
-- **Arbeitszeit** – unter den Arbeitstagen steht, was aus der Auswahl folgt, etwa
-  „5-Tage-Woche · 7:48 h pro Arbeitstag“. An freien Tagen – dem Wochenende und abgewählten
-  Arbeitstagen – gibt es kein Soll; Arbeit dort zählt als Mehrarbeit. Das Zeitkonto zählt
-  ohne Haken alle erfassten Tage, mit Haken erst ab dem Datum; der Übertrag wird mit
+- **Arbeitszeit** – die Arbeitszeitregeln stehen als Liste von Ständen: Jeder gilt ab
+  seinem Datum bis zum nächsten, der erste seit Beginn. Für jeden Tag rechnet Tagwerk mit
+  dem Stand, der an ihm galt – Soll, Saldo, Zeitkonto, Pausen, Hinweise, Wochenansicht und
+  Export. Wer ab Dezember in Teilzeit geht, legt einen neuen Stand ab dem 1.12. an; die
+  Monate davor bleiben, wie sie waren. Über der Liste steht, welcher Stand heute gilt und
+  welcher als nächster geplant ist, jeweils mit dem Tagessoll; der heute gültige ist in der
+  Liste fett, geplante sind grau. An freien Tagen – dem Wochenende und abgewählten
+  Arbeitstagen – gibt es kein Soll; Arbeit dort zählt als Mehrarbeit. Die Fußzeile im
+  Fenster „Aufzeichnungen“ nennt die Regeln des gewählten Tages („Regeln am 13.11.2026: …“),
+  ohne Auswahl die von heute. Das Zeitkonto zählt ohne Haken alle erfassten Tage, mit Haken erst ab dem Datum; der Übertrag wird mit
   Vorzeichen eingegeben (`+12:30`, `−3:15`).
+
+  **Neu …** öffnet das Blatt „Arbeitszeit ändern“ mit heute als „Gültig ab“ und den Regeln,
+  die heute gelten; **Bearbeiten …** (oder Doppelklick) ändert den gewählten Stand samt
+  Datum, beim ersten Stand nur die Regeln. Gespeichert wird erst mit „Übernehmen“. Unter
+  dem Datum steht, bis wann der Stand gilt; orange, wenn er rückwirkend Saldo und
+  Aufzeichnungen ändert oder einen vorhandenen Stand am selben Tag ersetzt. Ein Stand, der
+  dem davor gleicht, entfällt von selbst. **Löschen** fragt nach; ab dem Datum gilt dann
+  wieder der Stand davor. Der erste Stand lässt sich nicht löschen.
+
+  <img src="doc/screenshots/einstellungen-arbeitszeit-aendern.png" alt="Blatt „Arbeitszeit ändern“" width="400">
 - **Erfassung** – die Mindestdauer für Arbeit ohne Mac schützt vor versehentlichen
-  Einträgen und hängt nicht an der Mindestpause: Auch ein Telefonat von zehn Minuten in
+  Einträgen und hängt nicht an der Mindestpause (die zu den Arbeitszeitregeln gehört): Auch ein Telefonat von zehn Minuten in
   einer langen Mittagspause oder vor dem Arbeitsbeginn lässt sich eintragen, wenn der Wert
   entsprechend gesenkt ist. Sie gilt für Einträge von Hand im Inspektor und in der
   Wochenansicht, nicht für „Ohne Mac weiterarbeiten“ im Menü. Die Minuten für die Inaktivität lassen sich
