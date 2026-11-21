@@ -6,7 +6,7 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
-## [1.5.1] - 2026-11-21
+## [1.6.0] - 2026-11-21
 
 ### Zusammenfassung
 Die Arbeitszeitregeln gelten jetzt ab einem Datum: Wer in Teilzeit geht, andere Arbeitstage
@@ -526,8 +526,8 @@ als Markdown. Alle Daten bleiben lokal auf dem Mac.
   notarisiert es und installiert sie auf Wunsch nach `/Applications`.
 - `github-release.sh` veröffentlicht ein geprüftes DMG als Release auf GitHub.
 
-[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.5.1...HEAD
-[1.5.1]: https://github.com/rfoerthe/tagwerk/compare/v1.5.0...v1.5.1
+[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.6.0...HEAD
+[1.6.0]: https://github.com/rfoerthe/tagwerk/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/rfoerthe/tagwerk/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/rfoerthe/tagwerk/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/rfoerthe/tagwerk/compare/v1.2.0...v1.3.0

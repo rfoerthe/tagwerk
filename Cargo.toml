@@ -1,6 +1,6 @@
 [package]
 name = "tagwerk"
-version = "1.5.1"
+version = "1.6.0"
 edition = "2021"
 license = "MIT"
 description = "Tagwerk – erfasst die Arbeitszeit anhand der Zeit, in der der Mac entsperrt ist"
