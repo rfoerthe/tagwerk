@@ -6,6 +6,8 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+## [1.7.0] - 2026-11-21
+
 ### Zusammenfassung
 Eine Prüfung der Rechen- und Bedienlogik hat 28 Unstimmigkeiten ergeben; sie sind behoben.
 Die wichtigsten: Nach dem Feierabend geht keine Zeit mehr verloren, der laufende Tag zieht
@@ -638,7 +640,8 @@ als Markdown. Alle Daten bleiben lokal auf dem Mac.
   notarisiert es und installiert sie auf Wunsch nach `/Applications`.
 - `github-release.sh` veröffentlicht ein geprüftes DMG als Release auf GitHub.
 
-[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.6.0...HEAD
+[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.7.0...HEAD
+[1.7.0]: https://github.com/rfoerthe/tagwerk/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/rfoerthe/tagwerk/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/rfoerthe/tagwerk/compare/v1.4.0...v1.5.0
 [1.4.0]: https://github.com/rfoerthe/tagwerk/compare/v1.3.0...v1.4.0
