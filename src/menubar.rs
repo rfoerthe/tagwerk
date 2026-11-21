@@ -45,8 +45,12 @@ const TAG_ASK: isize = -1;
 /// Menü-Tag: manuellen Arbeitsbeginn entfernen.
 const TAG_RESET: isize = -2;
 
+/// Feste Uhrzeit für `--menu-screenshot` (`TAGWERK_NOW=JJJJ-MM-TT HH:MM`), damit die Bilder
+/// im README nicht von der Uhrzeit abhängen, zu der sie entstehen.
+static FIXED_NOW: std::sync::OnceLock<NaiveDateTime> = std::sync::OnceLock::new();
+
 fn now() -> NaiveDateTime {
-    Local::now().naive_local()
+    FIXED_NOW.get().copied().unwrap_or_else(|| Local::now().naive_local())
 }
 
 fn secs(t: NaiveDateTime) -> i64 {
@@ -1473,9 +1477,22 @@ fn single_instance() -> Option<std::fs::File> {
 /// Startet die Menüleisten-App. Mit `screenshot` (zum Testen und für die Bilder im README:
 /// `Tagwerk --menu-screenshot <png>`) öffnet sie ihr Menü, speichert ein Bild davon und endet
 /// wieder; den Zustand dafür setzt `TAGWERK_MENU_STATE=break|away|closed` (sonst läuft die
-/// Erfassung).
+/// Erfassung), die Uhrzeit `TAGWERK_NOW=JJJJ-MM-TT HH:MM` (sonst die echte).
 pub fn run(screenshot: Option<std::path::PathBuf>) {
     let mtm = MainThreadMarker::new().expect("Tagwerk muss im Hauptthread starten");
+    if screenshot.is_some() {
+        if let Ok(value) = std::env::var("TAGWERK_NOW") {
+            match NaiveDateTime::parse_from_str(&value, "%Y-%m-%d %H:%M") {
+                Ok(t) => {
+                    let _ = FIXED_NOW.set(t);
+                }
+                Err(_) => {
+                    eprintln!("TAGWERK_NOW: erwartet JJJJ-MM-TT HH:MM, nicht „{value}“");
+                    std::process::exit(2);
+                }
+            }
+        }
+    }
     let Some(_lock) = single_instance() else {
         eprintln!("Tagwerk läuft bereits.");
         return;

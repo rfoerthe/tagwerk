@@ -18,8 +18,12 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   „Heute erfassen“ weg und lässt die Erfassung für heute aus, bis er wieder gesetzt ist.
   Neue Einstellung „Freie Tage“ unter „Erfassung“ (standardmäßig ein); die Entscheidung
   gilt je Tag, vergangene Tage bleiben unverändert.
+- `--menu-screenshot`: `TAGWERK_NOW=JJJJ-MM-TT HH:MM` legt die Uhrzeit fest, damit die
+  Bilder nicht von Tag und Uhrzeit der Aufnahme abhängen.
 
 ### Geändert
+- Die Bilder des Menüs im README sind neu; dazu kommt eines vom freien Tag mit „Heute
+  erfassen“. Der Text zum Menü nennt jetzt auch das Zeitkonto und den grauen Status.
 - Das geöffnete DMG zeigt ein gestaltetes Fenster: Titel „Tagwerk“, App-Symbol und Ordner
   „Programme“ mit einem Pfeil dazwischen und dem Hinweis, die App hineinzuziehen.
 

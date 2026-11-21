@@ -50,14 +50,19 @@ festlegen oder korrigieren.
   <tr>
     <td align="center"><img src="doc/screenshots/menu-laeuft.png" alt="Menü während der Erfassung" width="260"><br><sub><b>Erfassung läuft</b></sub></td>
     <td align="center"><img src="doc/screenshots/menu-pause.png" alt="Menü während einer Pause" width="260"><br><sub><b>Pause</b></sub></td>
+  </tr>
+  <tr>
     <td align="center"><img src="doc/screenshots/menu-feierabend.png" alt="Menü nach Feierabend" width="260"><br><sub><b>Feierabend</b></sub></td>
+    <td align="center"><img src="doc/screenshots/menu-frei.png" alt="Menü an einem freien Tag mit „Heute erfassen“" width="260"><br><sub><b>Freier Tag</b></sub></td>
   </tr>
 </table>
 
 Das Menü zeigt auf einen Blick den Status, die Arbeitszeit von heute samt Soll, die
-Pausen, den Beginn, den Saldo der Woche und Hinweise auf Regelverstöße. Der Status ist
-farbig – **grün** = läuft, **orange** = Pause, **indigo** = Feierabend –, der Saldo
-grün im Plus und rot im Minus, hier wie im Fenster „Aufzeichnungen“. Diese Zeilen sind
+Pausen, den Beginn, den Saldo der Woche, das Zeitkonto und Hinweise auf Regelverstöße.
+Der Status ist farbig – **grün** = läuft, **orange** = Pause, **indigo** = Feierabend,
+**grau** = außerhalb des Arbeitszeitrahmens oder freier Tag –, Saldo und Zeitkonto sind
+grün im Plus und rot im Minus, hier wie im Fenster „Aufzeichnungen“. An einem freien Tag
+bietet das Menü zunächst nur **Heute erfassen** an (siehe unten). Diese Zeilen sind
 reine Anzeige und lassen sich nicht anklicken. Lange Hinweise brechen um, damit das Menü schmal bleibt.
 
 - **Mitteilungen zu Pause und Höchstarbeitszeit** – über die Mitteilungszentrale von macOS:
@@ -578,6 +583,15 @@ die Testdatenbank auch direkt öffnen:
 
 ```bash
 TAGWERK_DIR=target/testdata cargo run -- --records
+```
+
+Für die Bilder des Menüs setzt `TAGWERK_MENU_STATE=break|away|closed` den Zustand und
+`TAGWERK_NOW` eine feste Uhrzeit – so entsteht etwa das Bild vom freien Tag an einem
+Samstag, egal wann es aufgenommen wird:
+
+```bash
+TAGWERK_DIR=/tmp/tagwerk-bild TAGWERK_NOW="2026-11-21 10:20" \
+  cargo run -- --menu-screenshot doc/screenshots/menu-frei.png
 ```
 
 </details>
