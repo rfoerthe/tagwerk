@@ -41,7 +41,7 @@ pub fn indigo() -> Retained<NSColor> {
     adaptive((0.30, 0.24, 0.78), NSColor::systemIndigoColor)
 }
 
-/// Abwesenheit (Urlaub, Krank, Feiertag, Zeitausgleich) in der Wochenansicht.
+/// Abwesenheit (Urlaub, Sonderurlaub, Krank, Feiertag, Zeitausgleich) in der Wochenansicht.
 pub fn absence() -> Retained<NSColor> {
     adaptive((0.0, 0.45, 0.52), NSColor::systemTealColor)
 }

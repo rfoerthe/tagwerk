@@ -11,7 +11,8 @@
 //! - `auto_counting` – freie Tage: Was gilt für die automatische Erfassung (siehe `Day::free_day`;
 //!   `counts`: 0 nicht gezählt, 1 gezählt, 2 nicht erfasst)?
 //! - `settings`  – Einstellungen (Schlüssel → ganze Zahl, Zeiten in Sekunden),
-//! - `work_rules` – Arbeitszeitregeln mit Gültigkeitsdatum (`valid_from` leer: seit jeher).
+//! - `work_rules` – Arbeitszeitregeln mit Gültigkeitsdatum (`valid_from` leer: seit jeher;
+//!   `free_days_count`: Arbeit an freien Tagen zählt als Mehrarbeit).
 //!   Die Regeln, die heute gelten, stehen zusätzlich wie früher in `settings` – für ältere
 //!   Versionen, die `work_rules` nicht kennen.
 //!
@@ -105,9 +106,13 @@ const SCHEMA_WORK_RULES: &str = "
         weekly_target_s INTEGER NOT NULL,
         frame_from_s INTEGER NOT NULL,
         frame_to_s INTEGER NOT NULL,
-        workdays INTEGER NOT NULL
+        workdays INTEGER NOT NULL,
+        free_days_count INTEGER NOT NULL DEFAULT 0
     ) WITHOUT ROWID;
 ";
+/// Spalte, die nach der ersten Fassung von `work_rules` dazukam: Zählt Arbeit an freien Tagen
+/// als Mehrarbeit? Ältere Versionen lassen sie beim Speichern weg – dann gilt der Standard.
+const WORK_RULES_FREE_DAYS: &str = "free_days_count";
 const KEY_MIN_PAUSE: &str = "min_pause_s";
 const KEY_MIN_WORK: &str = "min_work_s";
 const KEY_WEEKLY: &str = "weekly_target_s";
@@ -278,7 +283,7 @@ impl Db {
             }
         }
         let mut stmt = self.conn.prepare(
-            "SELECT valid_from, min_pause_s, weekly_target_s, frame_from_s, frame_to_s, workdays
+            "SELECT valid_from, min_pause_s, weekly_target_s, frame_from_s, frame_to_s, workdays, free_days_count
              FROM work_rules ORDER BY valid_from",
         )?;
         let rows = stmt.query_map([], |r| {
@@ -290,6 +295,7 @@ impl Db {
                     frame_from: r.get(3)?,
                     frame_to: r.get(4)?,
                     workdays: r.get::<_, i64>(5)?.clamp(0, 255) as u8,
+                    free_days_count: r.get::<_, i64>(6)? != 0,
                 },
             ))
         })?;
@@ -320,15 +326,17 @@ impl Db {
         for p in &s.work {
             let r = p.rules;
             tx.execute(
-                "INSERT INTO work_rules (valid_from, min_pause_s, weekly_target_s, frame_from_s, frame_to_s, workdays)
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT INTO work_rules
+                     (valid_from, min_pause_s, weekly_target_s, frame_from_s, frame_to_s, workdays, free_days_count)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                 params![
                     p.from.map(date_key).unwrap_or_default(),
                     r.min_pause,
                     r.weekly_target,
                     r.frame_from,
                     r.frame_to,
-                    r.workdays as i64
+                    r.workdays as i64,
+                    r.free_days_count as i64
                 ],
             )?;
         }
@@ -422,6 +430,16 @@ fn init_schema(conn: &mut Connection, dir: &Path) -> Result<()> {
     tx.execute_batch(SCHEMA_ABSENCES)?;
     tx.execute_batch(SCHEMA_FREE_DAYS)?;
     tx.execute_batch(SCHEMA_WORK_RULES)?;
+    let has_free_days: bool = tx.query_row(
+        "SELECT count(*) FROM pragma_table_info('work_rules') WHERE name = ?1",
+        [WORK_RULES_FREE_DAYS],
+        |r| r.get::<_, i64>(0).map(|n| n > 0),
+    )?;
+    if !has_free_days {
+        tx.execute_batch(&format!(
+            "ALTER TABLE work_rules ADD COLUMN {WORK_RULES_FREE_DAYS} INTEGER NOT NULL DEFAULT 0"
+        ))?;
+    }
     let mut imported_file = None;
     if version < SCHEMA_VERSION {
         tx.execute_batch(SCHEMA_SETTINGS)?;
@@ -855,6 +873,9 @@ pub struct ReportDay {
     pub last_end: i64,
     pub work: i64,
     pub pause: i64,
+    /// Arbeitszeit, die in den Saldo eingeht (siehe [`Settings::counted_work`]; an einem freien
+    /// Tag, an dem sie nicht zählt, 0).
+    pub counted: i64,
     /// Soll, das in den Saldo eingeht (siehe [`Settings::counted_target`]).
     pub target: i64,
     /// Abwesenheit, z. B. `Urlaub (halber Tag)` (leer = keine).
@@ -887,6 +908,7 @@ impl Report {
                     last_end: r.last_end,
                     work: r.shown_work_secs,
                     pause: r.shown_pause_secs,
+                    counted: settings.counted_work(d.date, r.shown_work_secs),
                     target: settings.counted_target(d, r.work_secs, today),
                     absence: d.absence.map(Absence::label).unwrap_or_default(),
                     corrected: d.has_corrections(),
@@ -901,6 +923,7 @@ impl Report {
             last_end: 0,
             work: 0,
             pause: 0,
+            counted: 0,
             target: settings.daily_target(date),
             absence: String::new(),
             corrected: false,
@@ -915,6 +938,24 @@ impl Report {
         self.days.iter().fold((0, 0, 0, 0), |(w, p, t, n), d| {
             (w + d.work, p + d.pause, t + d.target, n + (d.work > 0) as usize)
         })
+    }
+
+    /// Saldo des Zeitraums (Arbeit an freien Tagen nur, wenn sie zählt).
+    pub fn balance(&self) -> i64 {
+        self.days.iter().map(ReportDay::balance).sum()
+    }
+}
+
+impl ReportDay {
+    /// Saldo des Tages: Arbeitszeit, die zählt, minus Soll.
+    pub fn balance(&self) -> i64 {
+        self.counted - self.target
+    }
+
+    /// Gibt es einen Saldo – Arbeitszeit, die zählt, oder ein Soll? Arbeit an einem freien Tag,
+    /// die nicht zählt, hat keinen.
+    pub fn has_balance(&self) -> bool {
+        self.counted > 0 || self.target > 0
     }
 }
 
@@ -940,7 +981,7 @@ pub fn export_csv(report: &Report) -> String {
         "Datum;Wochentag;Beginn;Ende;Arbeitszeit;Arbeitszeit (Std.);Pausen;Soll;Saldo;Abwesenheit;Korrigiert;Hinweise\r\n",
     );
     for d in &report.days {
-        let balance = d.work - d.target;
+        let balance = d.balance();
         // Ohne Arbeitszeit (z. B. ein Urlaubstag) gibt es weder Beginn noch Ende.
         let clock = |t: i64| if d.work > 0 { fmt_clock(t) } else { String::new() };
         let cells = [
@@ -1004,7 +1045,8 @@ pub fn export_markdown(
     }
     s.push_str("| Datum | Beginn | Ende | Arbeitszeit | Pausenzeit | Saldo |\n");
     s.push_str("|:------|:------:|:----:|------------:|-----------:|------:|\n");
-    let (mut work, mut pause, mut target, mut count) = (0, 0, 0, 0);
+    // `counted`: Arbeitszeit, die in den Saldo eingeht (ohne freie Tage, an denen sie nicht zählt).
+    let (mut work, mut counted, mut pause, mut target, mut count) = (0, 0, 0, 0, 0);
     // Arbeitstage ohne Eintrag stehen mit ihrem Soll dazwischen.
     let mut missing = rules::missing_workdays(all, from, to, now.date(), settings).into_iter().peekable();
     let mut add_missing = |s: &mut String, target: &mut i64, before: Option<NaiveDate>| {
@@ -1024,7 +1066,9 @@ pub fn export_markdown(
         let Some(r) = d.record(settings) else { continue };
         add_missing(&mut s, &mut target, Some(d.date));
         let day_target = settings.counted_target(d, r.work_secs, now.date());
+        let day_counted = settings.counted_work(d.date, r.work_secs);
         work += r.work_secs;
+        counted += day_counted;
         pause += r.pause_secs();
         target += day_target;
         if r.work_secs > 0 {
@@ -1037,7 +1081,7 @@ pub fn export_markdown(
             fmt_clock_s(r.last_end.min(DAY_END - 1)),
             fmt_hms(r.work_secs),
             fmt_hms(r.pause_secs()),
-            rules::fmt_balance(r.work_secs - day_target),
+            if day_counted > 0 || day_target > 0 { rules::fmt_balance(day_counted - day_target) } else { "–".to_string() },
         ));
     }
     add_missing(&mut s, &mut target, None);
@@ -1046,7 +1090,7 @@ pub fn export_markdown(
         "| **Summe: {count} {label}** | | | **{}** | **{}** | **{}** |\n",
         fmt_hms(work),
         fmt_hms(pause),
-        rules::fmt_balance(work - target)
+        rules::fmt_balance(counted - target)
     ));
     s.push_str(&format!(
         "\nSoll: {} ({}; Arbeitstage bis gestern auch ohne Eintrag).\n",
@@ -1070,7 +1114,7 @@ pub fn export_markdown(
     }
 
     s.push_str(&format!("\n{HEAD_CORRECTIONS}\n\n"));
-    s.push_str("Manuell festgelegt. Art: Arbeitsbeginn, Pause, Arbeit ohne Mac (z. B. Telefonat oder Meeting), Feierabend, Abwesenheit (Urlaub, Krank, Feiertag, Zeitausgleich) oder Erfassung (freier Tag: erfasste Zeit gezählt oder nicht).\n\n");
+    s.push_str("Manuell festgelegt. Art: Arbeitsbeginn, Pause, Arbeit ohne Mac (z. B. Telefonat oder Meeting), Feierabend, Abwesenheit (Urlaub, Sonderurlaub, Krank, Feiertag, Zeitausgleich) oder Erfassung (freier Tag: erfasste Zeit gezählt oder nicht).\n\n");
     s.push_str("| Datum | Art | Von | Bis | Notiz |\n");
     s.push_str("|:------|:----|:---:|:---:|:------|\n");
     for d in &days {
@@ -1339,8 +1383,15 @@ mod tests {
         assert_eq!(days.len(), 1);
         assert!(days[0].breaks.is_empty(), "offene Pause wird ignoriert");
 
-        let old = rules::WorkRules { min_pause: 20 * 60, weekly_target: h(38, 30), frame_from: h(6, 0), frame_to: h(20, 0), workdays: 0b0_1111 };
-        let new = rules::WorkRules { weekly_target: h(30, 0), ..old };
+        let old = rules::WorkRules {
+            min_pause: 20 * 60,
+            weekly_target: h(38, 30),
+            frame_from: h(6, 0),
+            frame_to: h(20, 0),
+            workdays: 0b0_1111,
+            free_days_count: false,
+        };
+        let new = rules::WorkRules { weekly_target: h(30, 0), free_days_count: true, ..old };
         let custom = Settings {
             work: vec![
                 rules::RulesPeriod { from: None, rules: old },
@@ -1368,7 +1419,56 @@ mod tests {
         // Datenbank einer älteren Version (ohne Stände): Die Regeln aus `settings` gelten seit jeher.
         db.conn.execute("DELETE FROM work_rules", []).unwrap();
         let legacy = db.load_settings().unwrap();
-        assert_eq!(legacy.work, vec![rules::RulesPeriod { from: None, rules: new }]);
+        // Ob Arbeit an freien Tagen zählt, kennen ältere Versionen nicht: der Standard.
+        let new_legacy = rules::WorkRules { free_days_count: false, ..new };
+        assert_eq!(legacy.work, vec![rules::RulesPeriod { from: None, rules: new_legacy }]);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn work_rules_get_the_free_days_column() {
+        let dir = temp_dir("free-days-column");
+        // `work_rules` in der ersten Fassung (ohne `free_days_count`), wie eine ältere Version
+        // sie anlegt und füllt.
+        {
+            let conn = Connection::open(dir.join(DB_FILE)).unwrap();
+            conn.execute_batch(SCHEMA).unwrap();
+            conn.execute_batch(SCHEMA_SETTINGS).unwrap();
+            conn.execute_batch(SCHEMA_WORK).unwrap();
+            conn.pragma_update(None, "user_version", SCHEMA_VERSION).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE work_rules (
+                    valid_from TEXT PRIMARY KEY,
+                    min_pause_s INTEGER NOT NULL,
+                    weekly_target_s INTEGER NOT NULL,
+                    frame_from_s INTEGER NOT NULL,
+                    frame_to_s INTEGER NOT NULL,
+                    workdays INTEGER NOT NULL
+                ) WITHOUT ROWID;
+                INSERT INTO work_rules VALUES ('', 900, 140400, 25200, 79200, 31);
+                INSERT INTO work_rules VALUES ('2026-11-16', 900, 115200, 25200, 79200, 15);",
+            )
+            .unwrap();
+        }
+        let mut db = Db::open_in(&dir).unwrap();
+        let s = db.load_settings().unwrap();
+        assert_eq!(s.work.len(), 2);
+        assert!(s.work.iter().all(|p| !p.rules.free_days_count), "Standard: zählt nicht");
+        // Speichern und wieder laden: Die Einstellung bleibt je Stand erhalten.
+        let mut changed = s.clone();
+        changed.set_rules(Some(date(16)), rules::WorkRules { free_days_count: true, ..s.work[1].rules }, None);
+        db.save_settings(&changed, date(20)).unwrap();
+        let again = Db::open_in(&dir).unwrap().load_settings().unwrap();
+        assert_eq!(again, changed);
+        assert!(!again.rules(date(13)).free_days_count && again.rules(date(16)).free_days_count);
+        // Eine ältere Version speichert ohne die Spalte: dann gilt der Standard.
+        db.conn.execute(
+            "INSERT OR REPLACE INTO work_rules (valid_from, min_pause_s, weekly_target_s, frame_from_s, frame_to_s, workdays)
+             VALUES ('2026-11-16', 900, 115200, 25200, 79200, 15)",
+            [],
+        )
+        .unwrap();
+        assert!(!db.load_settings().unwrap().rules(date(16)).free_days_count);
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -1426,7 +1526,18 @@ mod tests {
             "Datum;Wochentag;Beginn;Ende;Arbeitszeit;Arbeitszeit (Std.);Pausen;Soll;Saldo;Abwesenheit;Korrigiert;Hinweise"
         );
         assert_eq!(lines[1], "16.11.2026;Mo;08:00;17:30;8:30;8,50;1:00;7:48;+0:42;;ja;");
-        assert_eq!(lines[2], "21.11.2026;Sa;10:00;11:00;1:00;1,00;0:00;0:00;+1:00;;nein;Arbeit am Wochenende – zählt ohne Soll als Mehrarbeit");
+        // Arbeit am Wochenende zählt nicht im Saldo.
+        assert_eq!(lines[2], "21.11.2026;Sa;10:00;11:00;1:00;1,00;0:00;0:00;+0:00;;nein;Arbeit am Wochenende – zählt nicht im Saldo");
+        assert_eq!(report.balance(), h(0, 42));
+        // Mit dem Schalter im Stand als Mehrarbeit.
+        let counted = st().with_rules(rules::WorkRules { free_days_count: true, ..rules::WorkRules::DEFAULT });
+        let report_counted = Report::new(&days, date(16), date(22), date(17), &counted);
+        assert_eq!(report_counted.balance(), h(1, 42));
+        let csv_counted = export_csv(&report_counted);
+        assert!(
+            csv_counted.contains("21.11.2026;Sa;10:00;11:00;1:00;1,00;0:00;0:00;+1:00;;nein;Arbeit am Wochenende – zählt ohne Soll als Mehrarbeit"),
+            "{csv_counted}"
+        );
         assert_eq!(lines.len(), 4, "Zeilenende nach der letzten Zeile");
         // Eine Woche später: Di bis Fr ohne Eintrag stehen mit ihrem Soll dazwischen.
         let later = Report::new(&days, date(16), date(22), date(30), &st());

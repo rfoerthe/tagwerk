@@ -161,8 +161,8 @@ nennt oben Arbeitszeit, Pausen und Saldo des Tages als drei Zahlen nebeneinander
 Abschnitt bewirkt, erklärt der Info-Knopf (ⓘ) neben seiner Überschrift – als Tooltip und
 auf Klick als kleines Fenster.
 
-- **Abwesenheit** – im Inspektor lässt sich für einen Tag Urlaub, Krank, Feiertag oder
-  Zeitausgleich eintragen, auch für Tage ohne Aufzeichnung (über „Tag bearbeiten“), in der
+- **Abwesenheit** – im Inspektor lässt sich für einen Tag Urlaub, Sonderurlaub, Krank,
+  Feiertag oder Zeitausgleich eintragen, auch für Tage ohne Aufzeichnung (über „Tag bearbeiten“), in der
   Wochenansicht per Rechtsklick – dort auch im Voraus. Ganztags geht das nur an einem Tag
   ohne andere Einträge (erfasste Zeiten, Arbeitsbeginn, Feierabend, Pausen, Arbeit ohne
   Mac): Die löscht man vorher selbst mit „Alle Einträge löschen …“. Heute zählen dabei nur
@@ -175,9 +175,11 @@ auf Klick als kleines Fenster.
   Arbeitszeit. Urlaub,
   Krankheit und Feiertag senken das Soll des Tages – ganz oder, als halber Tag, auf die
   Hälfte: Ein halber Urlaubstag mit vier Stunden Arbeit ist damit kein Minus mehr.
-  Zeitausgleich lässt das Soll stehen, auch ganz ohne Arbeitszeit – so sinkt das Zeitkonto
-  um den freien Tag. In der Tabelle steht hinter dem Datum ein Kürzel (U, K, F, ZA, halbe
-  Tage mit ½), in der Wochenansicht die Abwesenheit im Tageskopf.
+  Sonderurlaub (etwa für Hochzeit, Umzug oder Todesfall) senkt das Soll ebenfalls, gilt
+  aber immer für den ganzen Tag. Zeitausgleich lässt das Soll stehen, auch ganz ohne
+  Arbeitszeit – so sinkt das Zeitkonto um den freien Tag. In der Tabelle steht hinter dem
+  Datum ein Kürzel (U, SU, K, F, ZA, halbe Tage mit ½), in der Wochenansicht die
+  Abwesenheit im Tageskopf.
 
 - **Alle Einträge löschen** – ganz unten im Inspektor oder per Rechtsklick in der
   Wochenansicht leert „Alle Einträge löschen …“ einen Tag: die automatisch erfassten Zeiten ebenso wie Arbeitsbeginn, Feierabend, Pausen, Arbeit
@@ -235,8 +237,8 @@ zu „Woche“ zeigt die Woche des ausgewählten Tags. In der Menüleisten-App e
 - Ein Rechtsklick zeigt als Menü alles, was an der Stelle geht: Tag bearbeiten, Uhrzeit
   kopieren, Arbeit ohne Mac eintragen oder löschen, Arbeitsbeginn bzw. Feierabend ändern
   (mit Uhrzeit-Feld) oder zurücksetzen und – an Arbeitstagen, auch künftigen –
-  die Abwesenheit wählen (Urlaub, Krank, Feiertag, je ganz oder halb, Zeitausgleich, keine;
-  ganztags nur an einem Tag ohne andere Einträge) oder alle Einträge des Tages löschen.
+  die Abwesenheit wählen (Urlaub, Krank, Feiertag, je ganz oder halb, Sonderurlaub,
+  Zeitausgleich, keine; ganztags nur an einem Tag ohne andere Einträge) oder alle Einträge des Tages löschen.
 - Eine Abwesenheit liegt als türkises, gestricheltes Band über dem Arbeitszeitrahmen des
   Tages, mit ihrer Art oben; Abschnitte, an denen trotzdem gearbeitet wurde, darüber.
 - Der Tag in Bearbeitung – derselbe, den in „Tage“ der Inspektor zeigt – trägt sein Datum
@@ -308,6 +310,7 @@ Die Einstellungen stehen auf vier Reitern:
 |              | – Arbeitstage          | Mo bis Fr einzeln wählbar; das Wochensoll verteilt sich gleichmäßig auf sie (angezeigt als „4-Tage-Woche · 9:45 h pro Arbeitstag“) | Mo–Fr |
 |              | – Arbeitszeitrahmen    | Nur in diesem Zeitraum wird Arbeitszeit bzw. Pause gezählt – an jedem Tag | 07:00–22:00 Uhr |
 |              | – Mindestpause         | Ab dieser Sperrdauer gilt eine Unterbrechung als Pause                  | 15 Min.         |
+|              | – Freie Tage           | Arbeit an freien Tagen (Wochenende, abgewählte Arbeitstage) als Mehrarbeit in Saldo und Zeitkonto zählen | aus |
 |              | Zeitkonto              | Zählt alle erfassten Tage oder erst ab einem Datum; der Übertrag ist der Saldo aus der Zeit davor (z. B. `+12:30`) | alle Tage, kein Übertrag |
 | Erfassung    | Arbeit ohne Mac        | „mindestens … Minuten“ (1 bis 240): kürzere Abschnitte lassen sich im Fenster „Aufzeichnungen“ nicht eintragen | 15 Min. |
 |              | Inaktivität            | Erfassung anhalten nach so vielen Minuten ohne Eingabe                  | aus (10 Min.)   |
@@ -325,7 +328,11 @@ Die Einstellungen stehen auf vier Reitern:
   Monate davor bleiben, wie sie waren. Über der Liste steht, welcher Stand heute gilt und
   welcher als nächster geplant ist, jeweils mit dem Tagessoll; der heute gültige ist in der
   Liste fett, geplante sind grau. An freien Tagen – dem Wochenende und abgewählten
-  Arbeitstagen – gibt es kein Soll; Arbeit dort zählt als Mehrarbeit. Die Fußzeile im
+  Arbeitstagen – gibt es kein Soll. Arbeit dort wird angezeigt, wirkt sich aber
+  standardmäßig nicht auf Saldo und Zeitkonto aus; mit „Arbeit an freien Tagen als
+  Mehrarbeit zählen“ im Stand zählt sie als Mehrarbeit (Spalte „Freie Tage“: „zählen“).
+  Tage, an denen sie nicht zählt, haben in Tabelle, Inspektor und Export keinen Saldo
+  („–“). Die Fußzeile im
   Fenster „Aufzeichnungen“ nennt die Regeln des gewählten Tages („Regeln am 13.11.2026: …“),
   ohne Auswahl die von heute. Das Zeitkonto zählt ohne Haken alle erfassten Tage, mit Haken erst ab dem Datum; der Übertrag wird mit
   Vorzeichen eingegeben (`+12:30`, `−3:15`).
@@ -402,7 +409,7 @@ erfasste Arbeitszeit ändern sie nicht.
 
 | Regel                | Inhalt                                                                  |
 |----------------------|-------------------------------------------------------------------------|
-| Arbeitszeitrahmen    | Zeit außerhalb des eingestellten Zeitraums wird nicht gezählt; Arbeit am Wochenende zählt ohne Soll als Mehrarbeit und wird gemeldet |
+| Arbeitszeitrahmen    | Zeit außerhalb des eingestellten Zeitraums wird nicht gezählt; Arbeit am Wochenende wird gemeldet und zählt nur als Mehrarbeit, wenn der Stand der Arbeitszeitregeln es vorsieht |
 | Sollarbeitszeit      | Regelwochenarbeitszeit, gleichmäßig auf die eingestellten Arbeitstage verteilt (39 Std. an Mo–Fr → 7:48 Std.) |
 | Pausen (§ 4 ArbZG)   | mehr als 6 Std. Arbeit: 30 Min., mehr als 9 Std.: 45 Min.; höchstens 6 Std. am Stück ohne Pause; es zählen Pausen ab 15 Min. |
 | Ruhezeit (§ 5 ArbZG) | mindestens 11 Std. zwischen dem Ende eines Arbeitstags und dem nächsten Beginn |
@@ -413,10 +420,12 @@ erfasste Arbeitszeit ändern sie nicht.
 > Der Saldo vergleicht die Arbeitszeit mit dem Soll. Jeder Arbeitstag bis gestern zählt
 > sein Soll – auch ganz ohne Eintrag, ab dem ersten erfassten Tag. Urlaub, Feiertage und
 > Krankheit trägt man deshalb als Abwesenheit ein; sie regelt das Soll des Tages (halber
-> Urlaubstag: die Hälfte, Zeitausgleich: voll). Heute zählt das Soll erst mit Arbeitszeit
-> oder Abwesenheit, künftige Tage (eine geplante Abwesenheit) noch gar nicht.
-> Arbeit am Wochenende und an abgewählten Arbeitstagen zählt vollständig als Mehrarbeit –
-> automatisch erfasste Zeit dort erst nach „Heute erfassen“ (Einstellung „Freie Tage“).
+> Urlaubstag: die Hälfte, Sonderurlaub: null, Zeitausgleich: voll). Heute zählt das Soll
+> erst mit Arbeitszeit oder Abwesenheit, künftige Tage (eine geplante Abwesenheit) noch gar
+> nicht. Arbeit am Wochenende und an abgewählten Arbeitstagen geht standardmäßig nicht in
+> den Saldo ein; mit „Arbeit an freien Tagen als Mehrarbeit zählen“ im Stand der
+> Arbeitszeitregeln zählt sie vollständig als Mehrarbeit – automatisch erfasste Zeit dort
+> erst nach „Heute erfassen“ (Einstellung „Freie Tage“ unter „Erfassung“).
 > Das Zeitkonto ist dieser Saldo über alle Tage (oder ab einem Datum) plus Übertrag.
 
 ## Installation

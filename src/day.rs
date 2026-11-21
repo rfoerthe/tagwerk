@@ -189,6 +189,9 @@ impl Activity {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum AbsenceKind {
     Vacation,
+    /// Sonderurlaub (z. B. Hochzeit, Umzug, Todesfall): senkt das Soll wie Urlaub, gilt aber
+    /// immer für den ganzen Tag.
+    SpecialLeave,
     Sick,
     Holiday,
     /// Freizeitausgleich für Mehrarbeit: Das Soll bleibt stehen, das Zeitkonto sinkt.
@@ -197,12 +200,18 @@ pub enum AbsenceKind {
 
 impl AbsenceKind {
     /// In der Reihenfolge der Auswahl.
-    pub const ALL: [AbsenceKind; 4] =
-        [AbsenceKind::Vacation, AbsenceKind::Sick, AbsenceKind::Holiday, AbsenceKind::TimeOff];
+    pub const ALL: [AbsenceKind; 5] = [
+        AbsenceKind::Vacation,
+        AbsenceKind::SpecialLeave,
+        AbsenceKind::Sick,
+        AbsenceKind::Holiday,
+        AbsenceKind::TimeOff,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
             AbsenceKind::Vacation => "Urlaub",
+            AbsenceKind::SpecialLeave => "Sonderurlaub",
             AbsenceKind::Sick => "Krank",
             AbsenceKind::Holiday => "Feiertag",
             AbsenceKind::TimeOff => "Zeitausgleich",
@@ -216,6 +225,7 @@ impl AbsenceKind {
             AbsenceKind::Sick => 2,
             AbsenceKind::Holiday => 3,
             AbsenceKind::TimeOff => 4,
+            AbsenceKind::SpecialLeave => 5,
         }
     }
 
@@ -227,21 +237,28 @@ impl AbsenceKind {
     pub fn reduces_target(self) -> bool {
         self != AbsenceKind::TimeOff
     }
+
+    /// Gibt es sie auch als halben Tag? Bei Urlaub, Krankheit und Feiertag; Sonderurlaub und
+    /// Zeitausgleich gelten immer ganztags.
+    pub fn allows_half(self) -> bool {
+        matches!(self, AbsenceKind::Vacation | AbsenceKind::Sick | AbsenceKind::Holiday)
+    }
 }
 
 /// Abwesenheit an einem Tag: Urlaub, Krankheit und Feiertag senken sein Soll – ganz oder
-/// (halber Tag) auf die Hälfte. Zeitausgleich lässt das Soll stehen, auch wenn an dem Tag
-/// gar nicht gearbeitet wird.
+/// (halber Tag) auf die Hälfte –, Sonderurlaub ganz. Zeitausgleich lässt das Soll stehen, auch
+/// wenn an dem Tag gar nicht gearbeitet wird.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Absence {
     pub kind: AbsenceKind,
-    /// Nur der halbe Tag (bei Zeitausgleich ohne Bedeutung und immer `false`).
+    /// Nur der halbe Tag (bei Sonderurlaub und Zeitausgleich ohne Bedeutung und immer
+    /// `false`, siehe [`AbsenceKind::allows_half`]).
     pub half: bool,
 }
 
 impl Absence {
     pub fn new(kind: AbsenceKind, half: bool) -> Self {
-        Self { kind, half: half && kind.reduces_target() }
+        Self { kind, half: half && kind.allows_half() }
     }
 
     /// `Urlaub` bzw. `Urlaub (halber Tag)` – so steht es auch im Export.
@@ -262,10 +279,11 @@ impl Absence {
         }
     }
 
-    /// Kürzel für die Tabelle der Tage: `U`, `K`, `F`, `ZA`, halbe Tage mit `½`.
+    /// Kürzel für die Tabelle der Tage: `U`, `SU`, `K`, `F`, `ZA`, halbe Tage mit `½`.
     pub fn code(self) -> String {
         let code = match self.kind {
             AbsenceKind::Vacation => "U",
+            AbsenceKind::SpecialLeave => "SU",
             AbsenceKind::Sick => "K",
             AbsenceKind::Holiday => "F",
             AbsenceKind::TimeOff => "ZA",
@@ -300,7 +318,7 @@ pub struct Day {
     /// Arbeit ohne Mac (nachgetragen oder über „Ohne Mac weiterarbeiten“), sortiert und
     /// überschneidungsfrei.
     pub work: Vec<WorkBlock>,
-    /// Abwesenheit (Urlaub, krank, Feiertag, Zeitausgleich) – ändert nur das Soll.
+    /// Abwesenheit (Urlaub, Sonderurlaub, krank, Feiertag, Zeitausgleich) – ändert nur das Soll.
     pub absence: Option<Absence>,
     /// Freier Tag: Was gilt für die automatische Erfassung (gesetzt beim ersten Entsperren,
     /// siehe [`Settings::auto_counts_on`])? `None`: Sie zählt wie immer (auch an allen Tagen
@@ -457,7 +475,7 @@ impl Day {
     }
 
     /// Lässt sich `absence` eintragen (`today`: Der Tag ist heute)? Eine ganztägige Abwesenheit
-    /// (auch Zeitausgleich) nur an einem Tag ohne andere Einträge – die löscht man vorher
+    /// (auch Sonderurlaub und Zeitausgleich) nur an einem Tag ohne andere Einträge – die löscht man vorher
     /// selbst („Alle Einträge löschen“); ein halber Tag geht auch neben Arbeitszeit. Heute
     /// zählen nur die Einträge von Hand: Die automatische Erfassung legt beim Entsperren sofort
     /// wieder Zeiten an; die entfallen mit der Abwesenheit (siehe [`Day::clears_for_absence`]).

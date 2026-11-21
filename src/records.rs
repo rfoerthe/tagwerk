@@ -297,8 +297,8 @@ struct StatsView {
 /// Was im Kopf des Inspektors steht.
 #[derive(Clone, Debug, PartialEq)]
 enum DayStats {
-    /// Arbeitszeit, Pausen und Saldo (Sekunden).
-    Numbers { work: i64, pause: i64, balance: i64 },
+    /// Arbeitszeit, Pausen und Saldo (Sekunden; `None`: Die Arbeitszeit zählt nicht im Saldo).
+    Numbers { work: i64, pause: i64, balance: Option<i64> },
     Note(&'static str),
 }
 
@@ -326,8 +326,16 @@ impl StatsView {
             DayStats::Numbers { work, pause, balance } => {
                 self.values[0].setStringValue(&ns(&store::fmt_hm(*work)));
                 self.values[1].setStringValue(&ns(&store::fmt_hm(*pause)));
-                self.values[2].setStringValue(&ns(&rules::fmt_balance(*balance)));
-                self.values[2].setTextColor(Some(&palette::balance(*balance)));
+                match balance {
+                    Some(b) => {
+                        self.values[2].setStringValue(&ns(&rules::fmt_balance(*b)));
+                        self.values[2].setTextColor(Some(&palette::balance(*b)));
+                    }
+                    None => {
+                        self.values[2].setStringValue(&ns("–"));
+                        self.values[2].setTextColor(Some(&NSColor::secondaryLabelColor()));
+                    }
+                }
             }
             DayStats::Note(text) => self.note.setStringValue(&ns(text)),
         }
@@ -585,7 +593,8 @@ impl Model {
             let monday = recs[i].0 - Duration::days(recs[i].0.weekday().num_days_from_monday() as i64);
             let sunday = monday + Duration::days(6);
             let total: i64 = recs[i..j].iter().filter_map(|(_, x)| x.as_ref()).map(|(_, r)| r.shown_work_secs).sum();
-            let (_, target) = rules::balance(&self.days, monday, sunday, today, s);
+            // Der Saldo ohne Arbeit an freien Tagen, die nicht zählt.
+            let (counted, target) = rules::balance(&self.days, monday, sunday, today, s);
             // Gezählt werden die erfassten Tage, nicht die ohne Eintrag.
             let count = recs[i..j].iter().filter(|(_, x)| x.is_some()).count();
             // Die Wochenzeile zählt die ganze Woche, auch wenn der Filter Tage ausblendet;
@@ -599,7 +608,7 @@ impl Model {
                     sunday.format("%d.%m.%Y")
                 ),
                 total: format!("{}  ·  {}  ·  Saldo ", plural(count, "Tag", "Tage"), store::fmt_hm(total)),
-                balance: total - target,
+                balance: counted - target,
             };
             let days: Vec<Row> = recs[i..j]
                 .iter()
@@ -1200,8 +1209,7 @@ fn cell_view(m: &Model, column: Option<&str>, row: NSInteger) -> Option<Retained
     // Die Saldo-Zelle eines Tages ist farbig – außer in der markierten Zeile.
     let tint = match (row, column) {
         (Row::Day { day, rec, .. }, Some("balance")) => {
-            let target = m.settings.counted_target(day, rec.work_secs, now().date());
-            (rec.work_secs > 0 || target > 0).then(|| palette::balance(rec.shown_work_secs - target))
+            m.settings.day_balance(day, rec, now().date()).map(palette::balance)
         }
         (Row::Missing { target, .. }, Some("balance")) => Some(palette::balance(-target)),
         _ => None,
@@ -1289,12 +1297,11 @@ fn cell_view(m: &Model, column: Option<&str>, row: NSInteger) -> Option<Retained
                 }
                 "work" => (store::fmt_hm(rec.shown_work_secs), NSTextAlignment::Right, false),
                 "balance" => {
-                    // Mit Abwesenheit gibt es auch ohne Arbeitszeit einen Saldo (Zeitausgleich).
-                    let target = m.settings.counted_target(day, rec.work_secs, today);
-                    if rec.work_secs > 0 || target > 0 {
-                        (rules::fmt_balance(rec.shown_work_secs - target), NSTextAlignment::Right, true)
-                    } else {
-                        ("–".to_string(), NSTextAlignment::Right, true)
+                    // Mit Abwesenheit gibt es auch ohne Arbeitszeit einen Saldo (Zeitausgleich);
+                    // Arbeit an einem freien Tag, die nicht zählt, hat keinen.
+                    match m.settings.day_balance(day, rec, today) {
+                        Some(b) => (rules::fmt_balance(b), NSTextAlignment::Right, true),
+                        None => ("–".to_string(), NSTextAlignment::Right, true),
                     }
                 }
                 "pause" => (store::fmt_hm(rec.shown_pause_secs), NSTextAlignment::Right, false),
@@ -1417,9 +1424,10 @@ fn refresh_summary() {
         let (ww, _wp, wn, _) = sum(&|d| d >= week_start && d <= today);
         let (mw, mp, mn, _) = sum(&|d| d.year() == today.year() && d.month() == today.month());
         // Das Soll samt Abwesenheiten (halber Urlaubstag, Zeitausgleich) wie überall sonst.
-        let (_, wt) = rules::balance(&m.days, week_start, today, today, &st);
+        // Der Saldo ohne Arbeit an freien Tagen, die nicht zählt.
+        let (wc, wt) = rules::balance(&m.days, week_start, today, today, &st);
         let month_end = month_start(month_start(today) + Duration::days(31)) - Duration::days(1);
-        let (_, mt) = rules::balance(&m.days, month_start(today), month_end, today, &st);
+        let (mc, mt) = rules::balance(&m.days, month_start(today), month_end, today, &st);
         let begin = m.day(today).zip(recs.iter().find(|r| r.date == today)).map(|(d, r)| {
             let manual = if d.start.is_some() { " (manuell)" } else { "" };
             format!("Beginn {} Uhr{manual}", fmt_clock(r.first_start))
@@ -1441,13 +1449,13 @@ fn refresh_summary() {
                 value: store::fmt_hm(ww),
                 detail: format!("{} · Saldo ", plural(wn, "Arbeitstag", "Arbeitstage")),
                 value_balance: None,
-                detail_balance: Some(ww - wt),
+                detail_balance: Some(wc - wt),
             },
             Card {
                 value: store::fmt_hm(mw),
                 detail: format!("{} · Saldo ", plural(mn, "Arbeitstag", "Arbeitstage")),
                 value_balance: None,
-                detail_balance: Some(mw - mt),
+                detail_balance: Some(mc - mt),
             },
             Card {
                 value: store::fmt_hm(avg(mw)),
@@ -1901,13 +1909,14 @@ fn day_stats(date: NaiveDate, day: Option<&Day>, days: &[Day], settings: &Settin
         None => 0,
     };
     match rec {
-        Some((_, r)) if r.work_secs > 0 => DayStats::Numbers {
+        Some((d, r)) if r.work_secs > 0 => DayStats::Numbers {
             work: r.shown_work_secs,
             pause: r.shown_pause_secs,
-            balance: r.shown_work_secs - target,
+            // Arbeit an einem freien Tag, die nicht zählt: kein Saldo.
+            balance: settings.day_balance(d, &r, today),
         },
         // Ohne Arbeitszeit, aber mit Soll (Arbeitstag ohne Eintrag, Zeitausgleich, halber Tag).
-        _ if target > 0 => DayStats::Numbers { work: 0, pause: 0, balance: -target },
+        _ if target > 0 => DayStats::Numbers { work: 0, pause: 0, balance: Some(-target) },
         Some((d, _)) if d.absence.is_some() && d.periods.is_empty() => DayStats::Note("Keine Arbeitszeit, kein Soll."),
         Some(_) => DayStats::Note("Keine Arbeitszeit im Arbeitszeitrahmen."),
         None => DayStats::Note("Für diesen Tag ist noch nichts erfasst."),
@@ -2041,8 +2050,9 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     section(
         "Abwesenheit",
         None,
-        "Urlaub, Krankheit und Feiertag senken das Soll des Tages, ein halber Tag auf die Hälfte. \
-         Zeitausgleich lässt es stehen, auch ohne Arbeitszeit – das Zeitkonto sinkt entsprechend. \
+        "Urlaub, Krankheit und Feiertag senken das Soll des Tages, ein halber Tag auf die Hälfte; \
+         Sonderurlaub gilt immer ganztags. Zeitausgleich lässt das Soll stehen, auch ohne \
+         Arbeitszeit – das Zeitkonto sinkt entsprechend. \
          Ganztags geht eine Abwesenheit nur an einem Tag ohne andere Einträge: Die löscht man \
          vorher mit „Alle Einträge löschen …“ unten; ein halber Tag geht auch neben Arbeitszeit.",
     );
@@ -2058,8 +2068,8 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     absence_kind.addItemWithTitle(&ns("Keine"));
     for kind in AbsenceKind::ALL {
         absence_kind.addItemWithTitle(&ns(kind.label()));
-        // Was es nur ganztags gibt (Zeitausgleich), ist neben Einträgen gesperrt.
-        if busy && !kind.reduces_target() && absence.is_none_or(|a| a.kind != kind) {
+        // Was es nur ganztags gibt (Sonderurlaub, Zeitausgleich), ist neben Einträgen gesperrt.
+        if busy && !kind.allows_half() && absence.is_none_or(|a| a.kind != kind) {
             if let Some(item) = absence_kind.lastItem() {
                 item.setEnabled(false);
                 item.setToolTip(Some(&ns(blocked)));
@@ -2080,7 +2090,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     }
     absence_part.selectItemAtIndex(absence.is_some_and(|a| a.half) as isize);
     // Halbe Tage gibt es bei Urlaub, Krankheit und Feiertag.
-    absence_part.setEnabled(absence.is_some_and(|a| a.kind.reduces_target()));
+    absence_part.setEnabled(absence.is_some_and(|a| a.kind.allows_half()));
     for popup in [&absence_kind, &absence_part] {
         unsafe {
             popup.setTarget(Some(target));
@@ -4021,7 +4031,7 @@ mod tests {
         let plain = Day::new(date(17));
         let mut corrected = Day::new(date(18));
         corrected.start = Some(7 * 3600);
-        let warning = [Warning::Weekend];
+        let warning = [Warning::Weekend { counted: false }];
         assert!(!Filter::default().is_active());
         assert!(Filter::default().shows(&plain, &[], today));
         let warnings = Filter { warnings: true, ..Filter::default() };

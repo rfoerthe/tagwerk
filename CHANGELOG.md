@@ -34,8 +34,25 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
   gilt je Tag, vergangene Tage bleiben unverändert.
 - `--menu-screenshot`: `TAGWERK_NOW=JJJJ-MM-TT HH:MM` legt die Uhrzeit fest, damit die
   Bilder nicht von Tag und Uhrzeit der Aufnahme abhängen.
+- Arbeit an freien Tagen im Saldo: Neuer Schalter „Arbeit an freien Tagen als Mehrarbeit
+  zählen“ im Blatt „Arbeitszeit ändern“ – Teil jedes Stands der Arbeitszeitregeln, damit
+  er ab einem Datum gilt; die Liste der Stände zeigt ihn in der Spalte „Freie Tage“.
+  Standardmäßig ist er aus: Arbeit am Wochenende und an abgewählten Arbeitstagen wird
+  angezeigt, wirkt sich aber nicht auf Saldo und Zeitkonto aus. Solche Tage haben in der
+  Tabelle, im Inspektor, im Markdown-Export und im PDF keinen Saldo („–“), der Hinweis
+  lautet „Arbeit am Wochenende – zählt nicht im Saldo“. Die Datenbank bekommt dafür die
+  Spalte `free_days_count` in `work_rules`; ältere Versionen speichern ohne sie, dann gilt
+  der Standard.
+- Abwesenheit Sonderurlaub (Kürzel SU): senkt das Soll wie Urlaub, gilt aber immer
+  ganztags – im Inspektor, in der Wochenansicht und im Export. Ältere Versionen kennen sie
+  nicht und rechnen den Tag mit vollem Soll.
 
 ### Geändert
+- Arbeit an freien Tagen zählt standardmäßig nicht mehr als Mehrarbeit. Das gilt auch für
+  vorhandene Stände der Arbeitszeitregeln: Wochensaldo und Zeitkonto ändern sich
+  rückwirkend um die Arbeit an Wochenenden und abgewählten Arbeitstagen. Wer sie weiter
+  zählen will, setzt den Haken „Arbeit an freien Tagen als Mehrarbeit zählen“ im
+  jeweiligen Stand.
 - Die Mindestpause steht nicht mehr im Reiter „Erfassung“, sondern bei den
   Arbeitszeitregeln. „Standardwerte“ lässt frühere Stände der Arbeitszeitregeln stehen und
   setzt sie ab heute zurück. Die Bilder der Einstellungen im README sind neu, dazu kommt

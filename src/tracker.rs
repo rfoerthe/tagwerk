@@ -18,7 +18,7 @@
 //! Einträge des Tages, bleibt die Erfassung für heute aus ([`FreeDay::Stopped`]) – auch nach
 //! „Heute erfassen“ –, bis es wieder gewählt ist.
 //!
-//! An einem Tag mit ganztägiger Abwesenheit (Urlaub, Krank, Feiertag, Zeitausgleich) wird
+//! An einem Tag mit ganztägiger Abwesenheit (Urlaub, Sonderurlaub, Krank, Feiertag, Zeitausgleich) wird
 //! nichts erfasst, und die manuellen Entscheidungen greifen nicht – bis die Abwesenheit im
 //! Fenster „Aufzeichnungen“ wieder auf „Keine“ steht.
 
