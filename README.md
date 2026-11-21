@@ -175,7 +175,10 @@ Salden sind überall farbig, grün im Plus und rot im Minus: in der Spalte „Sa
 Wochensummen, in den Kennzahlen samt Zeitkonto und im Kopf der Wochenansicht. Der Inspektor
 nennt oben Arbeitszeit, Pausen und Saldo des Tages als drei Zahlen nebeneinander. Was ein
 Abschnitt bewirkt, erklärt der Info-Knopf (ⓘ) neben seiner Überschrift – als Tooltip und
-auf Klick als kleines Fenster.
+auf Klick als kleines Fenster. Der Abschnitt „Automatisch erfasst“ ganz unten ist
+zugeklappt und nennt dann nur Anzahl und Spanne der Zeiten, in denen der Mac entsperrt war
+(„5 Zeiten, 07:28 – 18:01“); das Dreieck vor der Überschrift klappt die einzelnen Zeiten
+auf. Tagwerk merkt sich das für alle Tage.
 
 - **Abwesenheit** – im Inspektor lässt sich für einen Tag Urlaub, Sonderurlaub, Krank,
   Feiertag oder Zeitausgleich eintragen, auch für Tage ohne Aufzeichnung (über „Tag bearbeiten“), in der
