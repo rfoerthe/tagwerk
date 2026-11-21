@@ -11,11 +11,18 @@
 //! Spätestens um Mitternacht oder mit dem Feierabend endet es, damit ein vergessenes „Zurück am
 //! Mac“ nicht tagelang Arbeitszeit einträgt.
 //!
+//! An freien Tagen (Samstag, Sonntag, abgewählte Arbeitstage) wird erfasst, aber nicht gezählt,
+//! wenn das eingestellt ist: Beim ersten Entsperren bekommt der Tag die Markierung
+//! [`FreeDay::Uncounted`] – bis „Heute erfassen“ die Zeit zählen lässt (erst dann bietet das
+//! Menü Arbeitsbeginn, Arbeit unterbrechen, Ohne Mac weiterarbeiten und Feierabend an). Löscht man im Fenster „Aufzeichnungen“ alle
+//! Einträge des Tages, bleibt die Erfassung für heute aus ([`FreeDay::Stopped`]) – auch nach
+//! „Heute erfassen“ –, bis es wieder gewählt ist.
+//!
 //! An einem Tag mit ganztägiger Abwesenheit (Urlaub, Krank, Feiertag, Zeitausgleich) wird
 //! nichts erfasst, und die manuellen Entscheidungen greifen nicht – bis die Abwesenheit im
 //! Fenster „Aufzeichnungen“ wieder auf „Keine“ steht.
 
-use crate::day::{self, Absence, Activity, Day, Mode, Span, WorkBlock, DAY_END};
+use crate::day::{self, Absence, Activity, Day, FreeDay, Mode, Span, WorkBlock, DAY_END};
 use crate::rules::{self, Settings, Warning};
 use crate::store::{self, Status};
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime};
@@ -202,10 +209,42 @@ impl Tracker {
             Mode::Auto => match self.paused_since {
                 Some(since) if self.on_away() => Status::Away(since, self.away),
                 Some(since) if self.on_break() => Status::Break(since),
+                _ if self.counting(now.date()) == Some(false) => Status::FreeDay,
                 _ if !self.in_frame(now) => Status::Outside,
                 _ if self.is_running() => Status::Running,
                 _ => Status::Paused,
             },
+        }
+    }
+
+    /// Was am freien Tag `date` für die automatische Erfassung gilt (siehe [`Day::free_day`]).
+    /// `None`: Der Tag ist kein freier Tag, oder es wurde dort noch nichts erfasst.
+    pub fn free_day(&self, date: NaiveDate) -> Option<FreeDay> {
+        self.day(date).and_then(|d| d.free_day)
+    }
+
+    /// Zählt die automatische Erfassung am freien Tag `date`? `None` wie bei
+    /// [`Tracker::free_day`].
+    pub fn counting(&self, date: NaiveDate) -> Option<bool> {
+        self.free_day(date).map(FreeDay::counts)
+    }
+
+    /// „Heute erfassen“ an- oder ausschalten: Die automatisch erfasste Zeit des Tages zählt
+    /// (rückwirkend ab dem ersten Entsperren) bzw. zählt nicht mehr. Nach dem Löschen aller
+    /// Einträge ([`FreeDay::Stopped`]) erfasst der Aufrufer danach wieder.
+    pub fn set_counting(&mut self, date: NaiveDate, on: bool) -> bool {
+        let state = if on { FreeDay::Counted } else { FreeDay::Uncounted };
+        if self.absent(date).is_some() || self.free_day(date) == Some(state) {
+            return false;
+        }
+        self.day_mut(date).free_day = Some(state);
+        true
+    }
+
+    /// Erstes Erfassen an einem freien Tag: Die Zeit zählt erst nach „Heute erfassen“.
+    fn mark_free_day(&mut self, date: NaiveDate) {
+        if !self.settings.auto_counts_on(date) && self.free_day(date).is_none() {
+            self.day_mut(date).free_day = Some(FreeDay::Uncounted);
         }
     }
 
@@ -233,10 +272,12 @@ impl Tracker {
         if self.running_since.is_some()
             || matches!(self.mode(now), Mode::Closed(_))
             || self.absent(now.date()).is_some()
+            || self.free_day(now.date()) == Some(FreeDay::Stopped)
         {
             return false;
         }
         self.end_away(now);
+        self.mark_free_day(now.date());
         self.running_since = Some(now);
         self.paused_since = None;
         true
@@ -274,6 +315,8 @@ impl Tracker {
                     self.running_since = None;
                     self.paused_since = Some(midnight);
                     self.pause_reason = PauseReason::Manual;
+                } else {
+                    self.mark_free_day(now.date());
                 }
                 changed = true;
             }
@@ -453,10 +496,10 @@ impl Tracker {
     pub fn replace_days(&mut self, days: Vec<Day>, settings: Settings, now: NaiveDateTime) {
         // Tag im Fenster „Aufzeichnungen“ gelöscht: Was gerade läuft, zählt erst ab jetzt –
         // sonst brächte das nächste Speichern die laufende Periode bzw. Arbeit ohne Mac seit
-        // ihrem Beginn zurück.
-        let deleted = |since: NaiveDateTime| {
-            self.saved.iter().any(|d| d.date == since.date()) && !days.iter().any(|d| d.date == since.date())
-        };
+        // ihrem Beginn zurück. Gelöscht heißt: keine Einträge mehr (an einem freien Tag bleibt
+        // die Entscheidung zur Erfassung stehen).
+        let has_entries = |list: &[Day], date: NaiveDate| list.iter().any(|d| d.date == date && d.has_entries());
+        let deleted = |since: NaiveDateTime| has_entries(&self.saved, since.date()) && !has_entries(&days, since.date());
         if self.running_since.is_some_and(deleted) {
             self.running_since = Some(now);
         }
@@ -484,6 +527,29 @@ impl Tracker {
             self.running_since = None;
             self.paused_since = Some(now);
             self.pause_reason = PauseReason::Manual;
+        }
+        // Freier Tag, alle Einträge gelöscht: Die Erfassung bleibt aus (ohne Eintrag).
+        if self.free_day(now.date()) == Some(FreeDay::Stopped)
+            && self.running_since.is_some_and(|since| since.date() == now.date())
+        {
+            self.running_since = None;
+            self.paused_since = Some(now);
+            self.pause_reason = PauseReason::Manual;
+        }
+        self.sync_free_day(now.date());
+    }
+
+    /// Nach geänderten Einstellungen (Arbeitstage, „Nur an Arbeitstagen“): Ist heute kein
+    /// freier Tag mehr, zählt die Erfassung wieder; ist er es geworden und wird gerade
+    /// erfasst, zählt sie erst nach „Heute erfassen“ – wie beim ersten Entsperren.
+    fn sync_free_day(&mut self, today: NaiveDate) {
+        if self.settings.auto_counts_on(today) {
+            if self.counting(today) == Some(false) {
+                self.day_mut(today).free_day = None;
+                self.cleanup();
+            }
+        } else if self.running_since.is_some() {
+            self.mark_free_day(today);
         }
     }
 
@@ -909,5 +975,97 @@ mod tests {
         let (changed, removed) = Tracker::diff(&snap, &snap[1..]);
         assert!(changed.is_empty());
         assert_eq!(removed, vec![old.date]);
+    }
+
+    #[test]
+    fn free_day_is_recorded_but_not_counted() {
+        // Samstag, 21.11.2026
+        let mut t = Tracker::new(vec![], Settings::default());
+        t.start(dt(21, 10, 0));
+        assert_eq!(t.counting(dt(21, 10, 0).date()), Some(false));
+        assert_eq!(t.status(dt(21, 11, 0)), Status::FreeDay);
+        assert_eq!(t.today(dt(21, 11, 0)).work_secs, 0);
+        // Erfasst wird trotzdem – nachträglich gezählt ab dem ersten Entsperren.
+        assert!(t.set_counting(dt(21, 11, 0).date(), true));
+        assert_eq!(t.status(dt(21, 11, 0)), Status::Running);
+        assert_eq!(t.today(dt(21, 11, 0)).work_secs, hm(1, 0));
+        // Nach erneutem Entsperren bleibt es dabei.
+        t.stop(dt(21, 12, 0), PauseReason::Locked);
+        t.start(dt(21, 13, 0));
+        assert_eq!(t.counting(dt(21, 13, 0).date()), Some(true));
+        // Und wieder aus.
+        assert!(t.set_counting(dt(21, 13, 0).date(), false));
+        assert_eq!(t.today(dt(21, 14, 0)).work_secs, 0);
+    }
+
+    #[test]
+    fn workdays_and_setting_off_count_as_before() {
+        let mut t = Tracker::new(vec![], Settings::default());
+        t.start(dt(20, 8, 0)); // Freitag
+        assert_eq!(t.counting(dt(20, 8, 0).date()), None);
+        assert_eq!(t.status(dt(20, 9, 0)), Status::Running);
+        // Freitag abgewählt: ein freier Tag.
+        let four = Settings { workdays: 0b0_1111, ..Settings::default() };
+        let mut t = Tracker::new(vec![], four);
+        t.start(dt(20, 8, 0));
+        assert_eq!(t.status(dt(20, 9, 0)), Status::FreeDay);
+        // Einstellung aus: Auch am Samstag zählt alles.
+        let all = Settings { auto_workdays_only: false, ..Settings::default() };
+        let mut t = Tracker::new(vec![], all);
+        t.start(dt(21, 8, 0));
+        assert_eq!(t.counting(dt(21, 8, 0).date()), None);
+        assert_eq!(t.today(dt(21, 9, 0)).work_secs, hm(1, 0));
+    }
+
+    #[test]
+    fn midnight_into_free_day_and_settings_change() {
+        // Freitag 23:00 bis Samstag 01:00: ab Mitternacht nicht mehr gezählt.
+        let mut t = Tracker::new(vec![], Settings::default());
+        t.start(dt(20, 23, 0));
+        assert!(t.roll_over(dt(21, 0, 30)));
+        assert_eq!(t.counting(dt(21, 0, 30).date()), Some(false));
+        assert_eq!(t.counting(dt(20, 0, 0).date()), None);
+
+        // Einstellung ausgeschaltet: Heute zählt wieder.
+        let days = t.snapshot(dt(21, 1, 0));
+        let all = Settings { auto_workdays_only: false, ..Settings::default() };
+        t.replace_days(days.clone(), all, dt(21, 1, 0));
+        assert_eq!(t.counting(dt(21, 1, 0).date()), None);
+        // Und wieder an: Was gerade erfasst wird, zählt erst nach „Heute erfassen“.
+        t.replace_days(t.snapshot(dt(21, 1, 0)), Settings::default(), dt(21, 1, 0));
+        assert_eq!(t.counting(dt(21, 1, 0).date()), Some(false));
+    }
+
+    #[test]
+    fn clearing_an_uncounted_free_day_stops_recording() {
+        let mut t = Tracker::new(vec![], Settings::default());
+        t.start(dt(21, 1, 0));
+        assert_eq!(t.free_day(dt(21, 1, 0).date()), Some(FreeDay::Uncounted));
+        // „Alle Einträge löschen“ im Fenster „Aufzeichnungen“: nur die Entscheidung bleibt.
+        let mut cleared = Day::new(dt(21, 0, 0).date());
+        cleared.free_day = Some(FreeDay::Stopped);
+        t.replace_days(vec![cleared.clone()], Settings::default(), dt(21, 1, 23));
+        assert!(!t.is_running());
+        assert_eq!(t.snapshot(dt(21, 1, 30)), vec![cleared.clone()], "kein neuer Abschnitt ab jetzt");
+        assert_eq!(t.status(dt(21, 1, 30)), Status::FreeDay);
+        // Entsperren startet nichts …
+        assert!(!t.start(dt(21, 9, 0)));
+        // … bis „Heute erfassen“: dann zählt es ab jetzt.
+        assert!(t.set_counting(dt(21, 9, 0).date(), true));
+        assert!(t.start(dt(21, 9, 0)));
+        assert_eq!(t.today(dt(21, 10, 0)).work_secs, hm(1, 0));
+
+        // Auch mit „Heute erfassen“: Nach dem Löschen ist der Haken weg und die Erfassung aus.
+        let mut t = Tracker::new(vec![], Settings::default());
+        t.start(dt(22, 9, 0));
+        t.set_counting(dt(22, 9, 0).date(), true);
+        // Gespeichert wie in der App (zwischendurch samt laufender Periode).
+        t.saved = t.snapshot(dt(22, 9, 59));
+        let mut cleared = Day::new(dt(22, 0, 0).date());
+        cleared.free_day = Some(FreeDay::Stopped);
+        t.replace_days(vec![cleared.clone()], Settings::default(), dt(22, 10, 0));
+        assert!(!t.is_running());
+        assert_eq!(t.counting(dt(22, 10, 0).date()), Some(false));
+        assert_eq!(t.snapshot(dt(22, 11, 0)), vec![cleared]);
     }
 }

@@ -97,6 +97,16 @@ reine Anzeige und lassen sich nicht anklicken. Lange Hinweise brechen um, damit 
   „Zurück am Mac“, spätestens um Mitternacht oder mit dem Feierabend. Sie erscheint als
   „Arbeit ohne Mac“ mit der gewählten Notiz. Beim Beenden der App bleibt der Zustand
   bestehen, beim Abmelden oder Neustarten endet er.
+- **Heute erfassen** – nur an freien Tagen (Wochenende, abgewählte Arbeitstage), nicht
+  nach Feierabend. Dort zeichnet Tagwerk zwar auf, zählt aber nichts: Der Status heißt
+  „Freier Tag – Erfassung zählt nicht“, das Symbol ist das für „außerhalb“, und das Menü
+  bietet nur „Heute erfassen“ an – Arbeitsbeginn, Arbeit unterbrechen, Ohne Mac
+  weiterarbeiten und Feierabend erscheinen erst danach. Mit „Heute erfassen“ zählt die
+  Zeit des Tages – rückwirkend ab dem ersten Entsperren; ein Häkchen zeigt das, ein
+  zweiter Klick nimmt es zurück. Löscht man im Fenster „Aufzeichnungen“ alle Einträge des
+  Tages, fällt auch der Haken weg, und die Erfassung bleibt für heute aus („Freier Tag –
+  Erfassung aus“), bis „Heute erfassen“ wieder gewählt ist. Abschaltbar in den
+  Einstellungen („Freie Tage“).
 - **Pause als Arbeitszeit zählen** – nachträglich: das Untermenü listet die Pausen von
   heute; zu jeder Pause wählt man den Grund (Meeting, Telefonat, Networking oder
   Sonstiges), dann ist sie als Arbeit ohne Mac eingetragen.
@@ -236,7 +246,9 @@ zu „Woche“ zeigt die Woche des ausgewählten Tags. In der Menüleisten-App e
   zu ändern oder zurückzusetzen.
 - Tage mit Regelverstößen tragen ein Warnschild; ein Klick auf den Tageskopf zeigt die
   Hinweise.
-- Arbeit außerhalb des Arbeitszeitrahmens erscheint orange als „nicht gezählt“.
+- Arbeit außerhalb des Arbeitszeitrahmens erscheint orange als „nicht gezählt“, ebenso die
+  erfasste Zeit an einem freien Tag ohne „Heute erfassen“. Dort bietet der Rechtsklick
+  „Erfasste Zeit zählen“ an (mit Häkchen, wenn sie zählt; ⌘Z nimmt es zurück).
 - Arbeit ohne Mac ist schraffiert und, wenn Platz ist, dezent mit der Art beschriftet
   (Meeting, Telefonat …); der Tooltip nennt Uhrzeit und Notiz. Ein Klick auf
   die Schraffur bietet an, sie zu löschen. Danach gilt dort wieder, was erfasst ist: War
@@ -291,11 +303,12 @@ Die Einstellungen stehen auf vier Reitern:
 |              | Arbeit ohne Mac        | „mindestens … Minuten“ (1 bis 240): kürzere Abschnitte lassen sich im Fenster „Aufzeichnungen“ nicht eintragen | 15 Min. |
 |              | Inaktivität            | Erfassung anhalten nach so vielen Minuten ohne Eingabe                  | aus (10 Min.)   |
 |              | Lange Sperre           | Beim Entsperren nach mindestens 30 Min. Sperre nachfragen               | aus             |
+|              | Freie Tage             | Automatische Erfassung nur an Arbeitstagen zählen; am Wochenende und an abgewählten Arbeitstagen erst nach „Heute erfassen“ | ein |
 | Mitteilungen | Mitteilungen           | Zeigt, ob Tagwerk Mitteilungen senden darf; wenn nicht, öffnet „Systemeinstellungen öffnen“ die Mitteilungseinstellungen von Tagwerk | – |
 |              | Erinnern an            | Höchstarbeitszeit (9:45 und 10 Std.) und Pause (5:45 und 6 Std. am Stück), einzeln abschaltbar | beides ein |
 
 - **Allgemein** – unter der Auswahl des Symbolsatzes stehen seine vier Zustände als
-  Vorschau: läuft, Pause, außerhalb des Arbeitszeitrahmens, Feierabend.
+  Vorschau: läuft, Pause, außerhalb des Arbeitszeitrahmens oder freier Tag, Feierabend.
 - **Arbeitszeit** – unter den Arbeitstagen steht, was aus der Auswahl folgt, etwa
   „5-Tage-Woche · 7:48 h pro Arbeitstag“. An freien Tagen – dem Wochenende und abgewählten
   Arbeitstagen – gibt es kein Soll; Arbeit dort zählt als Mehrarbeit. Das Zeitkonto zählt
@@ -307,7 +320,9 @@ Die Einstellungen stehen auf vier Reitern:
   entsprechend gesenkt ist. Sie gilt für Einträge von Hand im Inspektor und in der
   Wochenansicht, nicht für „Ohne Mac weiterarbeiten“ im Menü. Die Minuten für die Inaktivität lassen sich
   erst einstellen, wenn die Erkennung eingeschaltet ist. Die Nachfrage nach langer Sperre
-  braucht Mitteilungen.
+  braucht Mitteilungen. „Freie Tage“ entscheidet beim ersten Entsperren eines Tages und
+  merkt sich das am Tag: Vergangene Tage ändern sich durch die Einstellung nicht – auch
+  nicht, wenn man später andere Arbeitstage wählt. Einträge von Hand zählen immer.
 - **Mitteilungen** – oben steht, ob macOS Mitteilungen von Tagwerk zulässt (erlaubt, nicht
   erlaubt, ausgeblendet oder nur in der installierten App). Die beiden Schalter gelten nur
   für die Erinnerungen; die Hinweise im Menü und im Fenster „Aufzeichnungen“ bleiben.
@@ -375,7 +390,8 @@ erfasste Arbeitszeit ändern sie nicht.
 > Krankheit trägt man deshalb als Abwesenheit ein; sie regelt das Soll des Tages (halber
 > Urlaubstag: die Hälfte, Zeitausgleich: voll). Heute zählt das Soll erst mit Arbeitszeit
 > oder Abwesenheit, künftige Tage (eine geplante Abwesenheit) noch gar nicht.
-> Arbeit am Wochenende und an abgewählten Arbeitstagen zählt vollständig als Mehrarbeit.
+> Arbeit am Wochenende und an abgewählten Arbeitstagen zählt vollständig als Mehrarbeit –
+> automatisch erfasste Zeit dort erst nach „Heute erfassen“ (Einstellung „Freie Tage“).
 > Das Zeitkonto ist dieser Saldo über alle Tage (oder ab einem Datum) plus Übertrag.
 
 ## Installation
@@ -492,7 +508,8 @@ Alle Daten liegen lokal in einer SQLite-Datenbank:
 ```
 
 Sie enthält die automatisch erfassten Perioden (Mac entsperrt), getrennt davon die
-manuellen Korrekturen (Arbeitsbeginn, Pausen, Arbeit ohne Mac, Feierabend, Abwesenheiten) sowie die Einstellungen. Die
+manuellen Korrekturen (Arbeitsbeginn, Pausen, Arbeit ohne Mac, Feierabend, Abwesenheiten,
+„Heute erfassen“ an freien Tagen) sowie die Einstellungen. Die
 Perioden werden ungekürzt gespeichert; Mindestpause und Arbeitszeitrahmen wirken erst
 bei der Berechnung. Bearbeitet werden die Daten im Fenster „Aufzeichnungen“; Änderungen
 dort übernimmt die laufende App automatisch.
@@ -506,7 +523,8 @@ umbenannt. Ab Version 1.2.0 nutzt die Datenbank Schema 3; Tagwerk 1.1 und älter
 sie danach nicht mehr öffnen – zurück geht es nur mit einem Backup aus `backups/` von
 einem Tag vor dem Update. Die Abwesenheiten liegen in einer eigenen Tabelle ohne neue
 Schema-Version: Ältere Versionen ab 1.2.0 öffnen die Datenbank weiter, kennen die
-Abwesenheiten nur nicht und rechnen das Soll ohne sie.
+Abwesenheiten nur nicht und rechnen das Soll ohne sie. Ebenso die Entscheidung „Heute
+erfassen“ an freien Tagen: Ältere Versionen zählen dort alle erfasste Zeit.
 
 ## Entwicklung
 

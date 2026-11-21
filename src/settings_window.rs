@@ -101,6 +101,8 @@ struct State {
     idle: Retained<NSTextField>,
     idle_stepper: Retained<NSStepper>,
     ask: Retained<NSButton>,
+    /// Automatische Erfassung nur an Arbeitstagen zählen.
+    free_days: Retained<NSButton>,
     notify_limit: Retained<NSButton>,
     notify_break: Retained<NSButton>,
     tabs: Retained<NSTabView>,
@@ -337,6 +339,7 @@ define_class!(
             with_state(|s| {
                 let on = |b: &NSButton| b.state() == NSControlStateValueOn;
                 s.settings.ask_after_lock = on(&s.ask);
+                s.settings.auto_workdays_only = on(&s.free_days);
                 s.settings.notify_limit = on(&s.notify_limit);
                 s.settings.notify_break = on(&s.notify_break);
             });
@@ -428,6 +431,7 @@ impl State {
         self.idle.setStringValue(&ns(&idle_min.to_string()));
         self.idle_stepper.setIntegerValue(idle_min as isize);
         self.ask.setState(state(s.ask_after_lock));
+        self.free_days.setState(state(s.auto_workdays_only));
         self.notify_limit.setState(state(s.notify_limit));
         self.notify_break.setState(state(s.notify_break));
         let index = IconSet::ALL.iter().position(|&x| x == s.icon_set).unwrap_or(0);
@@ -763,6 +767,7 @@ fn build(on_change: fn()) -> State {
     let idle_stepper =
         stepper(target, sel!(idleStepped:), (IDLE_RANGE.0 / 60) as f64, (IDLE_RANGE.1 / 60) as f64, 1.0);
     let ask = checkbox("Beim Entsperren nach langer Sperre nachfragen", sel!(switchChanged:));
+    let free_days = checkbox("Automatische Erfassung nur an Arbeitstagen zählen", sel!(switchChanged:));
     let notify_limit = checkbox("Höchstarbeitszeit (bei 9:45 und 10 Std. Arbeit)", sel!(switchChanged:));
     let notify_break = checkbox("Pause (bei 5:45 und 6 Std. Arbeit am Stück)", sel!(switchChanged:));
     let notify_icon = NSImageView::new(mtm);
@@ -855,7 +860,10 @@ fn build(on_change: fn()) -> State {
                 row(Some("Anmeldung:"), &login),
                 row(Some("Menüleiste:"), &bar_row),
                 row(None, &preview_row),
-                row(None, &caption("Von links: läuft, Pause, außerhalb des Arbeitszeitrahmens, Feierabend.")),
+                row(
+                    None,
+                    &caption("Von links: läuft, Pause, außerhalb des Arbeitszeitrahmens oder freier Tag, Feierabend."),
+                ),
                 row(Some("Kurzbefehle:"), &hotkeys),
                 row(None, &caption(&hotkey::summary())),
             ],
@@ -933,8 +941,17 @@ fn build(on_change: fn()) -> State {
                         rules::ASK_AFTER_LOCK / 60
                     )),
                 ),
+                row(Some("Freie Tage:"), &free_days),
+                row(
+                    None,
+                    &caption(
+                        "Am Wochenende und an den übrigen freien Tagen wird erfasst, aber erst gezählt, \
+                         wenn im Menü „Heute erfassen“ gewählt ist – nachträglich auch in der \
+                         Wochenansicht. Einträge von Hand zählen immer.",
+                    ),
+                ),
             ],
-            vec![2, 4, 6],
+            vec![2, 4, 6, 8],
             None,
         ),
         (
@@ -1078,6 +1095,7 @@ fn build(on_change: fn()) -> State {
         idle,
         idle_stepper,
         ask,
+        free_days,
         notify_limit,
         notify_break,
         tabs,

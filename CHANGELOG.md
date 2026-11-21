@@ -6,6 +6,19 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt
+- Freie Tage: Am Wochenende und an abgewählten Arbeitstagen zeichnet Tagwerk weiter auf,
+  zählt die automatisch erfasste Zeit aber erst nach „Heute erfassen“ im Menü – rückwirkend
+  ab dem ersten Entsperren. Bis dahin heißt der Status „Freier Tag – Erfassung zählt
+  nicht“, und die Wochenansicht zeigt die Zeit orange als „nicht gezählt“; dort lässt sie
+  sich per Rechtsklick („Erfasste Zeit zählen“) auch nachträglich zählen. Solange nichts
+  zählt, bietet das Menü nur „Heute erfassen“ an; Arbeitsbeginn, Arbeit unterbrechen, Ohne
+  Mac weiterarbeiten und Feierabend erscheinen erst danach. Einträge von Hand im Fenster
+  „Aufzeichnungen“ zählen immer. „Alle Einträge löschen …“ an einem solchen Tag nimmt auch den Haken bei
+  „Heute erfassen“ weg und lässt die Erfassung für heute aus, bis er wieder gesetzt ist.
+  Neue Einstellung „Freie Tage“ unter „Erfassung“ (standardmäßig ein); die Entscheidung
+  gilt je Tag, vergangene Tage bleiben unverändert.
+
 ### Geändert
 - Das geöffnete DMG zeigt ein gestaltetes Fenster: Titel „Tagwerk“, App-Symbol und Ordner
   „Programme“ mit einem Pfeil dazwischen und dem Hinweis, die App hineinzuziehen.
