@@ -129,7 +129,7 @@ fn compose(report: &Report, settings: &Settings, now: NaiveDateTime) -> Retained
             // Ohne Arbeitszeit gibt es weder Beginn noch Ende – und einen Saldo nur mit Soll.
             let worked = d.work > 0;
             let clock = |t: i64| if worked { fmt_clock(t) } else { "–".to_string() };
-            let balance = if worked || d.target > 0 { rules::fmt_balance(d.work - d.target) } else { "–".to_string() };
+            let balance = if d.has_balance() { rules::fmt_balance(d.balance()) } else { "–".to_string() };
             t.line(
                 &row([
                     &date,
@@ -145,8 +145,8 @@ fn compose(report: &Report, settings: &Settings, now: NaiveDateTime) -> Retained
                 if k == 0 { &first_of_week } else { &day_style },
             );
         }
-        let (work, pause, target) =
-            report.days[i..j].iter().fold((0, 0, 0), |(w, p, s), d| (w + d.work, p + d.pause, s + d.target));
+        let (work, pause, balance) =
+            report.days[i..j].iter().fold((0, 0, 0), |(w, p, b), d| (w + d.work, p + d.pause, b + d.balance()));
         t.line(
             &row([
                 &format!("KW {}", week.week()),
@@ -154,7 +154,7 @@ fn compose(report: &Report, settings: &Settings, now: NaiveDateTime) -> Retained
                 "",
                 &store::fmt_hm(work),
                 &store::fmt_hm(pause),
-                &rules::fmt_balance(work - target),
+                &rules::fmt_balance(balance),
             ]),
             9.0,
             bold,
@@ -172,7 +172,7 @@ fn compose(report: &Report, settings: &Settings, now: NaiveDateTime) -> Retained
             "",
             &store::fmt_hm(work),
             &store::fmt_hm(pause),
-            &rules::fmt_balance(work - target),
+            &rules::fmt_balance(report.balance()),
         ]),
         10.0,
         bold,

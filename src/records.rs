@@ -297,8 +297,8 @@ struct StatsView {
 /// Was im Kopf des Inspektors steht.
 #[derive(Clone, Debug, PartialEq)]
 enum DayStats {
-    /// Arbeitszeit, Pausen und Saldo (Sekunden).
-    Numbers { work: i64, pause: i64, balance: i64 },
+    /// Arbeitszeit, Pausen und Saldo (Sekunden; `None`: Die Arbeitszeit zählt nicht im Saldo).
+    Numbers { work: i64, pause: i64, balance: Option<i64> },
     Note(&'static str),
 }
 
@@ -326,8 +326,16 @@ impl StatsView {
             DayStats::Numbers { work, pause, balance } => {
                 self.values[0].setStringValue(&ns(&store::fmt_hm(*work)));
                 self.values[1].setStringValue(&ns(&store::fmt_hm(*pause)));
-                self.values[2].setStringValue(&ns(&rules::fmt_balance(*balance)));
-                self.values[2].setTextColor(Some(&palette::balance(*balance)));
+                match balance {
+                    Some(b) => {
+                        self.values[2].setStringValue(&ns(&rules::fmt_balance(*b)));
+                        self.values[2].setTextColor(Some(&palette::balance(*b)));
+                    }
+                    None => {
+                        self.values[2].setStringValue(&ns("–"));
+                        self.values[2].setTextColor(Some(&NSColor::secondaryLabelColor()));
+                    }
+                }
             }
             DayStats::Note(text) => self.note.setStringValue(&ns(text)),
         }
@@ -585,7 +593,8 @@ impl Model {
             let monday = recs[i].0 - Duration::days(recs[i].0.weekday().num_days_from_monday() as i64);
             let sunday = monday + Duration::days(6);
             let total: i64 = recs[i..j].iter().filter_map(|(_, x)| x.as_ref()).map(|(_, r)| r.shown_work_secs).sum();
-            let (_, target) = rules::balance(&self.days, monday, sunday, today, s);
+            // Der Saldo ohne Arbeit an freien Tagen, die nicht zählt.
+            let (counted, target) = rules::balance(&self.days, monday, sunday, today, s);
             // Gezählt werden die erfassten Tage, nicht die ohne Eintrag.
             let count = recs[i..j].iter().filter(|(_, x)| x.is_some()).count();
             // Die Wochenzeile zählt die ganze Woche, auch wenn der Filter Tage ausblendet;
@@ -599,7 +608,7 @@ impl Model {
                     sunday.format("%d.%m.%Y")
                 ),
                 total: format!("{}  ·  {}  ·  Saldo ", plural(count, "Tag", "Tage"), store::fmt_hm(total)),
-                balance: total - target,
+                balance: counted - target,
             };
             let days: Vec<Row> = recs[i..j]
                 .iter()
@@ -968,6 +977,13 @@ define_class!(
             reveal(&store::db_file());
         }
 
+        /// Freier Tag: „Erfasste Zeit zählen“ ein- oder ausgeschaltet.
+        #[unsafe(method(countingToggled:))]
+        fn counting_toggled(&self, sender: Option<&NSButton>) {
+            let on = sender.is_some_and(|b| b.state() == NSControlStateValueOn);
+            apply(Edit::SetCounting(on), true);
+        }
+
         #[unsafe(method(startToggled:))]
         fn start_toggled(&self, sender: Option<&NSButton>) {
             let on = sender.is_some_and(|b| b.state() == NSControlStateValueOn);
@@ -1200,8 +1216,7 @@ fn cell_view(m: &Model, column: Option<&str>, row: NSInteger) -> Option<Retained
     // Die Saldo-Zelle eines Tages ist farbig – außer in der markierten Zeile.
     let tint = match (row, column) {
         (Row::Day { day, rec, .. }, Some("balance")) => {
-            let target = m.settings.counted_target(day, rec.work_secs, now().date());
-            (rec.work_secs > 0 || target > 0).then(|| palette::balance(rec.shown_work_secs - target))
+            m.settings.day_balance(day, rec, now().date()).map(palette::balance)
         }
         (Row::Missing { target, .. }, Some("balance")) => Some(palette::balance(-target)),
         _ => None,
@@ -1270,8 +1285,9 @@ fn cell_view(m: &Model, column: Option<&str>, row: NSInteger) -> Option<Retained
         (Row::Day { day, rec, .. }, Some(col)) => {
             let today = now().date();
             let is_today = rec.date == today;
-            // Ohne Arbeitszeit (z. B. ein Urlaubstag) gibt es weder Beginn noch Ende.
-            let worked = rec.work_secs > 0 || !day.periods.is_empty();
+            // Ohne Arbeitszeit (z. B. ein Urlaubstag oder ein freier Tag, dessen erfasste Zeit
+            // nicht zählt) gibt es weder Beginn noch Ende.
+            let worked = rec.work_secs > 0 || (!day.periods.is_empty() && !day.uncounted());
             let (text, align, secondary) = match col {
                 "date" => (store::fmt_date(rec.date), NSTextAlignment::Left, false),
                 "start" if !worked => ("–".to_string(), NSTextAlignment::Right, true),
@@ -1289,12 +1305,11 @@ fn cell_view(m: &Model, column: Option<&str>, row: NSInteger) -> Option<Retained
                 }
                 "work" => (store::fmt_hm(rec.shown_work_secs), NSTextAlignment::Right, false),
                 "balance" => {
-                    // Mit Abwesenheit gibt es auch ohne Arbeitszeit einen Saldo (Zeitausgleich).
-                    let target = m.settings.counted_target(day, rec.work_secs, today);
-                    if rec.work_secs > 0 || target > 0 {
-                        (rules::fmt_balance(rec.shown_work_secs - target), NSTextAlignment::Right, true)
-                    } else {
-                        ("–".to_string(), NSTextAlignment::Right, true)
+                    // Mit Abwesenheit gibt es auch ohne Arbeitszeit einen Saldo (Zeitausgleich);
+                    // Arbeit an einem freien Tag, die nicht zählt, hat keinen.
+                    match m.settings.day_balance(day, rec, today) {
+                        Some(b) => (rules::fmt_balance(b), NSTextAlignment::Right, true),
+                        None => ("–".to_string(), NSTextAlignment::Right, true),
                     }
                 }
                 "pause" => (store::fmt_hm(rec.shown_pause_secs), NSTextAlignment::Right, false),
@@ -1417,9 +1432,10 @@ fn refresh_summary() {
         let (ww, _wp, wn, _) = sum(&|d| d >= week_start && d <= today);
         let (mw, mp, mn, _) = sum(&|d| d.year() == today.year() && d.month() == today.month());
         // Das Soll samt Abwesenheiten (halber Urlaubstag, Zeitausgleich) wie überall sonst.
-        let (_, wt) = rules::balance(&m.days, week_start, today, today, &st);
+        // Der Saldo ohne Arbeit an freien Tagen, die nicht zählt.
+        let (wc, wt) = rules::balance(&m.days, week_start, today, today, &st);
         let month_end = month_start(month_start(today) + Duration::days(31)) - Duration::days(1);
-        let (_, mt) = rules::balance(&m.days, month_start(today), month_end, today, &st);
+        let (mc, mt) = rules::balance(&m.days, month_start(today), month_end, today, &st);
         let begin = m.day(today).zip(recs.iter().find(|r| r.date == today)).map(|(d, r)| {
             let manual = if d.start.is_some() { " (manuell)" } else { "" };
             format!("Beginn {} Uhr{manual}", fmt_clock(r.first_start))
@@ -1441,13 +1457,13 @@ fn refresh_summary() {
                 value: store::fmt_hm(ww),
                 detail: format!("{} · Saldo ", plural(wn, "Arbeitstag", "Arbeitstage")),
                 value_balance: None,
-                detail_balance: Some(ww - wt),
+                detail_balance: Some(wc - wt),
             },
             Card {
                 value: store::fmt_hm(mw),
                 detail: format!("{} · Saldo ", plural(mn, "Arbeitstag", "Arbeitstage")),
                 value_balance: None,
-                detail_balance: Some(mw - mt),
+                detail_balance: Some(mc - mt),
             },
             Card {
                 value: store::fmt_hm(avg(mw)),
@@ -1599,6 +1615,17 @@ impl Edit {
     }
 }
 
+/// Lässt der Tag `d` die Änderung nicht zu? Eine ganztägige Abwesenheit lässt nur sich selbst
+/// ändern oder den Tag leeren. An einem freien Tag, dessen erfasste Zeit nicht zählt, gibt es
+/// Arbeitsbeginn, Pausen und Feierabend erst nach „Erfasste Zeit zählen“ (wie im Menü und in
+/// der Wochenansicht) – entfernen geht immer, Arbeit ohne Mac auch.
+fn refuses(d: &Day, edit: &Edit) -> bool {
+    let locked = d.locks_entries() && !matches!(edit, Edit::SetAbsence(_) | Edit::ClearDay);
+    let uncounted =
+        d.uncounted() && matches!(edit, Edit::SetStart(Some(_)) | Edit::SetEnd(Some(_)) | Edit::AddBreak(..));
+    locked || uncounted
+}
+
 fn apply(edit: Edit, rebuild: bool) {
     let Some(date) = model(|m| m.inspector.as_ref().map(|i| i.date)) else { return };
     if let Err(e) = save(date, edit, rebuild) {
@@ -1626,10 +1653,9 @@ fn save(date: NaiveDate, edit: Edit, rebuild: bool) -> Result<Option<Bound>, Str
             let clears = matches!(edit, Edit::SetAbsence(a) if d.clears_for_absence(a, today));
             let snapshot = if clears || matches!(edit, Edit::ClearDay) { Corrections::whole } else { Corrections::of };
             let before = snapshot(d);
-            // Ganztägige Abwesenheit: nur sie selbst lässt sich ändern oder der Tag leeren.
-            let locked = d.locks_entries() && !matches!(edit, Edit::SetAbsence(_) | Edit::ClearDay);
+            let refused = refuses(d, &edit);
             match edit {
-                _ if locked => {}
+                _ if refused => {}
                 // Arbeit ohne Mac davor bzw. danach entfällt: die letzte Angabe gilt.
                 Edit::SetStart(s) => {
                     d.set_start(s);
@@ -1901,14 +1927,16 @@ fn day_stats(date: NaiveDate, day: Option<&Day>, days: &[Day], settings: &Settin
         None => 0,
     };
     match rec {
-        Some((_, r)) if r.work_secs > 0 => DayStats::Numbers {
+        Some((d, r)) if r.work_secs > 0 => DayStats::Numbers {
             work: r.shown_work_secs,
             pause: r.shown_pause_secs,
-            balance: r.shown_work_secs - target,
+            // Arbeit an einem freien Tag, die nicht zählt: kein Saldo.
+            balance: settings.day_balance(d, &r, today),
         },
         // Ohne Arbeitszeit, aber mit Soll (Arbeitstag ohne Eintrag, Zeitausgleich, halber Tag).
-        _ if target > 0 => DayStats::Numbers { work: 0, pause: 0, balance: -target },
+        _ if target > 0 => DayStats::Numbers { work: 0, pause: 0, balance: Some(-target) },
         Some((d, _)) if d.absence.is_some() && d.periods.is_empty() => DayStats::Note("Keine Arbeitszeit, kein Soll."),
+        Some((d, _)) if d.uncounted() => DayStats::Note("Freier Tag – die erfasste Zeit zählt nicht."),
         Some(_) => DayStats::Note("Keine Arbeitszeit im Arbeitszeitrahmen."),
         None => DayStats::Note("Für diesen Tag ist noch nichts erfasst."),
     }
@@ -2041,8 +2069,9 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     section(
         "Abwesenheit",
         None,
-        "Urlaub, Krankheit und Feiertag senken das Soll des Tages, ein halber Tag auf die Hälfte. \
-         Zeitausgleich lässt es stehen, auch ohne Arbeitszeit – das Zeitkonto sinkt entsprechend. \
+        "Urlaub, Krankheit und Feiertag senken das Soll des Tages, ein halber Tag auf die Hälfte; \
+         Sonderurlaub gilt immer ganztags. Zeitausgleich lässt das Soll stehen, auch ohne \
+         Arbeitszeit – das Zeitkonto sinkt entsprechend. \
          Ganztags geht eine Abwesenheit nur an einem Tag ohne andere Einträge: Die löscht man \
          vorher mit „Alle Einträge löschen …“ unten; ein halber Tag geht auch neben Arbeitszeit.",
     );
@@ -2058,8 +2087,8 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     absence_kind.addItemWithTitle(&ns("Keine"));
     for kind in AbsenceKind::ALL {
         absence_kind.addItemWithTitle(&ns(kind.label()));
-        // Was es nur ganztags gibt (Zeitausgleich), ist neben Einträgen gesperrt.
-        if busy && !kind.reduces_target() && absence.is_none_or(|a| a.kind != kind) {
+        // Was es nur ganztags gibt (Sonderurlaub, Zeitausgleich), ist neben Einträgen gesperrt.
+        if busy && !kind.allows_half() && absence.is_none_or(|a| a.kind != kind) {
             if let Some(item) = absence_kind.lastItem() {
                 item.setEnabled(false);
                 item.setToolTip(Some(&ns(blocked)));
@@ -2080,7 +2109,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     }
     absence_part.selectItemAtIndex(absence.is_some_and(|a| a.half) as isize);
     // Halbe Tage gibt es bei Urlaub, Krankheit und Feiertag.
-    absence_part.setEnabled(absence.is_some_and(|a| a.kind.reduces_target()));
+    absence_part.setEnabled(absence.is_some_and(|a| a.kind.allows_half()));
     for popup in [&absence_kind, &absence_part] {
         unsafe {
             popup.setTarget(Some(target));
@@ -2126,6 +2155,39 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         absence_last = Retained::into_super(Retained::into_super(note));
     }
 
+    // Erfassung – nur an einem freien Tag mit Entscheidung zur automatischen Erfassung (wie
+    // „Heute erfassen“ im Menü und „Erfasste Zeit zählen“ in der Wochenansicht).
+    let uncounted = day.as_ref().is_some_and(Day::uncounted);
+    if let Some(free) = day.as_ref().and_then(|d| d.free_day).filter(|_| !locked) {
+        section(
+            "Erfassung",
+            Some(&absence_last),
+            "An freien Tagen (Wochenende, abgewählte Arbeitstage) zählt die automatisch erfasste Zeit \
+             erst, wenn sie gezählt werden soll – im Menü „Heute erfassen“. Bis dahin lassen sich \
+             Arbeitsbeginn, Pausen und Feierabend nicht festlegen; Arbeit ohne Mac zählt immer.",
+        );
+        let check = checkbox("Erfasste Zeit zählen", free.counts(), sel!(countingToggled:), target);
+        stack.addArrangedSubview(&check);
+        let text = match free {
+            FreeDay::Counted => "Freier Tag: Die automatisch erfasste Zeit zählt.",
+            FreeDay::Stopped => {
+                "Freier Tag: Alle Einträge wurden gelöscht, die automatische Erfassung ist aus. Mit \
+                 dem Haken zählt sie wieder."
+            }
+            FreeDay::Uncounted => {
+                "Freier Tag: Die automatisch erfasste Zeit zählt nicht. Arbeitsbeginn, Pausen und \
+                 Feierabend lassen sich erst mit dem Haken festlegen; Arbeit ohne Mac zählt immer."
+            }
+        };
+        let note = caption(text);
+        stack.addArrangedSubview(&note);
+        pin_width(&note, stack, 40.0);
+        absence_last = Retained::into_super(Retained::into_super(note));
+    }
+    // Was sich nur festlegen lässt, wenn die erfasste Zeit zählt (Entfernen geht immer).
+    let settable = !locked && !uncounted;
+    const UNCOUNTED_NOTE: &str = "Erst wenn die erfasste Zeit zählt (siehe „Erfassung“ oben).";
+
     // Arbeitsbeginn
     section(
         "Arbeitsbeginn",
@@ -2144,8 +2206,9 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     let start_value = manual_start.or(rec.as_ref().map(|r| r.first_start)).unwrap_or(8 * 3600);
     let start_check = checkbox("Manuell festlegen", manual_start.is_some(), sel!(startToggled:), target);
     let start_picker = time_picker(date, start_value, sel!(startChanged:), target);
-    start_picker.setEnabled(manual_start.is_some() && !locked);
-    start_check.setEnabled(!locked);
+    start_picker.setEnabled(manual_start.is_some() && settable);
+    // Einen festgelegten Beginn kann man auch dann noch entfernen.
+    start_check.setEnabled(settable || (!locked && manual_start.is_some()));
     let row = hstack(8.0);
     row.addArrangedSubview(&start_check);
     row.addArrangedSubview(&start_picker);
@@ -2155,6 +2218,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         START_CUT,
     );
     let start_note = caption(&match auto {
+        _ if uncounted => UNCOUNTED_NOTE.to_string(),
         Some((a, _)) => format!(
             "Ohne Angabe gilt das erste Entsperren{first_in_frame} um {} Uhr. War der Mac zum Beginn \
              gesperrt, zählt die Zeit bis zum Entsperren danach mit.",
@@ -2228,7 +2292,10 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
     }
     let add = button("Hinzufügen", sel!(addBreak:), target);
     for c in [&*break_from as &NSControl, &break_to, &add] {
-        c.setEnabled(!locked);
+        c.setEnabled(settable);
+    }
+    if uncounted {
+        add.setToolTip(Some(&ns(UNCOUNTED_NOTE)));
     }
     let row = hstack(6.0);
     row.addArrangedSubview(&break_from);
@@ -2297,8 +2364,8 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         .unwrap_or(if is_today { secs_of(t.time()) } else { 17 * 3600 });
     let end_check = checkbox("Manuell festlegen", manual_end.is_some(), sel!(endToggled:), target);
     let end_picker = time_picker(date, end_value, sel!(endChanged:), target);
-    end_picker.setEnabled(manual_end.is_some() && !locked);
-    end_check.setEnabled(!locked);
+    end_picker.setEnabled(manual_end.is_some() && settable);
+    end_check.setEnabled(settable || (!locked && manual_end.is_some()));
     let row = hstack(8.0);
     row.addArrangedSubview(&end_check);
     row.addArrangedSubview(&end_picker);
@@ -2307,6 +2374,7 @@ fn build_inspector(ui: &Ui, selected: Option<NaiveDate>, day: Option<Day>) {
         END_CUT,
     );
     let end_note = caption(&match auto {
+        _ if uncounted => UNCOUNTED_NOTE.to_string(),
         Some(_) if is_today && manual_end.is_none() => {
             "Ohne Angabe gilt das letzte Sperren. Mit Feierabend wird heute nichts mehr erfasst.".to_string()
         }
@@ -3974,6 +4042,38 @@ mod tests {
     }
 
     #[test]
+    fn uncounted_free_day_allows_only_what_menu_and_week_allow() {
+        let s = Settings::default();
+        let mut sat = Day::new(date(21));
+        sat.add_period(9 * 3600 + 42 * 60, 15 * 3600);
+        sat.free_day = Some(FreeDay::Uncounted);
+        // Arbeitsbeginn, Feierabend und Pausen erst nach „Erfasste Zeit zählen“ …
+        for edit in [Edit::SetStart(Some(9 * 3600)), Edit::SetEnd(Some(14 * 3600)), Edit::AddBreak(12 * 3600, 12 * 3600 + 1800)] {
+            assert!(refuses(&sat, &edit), "{}", edit.name());
+        }
+        // … entfernen, Arbeit ohne Mac, zählen lassen und leeren gehen.
+        for edit in [
+            Edit::SetStart(None),
+            Edit::SetEnd(None),
+            Edit::RemoveBreak(0),
+            Edit::AddWork(16 * 3600, 17 * 3600, String::new()),
+            Edit::SetCounting(true),
+            Edit::ClearDay,
+        ] {
+            assert!(!refuses(&sat, &edit), "{}", edit.name());
+        }
+        // Kennzahlen: kein „keine Arbeitszeit im Rahmen“, sondern warum nichts zählt.
+        assert_eq!(
+            day_stats(date(21), Some(&sat), &[sat.clone()], &s, date(23)),
+            DayStats::Note("Freier Tag – die erfasste Zeit zählt nicht.")
+        );
+        // Gezählt: alles wie an jedem Tag.
+        sat.free_day = Some(FreeDay::Counted);
+        assert!(!refuses(&sat, &Edit::SetStart(Some(9 * 3600))));
+        assert!(matches!(day_stats(date(21), Some(&sat), &[sat.clone()], &s, date(23)), DayStats::Numbers { .. }));
+    }
+
+    #[test]
     fn history_merges_follow_ups_and_forgets_redo() {
         let mut h = History::default();
         h.record(step("Arbeitsbeginn ändern", 17, None), false);
@@ -4021,7 +4121,7 @@ mod tests {
         let plain = Day::new(date(17));
         let mut corrected = Day::new(date(18));
         corrected.start = Some(7 * 3600);
-        let warning = [Warning::Weekend];
+        let warning = [Warning::Weekend { counted: false }];
         assert!(!Filter::default().is_active());
         assert!(Filter::default().shows(&plain, &[], today));
         let warnings = Filter { warnings: true, ..Filter::default() };

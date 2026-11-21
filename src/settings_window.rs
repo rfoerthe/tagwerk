@@ -137,6 +137,8 @@ struct Sheet {
     /// Arbeitstage Montag bis Freitag (Tag der Checkbox = Bit in `WorkRules::workdays`).
     workdays: Vec<Retained<NSButton>>,
     daily_note: Retained<NSTextField>,
+    /// Arbeit an freien Tagen als Mehrarbeit zählen (`WorkRules::free_days_count`).
+    free_days: Retained<NSButton>,
     pause: Retained<NSTextField>,
     pause_stepper: Retained<NSStepper>,
     error: Retained<NSTextField>,
@@ -145,7 +147,7 @@ struct Sheet {
 /// Eine Zeile der Liste der Stände.
 struct RuleRow {
     from: Option<NaiveDate>,
-    cells: [String; 5],
+    cells: [String; 6],
     /// Gilt heute.
     current: bool,
     /// Gilt erst ab einem künftigen Tag.
@@ -153,12 +155,13 @@ struct RuleRow {
 }
 
 /// Spalten der Liste: Kennung, Titel, Breite.
-const RULE_COLUMNS: [(&str, &str, f64); 5] = [
+const RULE_COLUMNS: [(&str, &str, f64); 6] = [
     ("from", "Gültig ab", 86.0),
     ("weekly", "Woche", 72.0),
     ("days", "Arbeitstage", 108.0),
     ("frame", "Rahmen", 98.0),
     ("pause", "Pause ab", 60.0),
+    ("free", "Freie Tage", 72.0),
 ];
 
 /// Vorgabe im Feld „Minuten ohne Eingabe“, solange die Erkennung aus ist.
@@ -353,6 +356,17 @@ define_class!(
                     sh.draft.workdays = days;
                     sh.error.setHidden(true);
                 }
+                s.fill_sheet();
+            });
+        }
+
+        /// „Arbeit an freien Tagen als Mehrarbeit zählen“ ein- oder ausgeschaltet.
+        #[unsafe(method(sheetFreeDaysChanged:))]
+        fn sheet_free_days_changed(&self, sender: Option<&NSButton>) {
+            let Some(sender) = sender else { return };
+            let on = sender.state() == NSControlStateValueOn;
+            with_state(|s| {
+                s.sheet.draft.free_days_count = on;
                 s.fill_sheet();
             });
         }
@@ -619,6 +633,7 @@ impl State {
         for (bit, check) in sh.workdays.iter().enumerate() {
             check.setState(if r.workdays & (1 << bit) != 0 { NSControlStateValueOn } else { NSControlStateValueOff });
         }
+        sh.free_days.setState(if r.free_days_count { NSControlStateValueOn } else { NSControlStateValueOff });
         let (text, warn) = sheet_hint(&self.settings, sh.editing, self.sheet_from(), r, today());
         sh.hint.setStringValue(&ns(&text));
         sh.hint.setTextColor(Some(&*if warn { NSColor::systemOrangeColor() } else { NSColor::secondaryLabelColor() }));
@@ -721,8 +736,9 @@ fn refresh_permission() {
 
 /// `39 Std./Woche (Mo–Fr, 7:48 h pro Arbeitstag)  ·  Rahmen 07:00–22:00 Uhr  ·  Pausen ab 15 Min.`
 fn rules_line(r: &WorkRules) -> String {
+    let free = if r.free_days_count { "  ·  Arbeit an freien Tagen zählt" } else { "" };
     format!(
-        "{} Std./Woche ({}, {} pro Arbeitstag)  ·  Rahmen {}  ·  Pausen ab {} Min.",
+        "{} Std./Woche ({}, {} pro Arbeitstag)  ·  Rahmen {}  ·  Pausen ab {} Min.{free}",
         rules::fmt_hours(r.weekly_target),
         r.workdays_text(),
         store::fmt_hm(r.daily_target_workday()),
@@ -759,12 +775,18 @@ fn rule_rows(s: &Settings, today: NaiveDate) -> Vec<RuleRow> {
                     r.workdays_text(),
                     format!("{}–{}", fmt_clock(r.frame_from), fmt_clock(r.frame_to)),
                     format!("{} Min.", r.min_pause / 60),
+                    free_days_cell(r).to_string(),
                 ],
                 current: current == Some(i),
                 planned: p.from.is_some_and(|f| f > today),
             }
         })
         .collect()
+}
+
+/// Spalte „Freie Tage“: ob Arbeit dort als Mehrarbeit zählt.
+fn free_days_cell(r: &WorkRules) -> &'static str {
+    if r.free_days_count { "zählen" } else { "–" }
 }
 
 /// Stand der Zeile `row` (`None`: keine Zeile; `Some(None)`: der erste Stand).
@@ -1109,7 +1131,7 @@ fn toolbar_item(target: &Controller, id: &NSString) -> Option<Retained<NSToolbar
 }
 
 /// Breite der Liste der Stände (und der Texte darum).
-const RULES_W: f64 = 470.0;
+const RULES_W: f64 = 550.0;
 
 /// Wie [`caption`], aber so breit wie die Liste der Stände.
 fn wide_caption(text: &str) -> Retained<NSTextField> {
@@ -1194,6 +1216,14 @@ fn build_sheet(target: &Controller) -> Sheet {
         })
         .collect();
     let daily_note = caption("");
+    let free_days = unsafe {
+        NSButton::checkboxWithTitle_target_action(
+            &ns("Arbeit an freien Tagen als Mehrarbeit zählen"),
+            Some(target),
+            Some(sel!(sheetFreeDaysChanged:)),
+            mtm,
+        )
+    };
     let pause = number_field(target, sel!(sheetPauseChanged:));
     let pause_stepper = stepper(
         target,
@@ -1234,6 +1264,14 @@ fn build_sheet(target: &Controller) -> Sheet {
         row(Some("Regelarbeitszeit:"), &weekly_row),
         row(Some("Arbeitstage:"), &days_row),
         row(None, &daily_note),
+        row(Some("Freie Tage:"), &free_days),
+        row(
+            None,
+            &caption(
+                "Am Wochenende und an den übrigen freien Tagen gibt es kein Soll. Ohne Haken wird \
+                 Arbeit dort angezeigt, wirkt sich aber nicht auf Saldo und Zeitkonto aus.",
+            ),
+        ),
         row(Some("Arbeitszeitrahmen:"), &frame_row),
         row(
             None,
@@ -1253,7 +1291,7 @@ fn build_sheet(target: &Controller) -> Sheet {
     grid.setColumnSpacing(8.0);
     grid.setRowSpacing(4.0);
     grid.columnAtIndex(0).setXPlacement(NSGridCellPlacement::Trailing);
-    for r in [2, 5, 7] {
+    for r in [2, 5, 7, 9] {
         grid.rowAtIndex(r).setTopPadding(14.0);
     }
     // Knöpfe rechts, wie in Blättern üblich
@@ -1304,6 +1342,7 @@ fn build_sheet(target: &Controller) -> Sheet {
         weekly_stepper,
         workdays,
         daily_note,
+        free_days,
         pause,
         pause_stepper,
         error,
@@ -1459,8 +1498,9 @@ fn build(on_change: fn()) -> State {
                     &wide_caption(
                         "Jeder Stand gilt ab seinem Datum bis zum nächsten – eine Änderung rechnet frühere \
                          Tage nicht neu. Die Regelarbeitszeit verteilt sich gleichmäßig auf die \
-                         Arbeitstage; an den übrigen Tagen gibt es kein Soll. Außerhalb des Rahmens wird \
-                         weder Arbeitszeit noch eine Pause gezählt.",
+                         Arbeitstage; an den übrigen Tagen gibt es kein Soll, und Arbeit dort zählt nur \
+                         als Mehrarbeit, wenn der Stand es vorsieht. Außerhalb des Rahmens wird weder \
+                         Arbeitszeit noch eine Pause gezählt.",
                     ),
                 ),
                 row(Some("Zeitkonto:"), &account_row),
@@ -1510,8 +1550,9 @@ fn build(on_change: fn()) -> State {
                     None,
                     &caption(
                         "Am Wochenende und an den übrigen freien Tagen wird erfasst, aber erst gezählt, \
-                         wenn im Menü „Heute erfassen“ gewählt ist – nachträglich auch in der \
-                         Wochenansicht. Einträge von Hand zählen immer.",
+                         wenn im Menü „Heute erfassen“ gewählt ist – nachträglich auch im Fenster \
+                         „Aufzeichnungen“. Einträge von Hand zählen immer. Ob die Arbeit dort auch in Saldo \
+                         und Zeitkonto eingeht, legen die Arbeitszeitregeln fest.",
                     ),
                 ),
             ],
@@ -1812,12 +1853,15 @@ mod tests {
         let rows = rule_rows(&s, date(21));
         let flags: Vec<_> = rows.iter().map(|r| (r.cells[0].as_str(), r.current, r.planned)).collect();
         assert_eq!(flags, vec![("Beginn", false, false), ("02.11.2026", true, false), ("30.11.2026", false, true)]);
-        assert_eq!(rows[1].cells[1..], ["38 Std.", "Mo–Fr", "07:00–22:00", "15 Min."].map(String::from));
+        assert_eq!(rows[1].cells[1..], ["38 Std.", "Mo–Fr", "07:00–22:00", "15 Min.", "–"].map(String::from));
         assert_eq!(
             rules_now_text(&s, date(21)),
             "Heute gilt der Stand ab 02.11.2026: 7:36 h pro Arbeitstag (5-Tage-Woche).\n\
              Geplant ab 30.11.2026: 9:45 h pro Arbeitstag (4-Tage-Woche)."
         );
+        // Zählt Arbeit an freien Tagen, steht es in der Spalte „Freie Tage“.
+        s.set_rules(Some(date(16)), WorkRules { free_days_count: true, ..WorkRules::DEFAULT }, None);
+        assert_eq!(rule_rows(&s, date(21))[2].cells[5], "zählen");
     }
 
     #[test]

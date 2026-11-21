@@ -14,7 +14,14 @@ laufenden Monats bis gestern. Heute selbst bleibt frei.
                    der Rest einzelne Tage, meist Montag oder Freitag
     Zeitausgleich  6 Tage, zuerst Brückentage (Freitag nach einem Feiertag am Donnerstag,
                    Montag vor einem am Dienstag), sonst Freitage
+    Sonderurlaub   alle 6 Monate ein ganzer Tag: im Monat 3, 9, 15 … Monate vor dem
+                   laufenden, an einem Werktag ohne andere Abwesenheit
   So bleibt kein Werktag ohne Eintrag – sonst zählte sein Soll als Minus.
+- Samstagsarbeit: am Samstag vor der Woche mit Sonderurlaub 4 bis 6 Std. am Stück
+  (höchstens mit kurzen Sperren unter 15 Min.), als freier Tag mit „Heute erfassen“
+  (Korrektur „Erfassung“: freier Tag, gezählt). Tagwerk meldet dafür „Arbeit am
+  Wochenende“; in den Saldo geht sie nur ein, wenn die Arbeitszeitregeln es vorsehen
+  (Standard: nein).
 - An den übrigen Werktagen werden zwischen 5 und 10 Stunden gearbeitet; die Wochensumme
   liegt bei 39 Std. ± 8 % (bei Abwesenheiten sowie in der ersten und der laufenden Woche
   anteilig). Dazu kommt so viel Mehrarbeit, wie der Zeitausgleich im Zeitraum verbraucht
@@ -71,6 +78,9 @@ MAX_WORK = 10 * 3600
 WEEK_TARGET = 39 * 3600
 VACATION_DAYS = 30  # Urlaubstage im Jahr (halbe Tage zählen halb)
 TIME_OFF_DAYS = 6  # Zeitausgleichstage im Jahr
+SPECIAL_LEAVE_EVERY = 6  # Monate zwischen zwei Tagen Sonderurlaub
+SPECIAL_LEAVE_OFFSET = 3  # Monate vor dem laufenden: der jüngste Sonderurlaub
+SATURDAY_WORK = (4 * 3600, 6 * 3600 - 60)  # Arbeit am Samstag vor dem Sonderurlaub
 DAY_TARGET = WEEK_TARGET // 5
 HALF_DAY_WORK = (3 * 3600 + 35 * 60, 4 * 3600 + 15 * 60)  # Arbeit an einem halben Urlaubstag
 WORK_SHARE = 0.25  # Anteil der Werktage mit Arbeit ohne Mac
@@ -87,7 +97,10 @@ NO_BREAK = "no_break"
 WEEKDAYS = ["Mo", "Di", "Mi", "Do", "Fr", "Sa", "So"]
 KIND_WORK = "Arbeit ohne Mac"
 KIND_ABSENCE = "Abwesenheit"
-HOLIDAY, VACATION, TIME_OFF = "Feiertag", "Urlaub", "Zeitausgleich"
+KIND_COUNTING = "Erfassung"
+COUNTED_FREE_DAY = "freier Tag, gezählt"
+HOLIDAY, VACATION, TIME_OFF, SPECIAL_LEAVE = "Feiertag", "Urlaub", "Zeitausgleich", "Sonderurlaub"
+SATURDAY = "saturday"
 
 # Regelverstöße: (Woche im Sechs-Wochen-Abschnitt ab 0, Arten an aufeinanderfolgenden
 # Tagen, Wunsch-Wochentage 0=Mo)
@@ -106,6 +119,7 @@ EXPECTED = {
     "pause_20": {"Pause 30 Min."},
     "pause_30_long": {"Pause 45 Min."},
     NO_BREAK: {"Pause 30 Min."},
+    SATURDAY: {"Wochenende"},
 }
 VARIANTS = ["meeting", "call_pause", "other", "networking", "back_to_back", "call_morning", "call_evening"]
 # Arten, die in einer Sperre nachgetragen werden: (Dauer in Min. von–bis, Notiz)
@@ -235,6 +249,37 @@ def plan_absences(first, last, hol, rng):
     return {d: a for d, a in out.items() if first <= d <= last}
 
 
+def special_leave_plan(first, last, hol, absences, rng):
+    """Sonderurlaub alle SPECIAL_LEAVE_EVERY Monate: Datum des Sonderurlaubs → Samstag davor
+    (in der Vorwoche), an dem 4 bis 6 Std. gearbeitet wird.
+
+    Die Monate zählen vom laufenden Monat (der von `last + 1`) rückwärts: 3, 9, 15 …
+    Monate davor. Gewählt wird ein Werktag ohne Feiertag und andere Abwesenheit, dessen
+    Samstag der Vorwoche im Zeitraum liegt und kein Feiertag ist."""
+    today = last + dt.timedelta(days=1)
+    current = today.year * 12 + today.month - 1
+    out = {}
+    back = SPECIAL_LEAVE_OFFSET
+    while True:
+        year, month0 = divmod(current - back, 12)
+        start = dt.date(year, month0 + 1, 1)
+        if start < first.replace(day=1):
+            break
+        end = dt.date(year + (month0 == 11), (month0 + 1) % 12 + 1, 1) - dt.timedelta(days=1)
+        days = [start + dt.timedelta(days=i) for i in range((end - start).days + 1)]
+        saturday = lambda d: d - dt.timedelta(days=d.weekday() + 2)
+        candidates = [
+            d for d in days
+            if first <= saturday(d) and d <= last and d.weekday() < 5
+            and d not in hol and d not in absences and saturday(d) not in hol
+        ]
+        if candidates:
+            d = rng.choice(candidates)
+            out[d] = saturday(d)
+        back += SPECIAL_LEAVE_EVERY
+    return out
+
+
 def absence_label(kind, half):
     return f"{kind} (halber Tag)" if half else kind
 
@@ -323,6 +368,8 @@ def warnings(days):
                 found.add("Ruhezeit")
         if day.outside():
             found.add("außerhalb Rahmen")
+        if work > 0 and d.weekday() >= 5:
+            found.add("Wochenende")
         if found:
             out[d] = found
         if work > 0:
@@ -445,6 +492,15 @@ def normal_day(rng, work, variant, min_start):
     return day
 
 
+def saturday_day(rng, min_start):
+    """Arbeit am Samstag vor dem Sonderurlaub: 4 bis 6 Std. am Stück ab 9–10:30 Uhr (nach
+    der Ruhezeit), höchstens von kurzen Sperren unter 15 Min. unterbrochen."""
+    work = rng.randint(*SATURDAY_WORK) // M * M + rng.randint(0, 59)
+    start = max(rng.randint(9 * H, 10 * H + 30 * M), min_start) + rng.randint(0, 59)
+    locks = short_locks(rng, work, [])
+    return Day(*build_day(start, work, locks), kind=SATURDAY)
+
+
 def special_day(rng, kind):
     """Tage mit Regelverstoß."""
     s = rng.randint(0, 59)
@@ -495,6 +551,10 @@ def generate(first, last, seed):
     rng = random.Random(seed)
     hol = set().union(*(holidays(y) for y in range(first.year, last.year + 1)))
     absences = plan_absences(first, last, hol, rng)
+    special_leave = special_leave_plan(first, last, hol, absences, rng)
+    for d in special_leave:
+        absences[d] = (SPECIAL_LEAVE, False)
+    saturdays = set(special_leave.values())
     half_days = {d for d, (_, half) in absences.items() if half}
     all_days = [first + dt.timedelta(days=i) for i in range((last - first).days + 1)]
     # Werktage mit voller Arbeit (ohne Feiertage und Abwesenheiten)
@@ -529,7 +589,7 @@ def generate(first, last, seed):
     plan, fixed = {}, {}
     for d, kind in specials.items():
         fixed[d] = special_day(rng, kind)
-    for d in half_days:
+    for d in sorted(half_days):  # feste Reihenfolge: gleiche Daten bei jedem Lauf
         plan[d] = rng.randint(*HALF_DAY_WORK)
     # Stand des Zeitkontos beim Planen: Wer im Minus ist, arbeitet die nächsten Wochen etwas
     # mehr (und umgekehrt) – so schwankt es um null, statt wegzulaufen.
@@ -560,13 +620,15 @@ def generate(first, last, seed):
 
     # Tage der Reihe nach bauen – so kennt jeder Tag das Ende des Vortags (Ruhezeit)
     days, prev = {}, None
-    for d in sorted(set(workdays) | half_days):
+    for d in sorted(set(workdays) | half_days | saturdays):
+        min_start = 0
+        if prev is not None:
+            min_start = prev[1] + MIN_REST - (d - prev[0]).days * DAY + rng.randint(5, 25) * M
         if d in fixed:
             day = fixed[d]
+        elif d in saturdays:
+            day = saturday_day(rng, min_start)
         else:
-            min_start = 0
-            if prev is not None:
-                min_start = prev[1] + MIN_REST - (d - prev[0]).days * DAY + rng.randint(5, 25) * M
             variant = NO_BREAK if d in no_break else away.get(d)
             day = normal_day(rng, plan[d], variant, min_start)
             for fallback in () if variant == NO_BREAK else ("meeting", "call_pause", None):
@@ -579,7 +641,7 @@ def generate(first, last, seed):
         prev = (d, min(day.last(), FRAME[1]))
     # Kein Werktag ohne Eintrag: Sein Soll zählte sonst als Minus.
     assert all(d.weekday() >= 5 or d in days or d in absences for d in all_days)
-    return days, hol, absences
+    return days, hol, absences, special_leave
 
 
 def expected_warnings(days):
@@ -614,25 +676,31 @@ def write_markdown(out, days, absences, first, last, seed):
     out.write(f"# Tagwerk – Testdaten {first:%d.%m.%Y} bis {last:%d.%m.%Y}\n\n")
     out.write(f"Erzeugt mit testdata/generate_testdata.py (Startwert {seed}).\n\n")
     out.write("## Korrekturen\n\n")
-    out.write(f"Art: {KIND_WORK} (z. B. Telefonat oder Meeting) bzw. {KIND_ABSENCE}.\n\n")
+    out.write(f"Art: {KIND_WORK} (z. B. Telefonat oder Meeting), {KIND_ABSENCE} bzw. {KIND_COUNTING}.\n\n")
     out.write("| Datum | Art | Von | Bis | Notiz |\n|:------|:----|:---:|:---:|:------|\n")
     for d in sorted(set(days) | set(absences)):
         if d in absences:
             out.write(f"| {date_cell(d)} | {KIND_ABSENCE} | – | – | {absence_label(*absences[d])} |\n")
         for f, t, note in days[d].blocks if d in days else ():
             out.write(f"| {date_cell(d)} | {KIND_WORK} | {clock(f)} | {clock(t)} | {note} |\n")
+        if d in days and d.weekday() >= 5:
+            # Freier Tag: „Heute erfassen“ gewählt, die erfasste Zeit zählt.
+            out.write(f"| {date_cell(d)} | {KIND_COUNTING} | – | – | {COUNTED_FREE_DAY} |\n")
     out.write("\n## Erfasste Perioden\n\n| Datum | Von | Bis |\n|:------|:---:|:---:|\n")
     for d in sorted(days):
         for f, t in days[d].periods:
             out.write(f"| {date_cell(d)} | {clock(f)} | {clock(t)} |\n")
 
 
-def report(days, hol, absences, first, last, seed, found):
-    """Kontrolle auf stderr: Wochensummen, Abwesenheiten, Arbeit ohne Mac, Regelverstöße."""
+def report(days, hol, absences, special_leave, first, last, seed, found):
+    """Kontrolle auf stderr: Wochensummen, Abwesenheiten, Sonderurlaub mit Samstagsarbeit,
+    Arbeit ohne Mac, Regelverstöße."""
     err = sys.stderr
     print(f"Zeitraum {first:%d.%m.%Y} bis {last:%d.%m.%Y}, Startwert {seed}", file=err)
     weeks = {}
     for d, day in days.items():
+        if d.weekday() >= 5:
+            continue  # Samstagsarbeit steht unten beim Sonderurlaub
         # Soll des Tages: halber Urlaubstag die Hälfte
         target = DAY_TARGET / 2 if absences.get(d, (None, False))[1] else DAY_TARGET
         weeks.setdefault(d.isocalendar()[:2], []).append((day.work(), target))
@@ -650,31 +718,42 @@ def report(days, hol, absences, first, last, seed, found):
         vacation = sum(0.5 if half else 1 for _, (kind, half) in of_year if kind == VACATION)
         print(
             f"  {year}: Urlaub {vacation:g} Tage, Zeitausgleich "
-            f"{sum(1 for _, (k, _) in of_year if k == TIME_OFF)} Tage, Feiertage "
+            f"{sum(1 for _, (k, _) in of_year if k == TIME_OFF)} Tage, Sonderurlaub "
+            f"{sum(1 for _, (k, _) in of_year if k == SPECIAL_LEAVE)} Tage, Feiertage "
             f"{sum(1 for _, (k, _) in of_year if k == HOLIDAY)} (Werktage im Zeitraum)",
             file=err,
         )
     for d in sorted(absences):
         print(f"  {date_cell(d)}  {absence_label(*absences[d])}", file=err)
-    # Saldo wie in Tagwerk: Soll aller Werktage bis gestern, abzüglich der Abwesenheiten
-    work = sum(day.work() for day in days.values())
+    print("Sonderurlaub mit Samstagsarbeit in der Vorwoche:", file=err)
+    for d, sat in sorted(special_leave.items()):
+        (f, _), (_, t) = days[sat].spans()[0], days[sat].spans()[-1]
+        print(
+            f"  {date_cell(d)}  Sonderurlaub; {date_cell(sat)} {clock(f)[:5]}–{clock(t)[:5]}, "
+            f"{days[sat].work() / H:.2f} Std.",
+            file=err,
+        )
+    # Saldo wie in Tagwerk mit den Standardregeln: Soll aller Werktage bis gestern, abzüglich
+    # der Abwesenheiten; Arbeit am Wochenende zählt nicht.
+    work = sum(day.work() for d, day in days.items() if d.weekday() < 5)
     target = sum(
-        0 if absences.get(d, (None, False))[0] in (VACATION, HOLIDAY) and not absences[d][1]
+        0 if absences.get(d, (None, False))[0] in (VACATION, HOLIDAY, SPECIAL_LEAVE) and not absences[d][1]
         else DAY_TARGET / 2 if absences.get(d, (None, False))[1]
         else DAY_TARGET
         for d in (first + dt.timedelta(days=i) for i in range((last - first).days + 1))
         if d.weekday() < 5
     )
     print(f"Zeitkonto am Ende (ohne Rundung auf Minuten): {(work - target) / H:+.2f} Std.", file=err)
+    weekdays = [d for d in days if d.weekday() < 5]
     away = [d for d in sorted(days) if days[d].blocks]
-    print(f"Arbeit ohne Mac an {len(away)} von {len(days)} Werktagen:", file=err)
+    print(f"Arbeit ohne Mac an {len(away)} von {len(weekdays)} Werktagen:", file=err)
     for d in away:
         blocks = ", ".join(f"{clock(f)[:5]}–{clock(t)[:5]} {n or 'Sonstiges'}" for f, t, n in days[d].blocks)
         print(f"  {date_cell(d)}  {VARIANT_NAMES[days[d].kind]:22s} {blocks}", file=err)
     through = no_break_days(days)
     print(
-        f"Mehr als 6 Std. ohne Pause an {len(through)} von {len(days)} Werktagen "
-        f"({len(through) / len(days) * 100:.0f} %):",
+        f"Mehr als 6 Std. ohne Pause an {len(through)} von {len(weekdays)} Werktagen "
+        f"({len(through) / len(weekdays) * 100:.0f} %):",
         file=err,
     )
     for d in through:
@@ -699,7 +778,7 @@ def main():
     # ein langer Tag nach spätem Ende am Vortag), mit dem nächsten Startwert neu würfeln.
     for seed in range(args.seed, args.seed + 100):
         try:
-            days, hol, absences = generate(first, last, seed)
+            days, hol, absences, special_leave = generate(first, last, seed)
         except NoFit:
             continue
         found = warnings(days)
@@ -708,7 +787,7 @@ def main():
     else:
         sys.exit("Keine Testdaten ohne ungewollte Regelverstöße gefunden.")
     write_markdown(sys.stdout, days, absences, first, last, seed)
-    report(days, hol, absences, first, last, seed, found)
+    report(days, hol, absences, special_leave, first, last, seed, found)
 
 
 if __name__ == "__main__":

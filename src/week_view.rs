@@ -14,8 +14,8 @@
 //! wieder zu löschen. Ein Klick auf einen freien Bereich öffnet einen Dialog, um Arbeit ohne
 //! Mac einzutragen (von, bis, Grund): in einer Pause ist die ganze Pause vorgeschlagen, vor
 //! dem Arbeitsbeginn und nach dem Feierabend eine halbe Stunde ab dem Klick. Über das
-//! Kontextmenü lässt sich für einen Arbeitstag eine Abwesenheit eintragen (Urlaub, Krank,
-//! Feiertag, Zeitausgleich); sie liegt als Band über dem Arbeitszeitrahmen des Tages. Der Tag
+//! Kontextmenü lässt sich für einen Arbeitstag eine Abwesenheit eintragen (Urlaub,
+//! Sonderurlaub, Krank, Feiertag, Zeitausgleich); sie liegt als Band über dem Arbeitszeitrahmen des Tages. Der Tag
 //! in Bearbeitung (in „Tage“ ausgewählt, siehe [`Selection`]) trägt sein Datum auf einer
 //! Pille und einen Rahmen um die Spalte; ein Klick in eine Spalte wählt ihn.
 //!
@@ -286,7 +286,9 @@ fn column(days: &[Day], snap: &Snapshot, date: NaiveDate) -> Column {
             notes: notes(day, s, *sp, k == 0, k + 1 == n),
         })
         .collect();
-    let edges = edges(day, s, &blocks);
+    // Freier Tag, dessen erfasste Zeit nicht zählt: Arbeitsbeginn und Feierabend gibt es erst
+    // nach „Erfasste Zeit zählen“ (wie im Menü und im Inspektor) – auch neben Arbeit ohne Mac.
+    let edges = if day.uncounted() { None } else { edges(day, s, &blocks) };
     // Wie bei den Hinweisen: Abschnitte unter einer Minute lohnen keine Anzeige.
     blocks.extend(day.outside_frame_spans(s).into_iter().filter(|x| x.len() >= 60).map(|sp| Block {
         from: sp.from,
@@ -2014,7 +2016,7 @@ fn absence_entries(current: Option<Absence>, busy: bool) -> Vec<AbsenceItem> {
     let mut out = vec![item("Keine".to_string(), 0, current.is_none(), true), item(String::new(), -1, false, false)];
     for (i, kind) in AbsenceKind::ALL.iter().enumerate() {
         // Halbe Tage gibt es bei Urlaub, Krankheit und Feiertag.
-        let halves: &[bool] = if kind.reduces_target() { &[false, true] } else { &[false] };
+        let halves: &[bool] = if kind.allows_half() { &[false, true] } else { &[false] };
         for &half in halves {
             let a = Absence::new(*kind, half);
             let checked = current == Some(a);
@@ -3402,9 +3404,17 @@ mod tests {
         assert_eq!(column_weights(&Settings::default(), &cols)[5], 1.0);
         // Gezählt: ein normaler Abschnitt.
         d.free_day = Some(FreeDay::Counted);
-        let cols = columns(&snap(vec![d], now, false), date(2026, 11, 16));
+        let cols = columns(&snap(vec![d.clone()], now, false), date(2026, 11, 16));
         assert_eq!(cols[5].blocks.iter().map(|b| b.kind).collect::<Vec<_>>(), vec![Kind::Work]);
         assert_eq!(cols[5].work_secs, h(2, 0));
+        assert!(cols[5].edges.is_some());
+        // Nicht gezählt, aber mit Arbeit ohne Mac: Die zählt, Arbeitsbeginn und Feierabend
+        // gibt es trotzdem erst nach „Erfasste Zeit zählen“ (wie im Menü und im Inspektor).
+        d.free_day = Some(FreeDay::Uncounted);
+        d.add_work(h(13, 0), h(14, 0), "Telefonat");
+        let cols = columns(&snap(vec![d], now, false), date(2026, 11, 16));
+        assert_eq!(cols[5].work_secs, h(1, 0));
+        assert!(cols[5].edges.is_none());
     }
 
     #[test]
@@ -3589,7 +3599,7 @@ mod tests {
         let names: Vec<&str> = subs.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(
             names,
-            ["Keine", "", "Urlaub", "Urlaub (halber Tag)", "Krank", "Krank (halber Tag)", "Feiertag", "Feiertag (halber Tag)", "Zeitausgleich"]
+            ["Keine", "", "Urlaub", "Urlaub (halber Tag)", "Sonderurlaub", "Krank", "Krank (halber Tag)", "Feiertag", "Feiertag (halber Tag)", "Zeitausgleich"]
         );
         assert_eq!(subs.iter().filter(|e| e.checked).map(|e| e.title.as_str()).collect::<Vec<_>>(), ["Urlaub (halber Tag)"]);
         assert!(subs.iter().all(|e| e.enabled || e.title.is_empty()), "leerer Tag: alles wählbar");
@@ -3896,7 +3906,7 @@ mod tests {
         assert_eq!(cols[1].warnings.len(), 2);
         assert!(cols[1].warnings[0].contains("45 Min. Pause"));
         assert!(cols[1].warnings[1].contains("mehr als 10 Std."));
-        assert_eq!(cols[5].warnings, vec![Warning::Weekend.text()]);
+        assert_eq!(cols[5].warnings, vec![Warning::Weekend { counted: false }.text()]);
         assert_eq!(warnings_summary(&cols), "Hinweise an 2 Tagen");
         assert_eq!(warnings_summary(&cols[..2]), "Hinweise an 1 Tag");
         assert_eq!(warnings_summary(&cols[2..5]), "");

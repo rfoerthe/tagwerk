@@ -12,7 +12,8 @@
 # generate_testdata.py) und werden bei jedem Aufruf neu erzeugt – samt Markdown-Quelle
 # target/testdata/testdaten.md. Nichts davon liegt im Repository. Sie enthalten Arbeit
 # ohne Mac und Regelverstöße, darunter rund 10 % Tage mit mehr als 6 Std. ohne Pause, sowie
-# Feiertage, 30 Urlaubstage und 6 Tage Zeitausgleich im Jahr als Abwesenheiten.
+# Feiertage, 30 Urlaubstage und 6 Tage Zeitausgleich im Jahr als Abwesenheiten, alle sechs
+# Monate einen Tag Sonderurlaub und 4–6 Std. Arbeit am Samstag der Woche davor.
 #
 # Laufende Tagwerk-Instanzen, die die zentrale Datenbank benutzen, werden vor dem
 # Austausch beendet und danach wieder gestartet (sofern sie als App-Bundle liefen).
@@ -32,7 +33,7 @@ for arg in "$@"; do
   case "$arg" in
     --install) MODE="install" ;;
     --restore) MODE="restore" ;;
-    -h|--help) sed -n '2,26p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,27p' "$0"; exit 0 ;;
     *) echo "Unbekannte Option: $arg" >&2; exit 2 ;;
   esac
 done
