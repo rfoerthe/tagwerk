@@ -10,7 +10,10 @@
 //! - `absences`  – Abwesenheiten (Urlaub, krank …),
 //! - `auto_counting` – freie Tage: Was gilt für die automatische Erfassung (siehe `Day::free_day`;
 //!   `counts`: 0 nicht gezählt, 1 gezählt, 2 nicht erfasst)?
-//! - `settings`  – Einstellungen (Schlüssel → ganze Zahl, Zeiten in Sekunden).
+//! - `settings`  – Einstellungen (Schlüssel → ganze Zahl, Zeiten in Sekunden),
+//! - `work_rules` – Arbeitszeitregeln mit Gültigkeitsdatum (`valid_from` leer: seit jeher).
+//!   Die Regeln, die heute gelten, stehen zusätzlich wie früher in `settings` – für ältere
+//!   Versionen, die `work_rules` nicht kennen.
 //!
 //! Die Markdown-Datei früherer Versionen (`tagwerk.md`) wird beim ersten Öffnen der
 //! Datenbank einmalig übernommen und danach in `tagwerk.md.importiert` umbenannt.
@@ -90,6 +93,19 @@ const SCHEMA_FREE_DAYS: &str = "
     CREATE TABLE IF NOT EXISTS auto_counting (
         date TEXT PRIMARY KEY,
         counts INTEGER NOT NULL
+    ) WITHOUT ROWID;
+";
+/// Arbeitszeitregeln je Stand – wie `absences` ohne neue Schema-Version: Ältere Versionen
+/// lesen weiter die Werte in `settings` (die Regeln, die beim Speichern galten) und rechnen
+/// damit alle Tage.
+const SCHEMA_WORK_RULES: &str = "
+    CREATE TABLE IF NOT EXISTS work_rules (
+        valid_from TEXT PRIMARY KEY,
+        min_pause_s INTEGER NOT NULL,
+        weekly_target_s INTEGER NOT NULL,
+        frame_from_s INTEGER NOT NULL,
+        frame_to_s INTEGER NOT NULL,
+        workdays INTEGER NOT NULL
     ) WITHOUT ROWID;
 ";
 const KEY_MIN_PAUSE: &str = "min_pause_s";
@@ -230,23 +246,25 @@ impl Db {
         Ok(())
     }
 
-    /// Einstellungen (fehlende Werte: Standard).
+    /// Einstellungen (fehlende Werte: Standard). Ohne Einträge in `work_rules` (Datenbank einer
+    /// älteren Version) gelten die Regeln aus `settings` seit jeher.
     pub fn load_settings(&self) -> Result<Settings> {
         let mut s = Settings::default();
+        let mut legacy = rules::WorkRules::DEFAULT;
         let mut stmt = self.conn.prepare("SELECT key, value FROM settings")?;
         let rows = stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?;
         for row in rows {
             let (key, value) = row?;
             match key.as_str() {
-                KEY_MIN_PAUSE => s.min_pause = value,
+                KEY_MIN_PAUSE => legacy.min_pause = value,
                 KEY_MIN_WORK => s.min_work = value,
-                KEY_WEEKLY => s.weekly_target = value,
-                KEY_FRAME_FROM => s.frame_from = value,
-                KEY_FRAME_TO => s.frame_to = value,
+                KEY_WEEKLY => legacy.weekly_target = value,
+                KEY_FRAME_FROM => legacy.frame_from = value,
+                KEY_FRAME_TO => legacy.frame_to = value,
                 KEY_ICON_SET => s.icon_set = rules::IconSet::from_id(value),
                 KEY_SHOW_TIME => s.show_time = value != 0,
                 KEY_HOTKEYS => s.hotkeys = value != 0,
-                KEY_WORKDAYS => s.workdays = value.clamp(0, 255) as u8,
+                KEY_WORKDAYS => legacy.workdays = value.clamp(0, 255) as u8,
                 KEY_IDLE => s.idle_secs = value,
                 KEY_AUTO_WORKDAYS_ONLY => s.auto_workdays_only = value != 0,
                 KEY_ASK_AFTER_LOCK => s.ask_after_lock = value != 0,
@@ -259,22 +277,71 @@ impl Db {
                 _ => {}
             }
         }
+        let mut stmt = self.conn.prepare(
+            "SELECT valid_from, min_pause_s, weekly_target_s, frame_from_s, frame_to_s, workdays
+             FROM work_rules ORDER BY valid_from",
+        )?;
+        let rows = stmt.query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                rules::WorkRules {
+                    min_pause: r.get(1)?,
+                    weekly_target: r.get(2)?,
+                    frame_from: r.get(3)?,
+                    frame_to: r.get(4)?,
+                    workdays: r.get::<_, i64>(5)?.clamp(0, 255) as u8,
+                },
+            ))
+        })?;
+        let mut work = Vec::new();
+        for row in rows {
+            let (from, rules) = row?;
+            // Leer: seit jeher; ein unlesbares Datum wird übergangen.
+            let from = match from.as_str() {
+                "" => None,
+                text => match parse_date(text) {
+                    Some(d) => Some(d),
+                    None => continue,
+                },
+            };
+            work.push(rules::RulesPeriod { from, rules });
+        }
+        s.work = if work.is_empty() { vec![rules::RulesPeriod { from: None, rules: legacy }] } else { work };
         Ok(s.sanitized())
     }
 
-    pub fn save_settings(&mut self, s: &Settings) -> Result<()> {
-        let s = s.sanitized();
+    /// Speichert die Einstellungen; `today` bestimmt, welche Arbeitszeitregeln für ältere
+    /// Versionen in `settings` stehen.
+    pub fn save_settings(&mut self, s: &Settings, today: NaiveDate) -> Result<()> {
+        let s = s.clone().sanitized();
+        let now = *s.rules(today);
         let tx = self.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
+        tx.execute("DELETE FROM work_rules", [])?;
+        for p in &s.work {
+            let r = p.rules;
+            tx.execute(
+                "INSERT INTO work_rules (valid_from, min_pause_s, weekly_target_s, frame_from_s, frame_to_s, workdays)
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![
+                    p.from.map(date_key).unwrap_or_default(),
+                    r.min_pause,
+                    r.weekly_target,
+                    r.frame_from,
+                    r.frame_to,
+                    r.workdays as i64
+                ],
+            )?;
+        }
         for (key, value) in [
-            (KEY_MIN_PAUSE, s.min_pause),
+            (KEY_MIN_PAUSE, now.min_pause),
             (KEY_MIN_WORK, s.min_work),
-            (KEY_WEEKLY, s.weekly_target),
-            (KEY_FRAME_FROM, s.frame_from),
-            (KEY_FRAME_TO, s.frame_to),
+            (KEY_WEEKLY, now.weekly_target),
+            (KEY_FRAME_FROM, now.frame_from),
+            (KEY_FRAME_TO, now.frame_to),
             (KEY_ICON_SET, s.icon_set.id()),
             (KEY_SHOW_TIME, s.show_time as i64),
             (KEY_HOTKEYS, s.hotkeys as i64),
-            (KEY_WORKDAYS, s.workdays as i64),
+            (KEY_WORKDAYS, now.workdays as i64),
             (KEY_IDLE, s.idle_secs),
             (KEY_AUTO_WORKDAYS_ONLY, s.auto_workdays_only as i64),
             (KEY_ASK_AFTER_LOCK, s.ask_after_lock as i64),
@@ -354,6 +421,7 @@ fn init_schema(conn: &mut Connection, dir: &Path) -> Result<()> {
     // Kommen ohne neue Version dazu (siehe `SCHEMA_ABSENCES`).
     tx.execute_batch(SCHEMA_ABSENCES)?;
     tx.execute_batch(SCHEMA_FREE_DAYS)?;
+    tx.execute_batch(SCHEMA_WORK_RULES)?;
     let mut imported_file = None;
     if version < SCHEMA_VERSION {
         tx.execute_batch(SCHEMA_SETTINGS)?;
@@ -913,16 +981,27 @@ pub fn export_markdown(
         fmt_date_short(from),
         fmt_date_short(to)
     ));
+    // Bei einem Wechsel der Regeln im Zeitraum stehen sie als Liste unter der Erklärung.
+    let periods = settings.rules_between(from, to);
+    let (pause, frame) = match periods.as_slice() {
+        [(_, r)] => (format!("unter {} Min.", r.min_pause / 60), format!(" ({})", r.frame_text())),
+        _ => ("unter der Mindestpause".to_string(), String::new()),
+    };
     s.push_str(&format!(
         "Exportiert am {} um {} Uhr. Arbeitszeit = Zeit, in der der Mac entsperrt war, verrechnet \
-         mit den manuellen Korrekturen; Sperren unter {} Min. zählen als Arbeitszeit. Gezählt wird \
-         nur im Arbeitszeitrahmen ({}). Pausenzeit = Zeit zwischen Beginn und Ende, in der nicht \
+         mit den manuellen Korrekturen; Sperren {pause} zählen als Arbeitszeit. Gezählt wird \
+         nur im Arbeitszeitrahmen{frame}. Pausenzeit = Zeit zwischen Beginn und Ende, in der nicht \
          gearbeitet wurde.\n\n",
         fmt_date_short(now.date()),
         now.format("%H:%M"),
-        settings.min_pause / 60,
-        settings.frame_text()
     ));
+    if periods.len() > 1 {
+        s.push_str("Regeln:\n\n");
+        for line in settings.summary_between(from, to) {
+            s.push_str(&format!("- {line}\n"));
+        }
+        s.push('\n');
+    }
     s.push_str("| Datum | Beginn | Ende | Arbeitszeit | Pausenzeit | Saldo |\n");
     s.push_str("|:------|:------:|:----:|------------:|-----------:|------:|\n");
     let (mut work, mut pause, mut target, mut count) = (0, 0, 0, 0);
@@ -970,10 +1049,9 @@ pub fn export_markdown(
         rules::fmt_balance(work - target)
     ));
     s.push_str(&format!(
-        "\nSoll: {} ({} Std./Woche, {}; Arbeitstage bis gestern auch ohne Eintrag).\n",
+        "\nSoll: {} ({}; Arbeitstage bis gestern auch ohne Eintrag).\n",
         fmt_hm(target),
-        rules::fmt_hours(settings.weekly_target),
-        settings.workdays_text()
+        settings.target_basis(from, to)
     ));
 
     s.push_str(&format!("\n{HEAD_WARNINGS}\n\n"));
@@ -1261,16 +1339,17 @@ mod tests {
         assert_eq!(days.len(), 1);
         assert!(days[0].breaks.is_empty(), "offene Pause wird ignoriert");
 
+        let old = rules::WorkRules { min_pause: 20 * 60, weekly_target: h(38, 30), frame_from: h(6, 0), frame_to: h(20, 0), workdays: 0b0_1111 };
+        let new = rules::WorkRules { weekly_target: h(30, 0), ..old };
         let custom = Settings {
-            min_pause: 20 * 60,
+            work: vec![
+                rules::RulesPeriod { from: None, rules: old },
+                rules::RulesPeriod { from: Some(date(16)), rules: new },
+            ],
             min_work: 30 * 60,
-            weekly_target: h(38, 30),
-            frame_from: h(6, 0),
-            frame_to: h(20, 0),
             icon_set: rules::IconSet::Schlossuhr,
             show_time: true,
             hotkeys: true,
-            workdays: 0b0_1111,
             auto_workdays_only: false,
             idle_secs: 10 * 60,
             ask_after_lock: true,
@@ -1280,9 +1359,16 @@ mod tests {
             account_carry: -h(3, 30),
         };
         let mut other = Db::open_in(&dir).unwrap();
-        other.save_settings(&custom).unwrap();
+        other.save_settings(&custom, date(20)).unwrap();
         assert!(db.changed_externally(), "Einstellungen ändern die Datenbank");
         assert_eq!(db.load_settings().unwrap(), custom);
+        // Für ältere Versionen stehen in `settings` die Regeln, die beim Speichern galten.
+        let weekly: i64 = db.conn.query_row("SELECT value FROM settings WHERE key = ?1", [KEY_WEEKLY], |r| r.get(0)).unwrap();
+        assert_eq!(weekly, h(30, 0));
+        // Datenbank einer älteren Version (ohne Stände): Die Regeln aus `settings` gelten seit jeher.
+        db.conn.execute("DELETE FROM work_rules", []).unwrap();
+        let legacy = db.load_settings().unwrap();
+        assert_eq!(legacy.work, vec![rules::RulesPeriod { from: None, rules: new }]);
         let _ = fs::remove_dir_all(&dir);
     }
 

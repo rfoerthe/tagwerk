@@ -100,7 +100,7 @@ impl Tracker {
 
     /// Liegt `now` im Arbeitszeitrahmen? Außerhalb wird nichts gezählt.
     pub fn in_frame(&self, now: NaiveDateTime) -> bool {
-        self.settings.in_frame(secs(now))
+        self.settings.rules(now.date()).in_frame(secs(now))
     }
 
     pub fn is_running(&self) -> bool {
@@ -686,8 +686,8 @@ mod tests {
 
     #[test]
     fn away_over_midnight_and_from_break() {
-        let all_day = Settings { frame_from: 0, frame_to: DAY_END, ..Settings::default() };
-        let mut t = Tracker::new(vec![], all_day);
+        let all_day = Settings::default().with_rules(crate::rules::WorkRules { frame_from: 0, frame_to: DAY_END, ..Default::default() });
+        let mut t = Tracker::new(vec![], all_day.clone());
         t.start(dt(16, 22, 0));
         t.take_break(dt(16, 22, 30));
         assert!(t.go_away(dt(16, 23, 0), Activity::Other));
@@ -745,7 +745,7 @@ mod tests {
         let mut off = Day::new(dt(17, 0, 0).date());
         off.absence = vacation;
         // Urlaub am Dienstag im Voraus eingetragen; am Montag wird bis in die Nacht erfasst.
-        let mut t = Tracker::new(vec![off.clone()], Settings { frame_to: DAY_END, ..Settings::default() });
+        let mut t = Tracker::new(vec![off.clone()], Settings::default().with_rules(crate::rules::WorkRules { frame_to: DAY_END, ..Default::default() }));
         assert!(t.start(dt(16, 22, 0)));
         // Um Mitternacht endet die Erfassung: Der Urlaubstag nimmt keine Zeit an.
         assert!(t.roll_over(dt(17, 0, 5)));
@@ -866,8 +866,8 @@ mod tests {
 
     #[test]
     fn midnight_split() {
-        let all_day = Settings { frame_from: 0, frame_to: DAY_END, ..Settings::default() };
-        let mut t = Tracker::new(vec![], all_day);
+        let all_day = Settings::default().with_rules(crate::rules::WorkRules { frame_from: 0, frame_to: DAY_END, ..Default::default() });
+        let mut t = Tracker::new(vec![], all_day.clone());
         t.start(dt(16, 23, 0));
         t.roll_over(dt(17, 0, 30));
         t.stop(dt(17, 1, 0), PauseReason::Manual);
@@ -1005,7 +1005,7 @@ mod tests {
         assert_eq!(t.counting(dt(20, 8, 0).date()), None);
         assert_eq!(t.status(dt(20, 9, 0)), Status::Running);
         // Freitag abgewählt: ein freier Tag.
-        let four = Settings { workdays: 0b0_1111, ..Settings::default() };
+        let four = Settings::default().with_rules(crate::rules::WorkRules { workdays: 0b0_1111, ..Default::default() });
         let mut t = Tracker::new(vec![], four);
         t.start(dt(20, 8, 0));
         assert_eq!(t.status(dt(20, 9, 0)), Status::FreeDay);

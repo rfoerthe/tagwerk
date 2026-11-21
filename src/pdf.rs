@@ -88,18 +88,17 @@ fn compose(report: &Report, settings: &Settings, now: NaiveDateTime) -> Retained
         false,
         &plain,
     );
-    t.line(
-        &format!(
-            "Exportiert am {} um {} Uhr  ·  {}",
-            store::fmt_date_short(now.date()),
-            now.format("%H:%M"),
-            settings.summary()
-        ),
-        8.5,
-        regular,
-        true,
-        &paragraph(&[], false, 3.0, 0.0),
-    );
+    // Die Regeln des Zeitraums – bei einem Wechsel eine Zeile je Stand.
+    let summaries = settings.summary_between(report.from, report.to);
+    let single = summaries.len() == 1;
+    let exported = format!("Exportiert am {} um {} Uhr", store::fmt_date_short(now.date()), now.format("%H:%M"));
+    let head = if single { format!("{exported}  ·  {}", summaries[0]) } else { exported };
+    t.line(&head, 8.5, regular, true, &paragraph(&[], false, 3.0, 0.0));
+    if !single {
+        for line in &summaries {
+            t.line(line, 8.5, regular, true, &paragraph(&[], false, 1.0, 0.0));
+        }
+    }
 
     let row = |cells: [&str; 6]| cells.join("\t");
     t.line(
@@ -182,10 +181,9 @@ fn compose(report: &Report, settings: &Settings, now: NaiveDateTime) -> Retained
     );
     t.line(
         &format!(
-            "Soll: {} ({} Std./Woche, {}; nur Tage mit Arbeitszeit).  ✎ manuell korrigiert  ·  ⚠ siehe Hinweise",
+            "Soll: {} ({}; nur Tage mit Arbeitszeit).  ✎ manuell korrigiert  ·  ⚠ siehe Hinweise",
             store::fmt_hm(target),
-            rules::fmt_hours(settings.weekly_target),
-            settings.workdays_text()
+            settings.target_basis(report.from, report.to)
         ),
         8.5,
         regular,

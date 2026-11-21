@@ -594,8 +594,8 @@ impl AppState {
     /// nicht für die Nacht davor.
     fn ask_about_lock(&mut self, from: NaiveDateTime, to: NaiveDateTime) {
         let settings = &self.tracker.settings;
-        let long = (to - from).num_seconds() >= settings.ask_after();
-        if !settings.ask_after_lock || !long || from.date() != to.date() || !settings.in_frame(secs(from)) {
+        let long = (to - from).num_seconds() >= settings.ask_after(from.date());
+        if !settings.ask_after_lock || !long || from.date() != to.date() || !settings.rules(from.date()).in_frame(secs(from)) {
             return;
         }
         // Freier Tag ohne „Heute erfassen“: Es zählt ohnehin nichts.
@@ -853,7 +853,7 @@ impl AppState {
     fn week_snapshot(&self, t: NaiveDateTime) -> week_view::Snapshot {
         week_view::Snapshot {
             days: self.tracker.snapshot(t),
-            settings: self.tracker.settings,
+            settings: self.tracker.settings.clone(),
             now: t,
             running: self.tracker.is_running() || self.tracker.on_away(),
         }
@@ -889,13 +889,13 @@ fn status_line(tracker: &Tracker, t: NaiveDateTime) -> (String, IconKind) {
             IconKind::Outside,
         ),
         (store::Status::Away(since, activity), _) => (away_text(since, t, activity), IconKind::Away),
-        (store::Status::Break(since), _) => (break_text(since, t, settings.min_pause), IconKind::Break),
+        (store::Status::Break(since), _) => (break_text(since, t, settings.rules(t.date()).min_pause), IconKind::Break),
         (store::Status::FreeDay, _) if tracker.free_day(t.date()) == Some(FreeDay::Stopped) => {
             ("Freier Tag – Erfassung aus".to_string(), IconKind::Outside)
         }
         (store::Status::FreeDay, _) => ("Freier Tag – Erfassung zählt nicht".to_string(), IconKind::Outside),
         (store::Status::Outside, _) => {
-            (format!("Außerhalb des Arbeitszeitrahmens ({})", settings.frame_text()), IconKind::Outside)
+            (format!("Außerhalb des Arbeitszeitrahmens ({})", settings.rules(t.date()).frame_text()), IconKind::Outside)
         }
         (store::Status::Running, _) => ("Zeiterfassung läuft".to_string(), IconKind::Running),
         _ => (

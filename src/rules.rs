@@ -1,7 +1,9 @@
 //! Einstellungen und Regeln der Zeiterfassung.
 //!
-//! Einstellbar sind der Arbeitszeitrahmen, die Regelwochenarbeitszeit und die Mindestdauer
-//! einer Pause. Fest sind die Regeln aus Arbeitszeitgesetz und Betriebsvereinbarung:
+//! Einstellbar sind der Arbeitszeitrahmen, die Regelwochenarbeitszeit, die Arbeitstage und die
+//! Mindestdauer einer Pause ([`WorkRules`]) – je Stand ab einem Datum, damit eine Änderung
+//! frühere Tage nicht neu rechnet ([`Settings::rules`] liefert die Regeln eines Tages). Fest
+//! sind die Regeln aus Arbeitszeitgesetz und Betriebsvereinbarung:
 //!
 //! - **Arbeitszeitrahmen** – Arbeit nur im eingestellten Zeitraum (Standard 07:00–22:00), an
 //!   jedem Tag; außerhalb wird weder Arbeitszeit noch Pause gezählt, es gibt aber einen Hinweis.
@@ -117,28 +119,128 @@ impl IconSet {
     }
 }
 
-/// Vom Benutzer einstellbare Werte (alle Zeiten in Sekunden).
+/// Arbeitszeitregeln: was an einem Tag als Arbeitszeit, Pause und Soll zählt (alle Zeiten in
+/// Sekunden). Sie gelten ab einem Tag bis zum nächsten Stand (siehe [`Settings::work`]) –
+/// eine Änderung rechnet frühere Tage nicht neu.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Settings {
+pub struct WorkRules {
     /// Mindestdauer einer Pause: kürzere Sperrzeiten zählen zur Arbeitszeit.
     pub min_pause: i64,
-    /// Mindestdauer von Arbeit ohne Mac beim Eintragen von Hand (unabhängig von `min_pause`).
-    pub min_work: i64,
     /// Regelwochenarbeitszeit.
     pub weekly_target: i64,
     /// Beginn des Arbeitszeitrahmens (Sekunden seit Mitternacht).
     pub frame_from: i64,
     /// Ende des Arbeitszeitrahmens (Sekunden seit Mitternacht).
     pub frame_to: i64,
+    /// Arbeitstage der Woche als Bits (Bit 0 = Montag … Bit 4 = Freitag); das Wochensoll
+    /// verteilt sich gleichmäßig auf sie.
+    pub workdays: u8,
+}
+
+impl WorkRules {
+    pub const DEFAULT: WorkRules =
+        WorkRules { min_pause: 15 * 60, weekly_target: 39 * 3600, frame_from: 7 * 3600, frame_to: 22 * 3600, workdays: ALL_WORKDAYS };
+
+    /// Werte in gültige Grenzen bringen.
+    pub fn sanitized(self) -> Self {
+        let d = Self::DEFAULT;
+        let mut r = Self {
+            min_pause: self.min_pause.clamp(MIN_PAUSE_RANGE.0, MIN_PAUSE_RANGE.1),
+            weekly_target: self.weekly_target.clamp(WEEKLY_RANGE.0, WEEKLY_RANGE.1),
+            frame_from: self.frame_from.clamp(0, DAY_END),
+            frame_to: self.frame_to.clamp(0, DAY_END),
+            // Ohne Arbeitstag gäbe es kein Soll: dann wieder Montag bis Freitag.
+            workdays: if self.workdays & ALL_WORKDAYS == 0 { ALL_WORKDAYS } else { self.workdays & ALL_WORKDAYS },
+        };
+        if r.frame_to <= r.frame_from {
+            r.frame_from = d.frame_from;
+            r.frame_to = d.frame_to;
+        }
+        r
+    }
+
+    /// Ist `date` einer der eingestellten Arbeitstage (für ihn gibt es ein Soll)?
+    pub fn is_workday(&self, date: NaiveDate) -> bool {
+        let day = date.weekday().num_days_from_monday();
+        day < 5 && self.workdays & (1 << day) != 0
+    }
+
+    /// Anzahl der Arbeitstage pro Woche (1 bis 5).
+    pub fn workday_count(&self) -> i64 {
+        ((self.workdays & ALL_WORKDAYS).count_ones() as i64).max(1)
+    }
+
+    /// Sollarbeitszeit eines Arbeitstags (Wochenarbeitszeit / Arbeitstage).
+    pub fn daily_target_workday(&self) -> i64 {
+        self.weekly_target / self.workday_count()
+    }
+
+    /// `Mo–Fr` bzw. `Mo, Di, Do` – die eingestellten Arbeitstage.
+    pub fn workdays_text(&self) -> String {
+        const NAMES: [&str; 5] = ["Mo", "Di", "Mi", "Do", "Fr"];
+        if self.workdays & ALL_WORKDAYS == ALL_WORKDAYS {
+            return "Mo–Fr".to_string();
+        }
+        let days: Vec<&str> = NAMES.iter().enumerate().filter(|(i, _)| self.workdays & (1 << i) != 0).map(|(_, n)| *n).collect();
+        days.join(", ")
+    }
+
+    /// `5-Tage-Woche`
+    pub fn week_text(&self) -> String {
+        format!("{}-Tage-Woche", self.workday_count())
+    }
+
+    /// Liegt die Uhrzeit `secs` im Arbeitszeitrahmen?
+    pub fn in_frame(&self, secs: i64) -> bool {
+        (self.frame_from..self.frame_to).contains(&secs)
+    }
+
+    /// `07:00–22:00 Uhr`
+    pub fn frame_text(&self) -> String {
+        format!("{}–{} Uhr", fmt_clock(self.frame_from), fmt_clock(self.frame_to))
+    }
+
+    /// Kurzfassung für Fußzeilen und Export.
+    pub fn summary(&self) -> String {
+        format!(
+            "Arbeitszeitrahmen {}  ·  Regelarbeitszeit {} Std./Woche ({})  ·  Pausen ab {} Min.",
+            self.frame_text(),
+            fmt_hours(self.weekly_target),
+            self.workdays_text(),
+            self.min_pause / 60
+        )
+    }
+}
+
+impl Default for WorkRules {
+    fn default() -> Self {
+        Self::DEFAULT
+    }
+}
+
+/// Ein Stand der Arbeitszeitregeln: gilt ab `from` (`None`: seit jeher) bis zum nächsten.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RulesPeriod {
+    pub from: Option<NaiveDate>,
+    pub rules: WorkRules,
+}
+
+/// Vom Benutzer einstellbare Werte (alle Zeiten in Sekunden).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Settings {
+    /// Arbeitszeitregeln mit ihren Gültigkeiten: nach Datum sortiert, nie leer, der erste
+    /// Stand gilt seit jeher (`from: None`), zwei aufeinanderfolgende sind verschieden
+    /// (siehe [`Settings::sanitized`]). Abfragen über [`Settings::rules`].
+    pub work: Vec<RulesPeriod>,
+    /// Mindestdauer von Arbeit ohne Mac beim Eintragen von Hand (unabhängig von der
+    /// Mindestpause; prüft nur Eingaben und gilt deshalb ohne Datum).
+    pub min_work: i64,
     /// Symbolsatz der Menüleiste.
     pub icon_set: IconSet,
     /// Arbeitszeit von heute neben dem Symbol in der Menüleiste zeigen.
     pub show_time: bool,
     /// Globale Kurzbefehle (wirken in jeder App).
     pub hotkeys: bool,
-    /// Arbeitstage der Woche als Bits (Bit 0 = Montag … Bit 4 = Freitag); das Wochensoll
-    /// verteilt sich gleichmäßig auf sie.
-    pub workdays: u8,
     /// Automatische Erfassung zählt nur an Arbeitstagen: An Samstag, Sonntag und freien
     /// Wochentagen wird sie aufgezeichnet, zählt aber erst nach „Heute erfassen“ (siehe
     /// [`crate::day::Day::free_day`]).
@@ -161,15 +263,11 @@ pub struct Settings {
 impl Default for Settings {
     fn default() -> Self {
         Self {
-            min_pause: 15 * 60,
+            work: vec![RulesPeriod { from: None, rules: WorkRules::DEFAULT }],
             min_work: 15 * 60,
-            weekly_target: 39 * 3600,
-            frame_from: 7 * 3600,
-            frame_to: 22 * 3600,
             icon_set: IconSet::default(),
             show_time: false,
             hotkeys: false,
-            workdays: ALL_WORKDAYS,
             auto_workdays_only: true,
             idle_secs: 0,
             ask_after_lock: false,
@@ -184,31 +282,83 @@ impl Default for Settings {
 impl Settings {
     /// Werte in gültige Grenzen bringen (z. B. nach dem Laden aus der Datenbank).
     pub fn sanitized(self) -> Self {
-        let d = Self::default();
-        let mut s = Self {
-            min_pause: self.min_pause.clamp(MIN_PAUSE_RANGE.0, MIN_PAUSE_RANGE.1),
+        Self {
+            work: normalized(self.work),
             min_work: self.min_work.clamp(MIN_WORK_RANGE.0, MIN_WORK_RANGE.1),
-            weekly_target: self.weekly_target.clamp(WEEKLY_RANGE.0, WEEKLY_RANGE.1),
-            frame_from: self.frame_from.clamp(0, DAY_END),
-            frame_to: self.frame_to.clamp(0, DAY_END),
-            icon_set: self.icon_set,
-            show_time: self.show_time,
-            hotkeys: self.hotkeys,
-            // Ohne Arbeitstag gäbe es kein Soll: dann wieder Montag bis Freitag.
-            workdays: if self.workdays & ALL_WORKDAYS == 0 { ALL_WORKDAYS } else { self.workdays & ALL_WORKDAYS },
-            auto_workdays_only: self.auto_workdays_only,
             idle_secs: if self.idle_secs <= 0 { 0 } else { self.idle_secs.clamp(IDLE_RANGE.0, IDLE_RANGE.1) },
-            ask_after_lock: self.ask_after_lock,
-            notify_limit: self.notify_limit,
-            notify_break: self.notify_break,
-            account_from: self.account_from,
             account_carry: self.account_carry.clamp(-CARRY_MAX, CARRY_MAX),
-        };
-        if s.frame_to <= s.frame_from {
-            s.frame_from = d.frame_from;
-            s.frame_to = d.frame_to;
+            ..self
         }
-        s
+    }
+
+    /// Dieselben Einstellungen mit nur einem Stand der Arbeitszeitregeln, der seit jeher gilt.
+    #[cfg(test)]
+    pub fn with_rules(self, rules: WorkRules) -> Self {
+        Self { work: vec![RulesPeriod { from: None, rules }], ..self }.sanitized()
+    }
+
+    /// Die Arbeitszeitregeln, die am Tag `date` gelten.
+    pub fn rules(&self, date: NaiveDate) -> &WorkRules {
+        self.work
+            .iter()
+            .rev()
+            .find(|p| p.from.is_none_or(|f| f <= date))
+            .map_or(&WorkRules::DEFAULT, |p| &p.rules)
+    }
+
+    /// Stand ab `from` (`None`: seit jeher) setzen; ein vorhandener Stand mit demselben Datum
+    /// wird ersetzt, ebenso der Stand ab `replaces` (beim Verschieben eines Stands auf ein
+    /// anderes Datum – in einem Schritt, damit dazwischen nichts zusammengefasst wird). Gleicht
+    /// ein Stand dem davor, entfällt er.
+    pub fn set_rules(&mut self, from: Option<NaiveDate>, rules: WorkRules, replaces: Option<NaiveDate>) {
+        self.work.retain(|p| p.from != from && (replaces.is_none() || p.from != replaces));
+        self.work.push(RulesPeriod { from, rules: rules.sanitized() });
+        self.work = normalized(std::mem::take(&mut self.work));
+    }
+
+    /// Den Stand ab `from` löschen – ab dann gilt wieder der Stand davor. Der erste Stand
+    /// (seit jeher) bleibt immer.
+    pub fn remove_rules(&mut self, from: NaiveDate) {
+        self.work.retain(|p| p.from != Some(from));
+        self.work = normalized(std::mem::take(&mut self.work));
+    }
+
+    /// Die Stände, die zwischen `from` und `to` gelten: jeweils der erste Tag im Zeitraum, an
+    /// dem der Stand gilt, und die Regeln.
+    pub fn rules_between(&self, from: NaiveDate, to: NaiveDate) -> Vec<(NaiveDate, WorkRules)> {
+        let mut out = vec![(from, *self.rules(from))];
+        out.extend(self.work.iter().filter_map(|p| p.from.filter(|f| *f > from && *f <= to).map(|f| (f, p.rules))));
+        out
+    }
+
+    /// Kurzfassung der Regeln von `from` bis `to` für Fußzeilen und Export – bei einem Wechsel
+    /// im Zeitraum ein Absatz je Stand (`bis 30.11.2026: …`, `ab 01.12.2026: …`).
+    pub fn summary_between(&self, from: NaiveDate, to: NaiveDate) -> Vec<String> {
+        let parts = self.rules_between(from, to);
+        if parts.len() == 1 {
+            return vec![parts[0].1.summary()];
+        }
+        parts
+            .iter()
+            .enumerate()
+            .map(|(i, (start, r))| match parts.get(i + 1) {
+                None => format!("Ab {}: {}", fmt_day(*start), r.summary()),
+                Some(_) if i == 0 => format!("Bis {}: {}", fmt_day(parts[1].0 - chrono::Duration::days(1)), r.summary()),
+                Some((next, _)) => {
+                    format!("{} bis {}: {}", fmt_day(*start), fmt_day(*next - chrono::Duration::days(1)), r.summary())
+                }
+            })
+            .collect()
+    }
+
+    /// Grundlage des Solls von `from` bis `to` für Fußzeilen: `39 Std./Woche, Mo–Fr` – bei
+    /// einem Wechsel im Zeitraum der Verweis auf die Regeln je Stand (siehe
+    /// [`Settings::summary_between`]).
+    pub fn target_basis(&self, from: NaiveDate, to: NaiveDate) -> String {
+        match self.rules_between(from, to).as_slice() {
+            [(_, r)] => format!("{} Std./Woche, {}", fmt_hours(r.weekly_target), r.workdays_text()),
+            _ => "nach den Regeln, die am jeweiligen Tag galten".to_string(),
+        }
     }
 
     /// Samstag oder Sonntag?
@@ -216,10 +366,9 @@ impl Settings {
         matches!(date.weekday(), Weekday::Sat | Weekday::Sun)
     }
 
-    /// Ist `date` einer der eingestellten Arbeitstage (für ihn gibt es ein Soll)?
+    /// Ist `date` ein Arbeitstag nach den Regeln, die an ihm gelten (für ihn gibt es ein Soll)?
     pub fn is_workday(&self, date: NaiveDate) -> bool {
-        let day = date.weekday().num_days_from_monday();
-        day < 5 && self.workdays & (1 << day) != 0
+        self.rules(date).is_workday(date)
     }
 
     /// Zählt die automatische Erfassung an `date` von selbst? Sonst markiert die Erfassung den
@@ -228,15 +377,11 @@ impl Settings {
         !self.auto_workdays_only || self.is_workday(date)
     }
 
-    /// Anzahl der Arbeitstage pro Woche (1 bis 5).
-    pub fn workday_count(&self) -> i64 {
-        ((self.workdays & ALL_WORKDAYS).count_ones() as i64).max(1)
-    }
-
-    /// Sollarbeitszeit eines Tages (an freien Tagen 0).
+    /// Sollarbeitszeit eines Tages (an freien Tagen 0) nach den Regeln, die an ihm gelten.
     pub fn daily_target(&self, date: NaiveDate) -> i64 {
-        if self.is_workday(date) {
-            self.daily_target_workday()
+        let r = self.rules(date);
+        if r.is_workday(date) {
+            r.daily_target_workday()
         } else {
             0
         }
@@ -268,51 +413,37 @@ impl Settings {
         }
     }
 
-    /// Sollarbeitszeit eines Arbeitstags (Wochenarbeitszeit / Arbeitstage).
-    pub fn daily_target_workday(&self) -> i64 {
-        self.weekly_target / self.workday_count()
+    /// Ab so langer Sperre am Tag `date` wird beim Entsperren nachgefragt (nie unter der
+    /// Mindestpause).
+    pub fn ask_after(&self, date: NaiveDate) -> i64 {
+        ASK_AFTER_LOCK.max(self.rules(date).min_pause)
     }
+}
 
-    /// `Mo–Fr` bzw. `Mo, Di, Do` – die eingestellten Arbeitstage.
-    pub fn workdays_text(&self) -> String {
-        const NAMES: [&str; 5] = ["Mo", "Di", "Mi", "Do", "Fr"];
-        if self.workdays & ALL_WORKDAYS == ALL_WORKDAYS {
-            return "Mo–Fr".to_string();
+/// Stände sortieren, bereinigen und zusammenfassen: Der erste gilt seit jeher, je Datum gibt es
+/// höchstens einen, und ein Stand, der dem davor gleicht, entfällt.
+fn normalized(mut work: Vec<RulesPeriod>) -> Vec<RulesPeriod> {
+    // Stabil sortiert: Bei gleichem Datum gewinnt der zuletzt eingetragene.
+    work.sort_by_key(|p| p.from);
+    let mut out: Vec<RulesPeriod> = Vec::with_capacity(work.len());
+    for p in work {
+        let p = RulesPeriod { rules: p.rules.sanitized(), ..p };
+        match out.last_mut() {
+            Some(last) if last.from == p.from => *last = p,
+            Some(last) if last.rules == p.rules => {}
+            _ => out.push(p),
         }
-        let days: Vec<&str> = NAMES.iter().enumerate().filter(|(i, _)| self.workdays & (1 << i) != 0).map(|(_, n)| *n).collect();
-        days.join(", ")
     }
+    match out.first_mut() {
+        Some(first) => first.from = None,
+        None => out.push(RulesPeriod { from: None, rules: WorkRules::DEFAULT }),
+    }
+    out
+}
 
-    /// `5-Tage-Woche`
-    pub fn week_text(&self) -> String {
-        format!("{}-Tage-Woche", self.workday_count())
-    }
-
-    /// Ab so langer Sperre wird beim Entsperren nachgefragt (nie unter der Mindestpause).
-    pub fn ask_after(&self) -> i64 {
-        ASK_AFTER_LOCK.max(self.min_pause)
-    }
-
-    /// Liegt die Uhrzeit `secs` im Arbeitszeitrahmen?
-    pub fn in_frame(&self, secs: i64) -> bool {
-        (self.frame_from..self.frame_to).contains(&secs)
-    }
-
-    /// `07:00–22:00 Uhr`
-    pub fn frame_text(&self) -> String {
-        format!("{}–{} Uhr", fmt_clock(self.frame_from), fmt_clock(self.frame_to))
-    }
-
-    /// Kurzfassung für Fußzeilen und Export.
-    pub fn summary(&self) -> String {
-        format!(
-            "Arbeitszeitrahmen {}  ·  Regelarbeitszeit {} Std./Woche ({})  ·  Pausen ab {} Min.",
-            self.frame_text(),
-            fmt_hours(self.weekly_target),
-            self.workdays_text(),
-            self.min_pause / 60
-        )
-    }
+/// `01.12.2026`
+pub fn fmt_day(d: NaiveDate) -> String {
+    d.format("%d.%m.%Y").to_string()
 }
 
 /// `39` bzw. `38,5` (Stunden, höchstens zwei Nachkommastellen).
@@ -433,7 +564,7 @@ pub fn day_warnings(days: &[Day], date: NaiveDate, s: &Settings) -> Vec<Warning>
     // Abschnitte unter einer Minute (z. B. kurz entsperrt in der Nacht) lohnen keinen Hinweis.
     let outside: Vec<Span> = day.outside_frame_spans(s).into_iter().filter(|x| x.len() >= 60).collect();
     if !outside.is_empty() {
-        out.push(Warning::OutsideFrame { spans: outside, frame: s.frame_text() });
+        out.push(Warning::OutsideFrame { spans: outside, frame: s.rules(date).frame_text() });
     }
     out
 }
@@ -688,18 +819,107 @@ mod tests {
         let s = Settings::default();
         assert_eq!(s.daily_target(date(16)), h(7, 48)); // Montag
         assert_eq!(s.daily_target(date(15)), 0); // Sonntag
-        assert_eq!(s.frame_text(), "07:00–22:00 Uhr");
-        let bad = Settings { frame_from: h(22, 0), frame_to: h(7, 0), min_pause: 0, weekly_target: 0, ..s };
-        let fixed = bad.sanitized();
-        assert_eq!((fixed.frame_from, fixed.frame_to), (h(7, 0), h(22, 0)));
-        assert_eq!(fixed.min_pause, 60);
-        assert_eq!(fixed.weekly_target, 3600);
+        assert_eq!(s.rules(date(16)).frame_text(), "07:00–22:00 Uhr");
+        let bad = WorkRules { frame_from: h(22, 0), frame_to: h(7, 0), min_pause: 0, weekly_target: 0, workdays: 0 };
+        let fixed = s.clone().with_rules(bad);
+        let r = fixed.rules(date(16));
+        assert_eq!((r.frame_from, r.frame_to), (h(7, 0), h(22, 0)));
+        assert_eq!(r.min_pause, 60);
+        assert_eq!(r.weekly_target, 3600);
+        assert_eq!(r.workdays, ALL_WORKDAYS);
         assert_eq!(fixed.min_work, s.min_work);
         // Die Mindestdauer von Arbeit ohne Mac hängt nicht an der Mindestpause.
-        let s20 = Settings { min_pause: 20 * 60, min_work: 5 * 60, ..s }.sanitized();
-        assert_eq!((s20.min_pause, s20.min_work), (20 * 60, 5 * 60));
-        assert_eq!(Settings { min_work: 0, ..s }.sanitized().min_work, MIN_WORK_RANGE.0);
+        let s20 = Settings { min_work: 5 * 60, ..s.clone() }.with_rules(WorkRules { min_pause: 20 * 60, ..WorkRules::DEFAULT });
+        assert_eq!((s20.rules(date(16)).min_pause, s20.min_work), (20 * 60, 5 * 60));
+        assert_eq!(Settings { min_work: 0, ..s.clone() }.sanitized().min_work, MIN_WORK_RANGE.0);
         assert_eq!(Settings { min_work: 999 * 60, ..s }.sanitized().min_work, MIN_WORK_RANGE.1);
+    }
+
+    #[test]
+    fn rules_apply_from_their_date() {
+        let mut s = Settings::default();
+        let part = WorkRules { weekly_target: h(32, 0), workdays: 0b0_1111, ..WorkRules::DEFAULT };
+        // Ab Donnerstag 32 Std. an Mo–Do: davor gilt weiter der Stand von Beginn an.
+        s.set_rules(Some(date(19)), part, None);
+        assert_eq!(s.work.len(), 2);
+        assert_eq!(s.rules(date(18)), &WorkRules::DEFAULT);
+        assert_eq!(s.rules(date(19)), &part);
+        assert_eq!(s.rules(NaiveDate::MIN), &WorkRules::DEFAULT);
+        assert_eq!(s.daily_target(date(18)), h(7, 48)); // Mittwoch, alter Stand
+        assert_eq!(s.daily_target(date(19)), h(8, 0)); // Donnerstag, neuer Stand
+        assert_eq!(s.daily_target(date(20)), 0); // Freitag ist kein Arbeitstag mehr
+        assert!(s.auto_counts_on(date(18)) && !s.auto_counts_on(date(20)));
+
+        // Derselbe Tag ersetzt den Stand; ein Stand wie der davor entfällt.
+        let part30 = WorkRules { weekly_target: h(30, 0), ..part };
+        s.set_rules(Some(date(19)), part30, None);
+        assert_eq!(s.work.len(), 2);
+        assert_eq!(s.rules(date(25)), &part30);
+        s.set_rules(Some(date(23)), part30, None);
+        assert_eq!(s.work.len(), 2, "gleicht dem Stand davor");
+
+        // Verschieben: Der Stand ab Donnerstag zieht auf Dienstag um, ohne dass ein späterer
+        // Stand mit den Regeln von Beginn dabei verloren geht.
+        s.set_rules(Some(date(26)), WorkRules::DEFAULT, None);
+        assert_eq!(s.work.len(), 3);
+        s.set_rules(Some(date(17)), part30, Some(date(19)));
+        assert_eq!(s.work.iter().map(|p| p.from).collect::<Vec<_>>(), vec![None, Some(date(17)), Some(date(26))]);
+
+        // Löschen: Ab dann gilt der Stand davor – hier gleicht er dem danach, beide fallen zusammen.
+        s.remove_rules(date(17));
+        assert_eq!(s.work, vec![RulesPeriod { from: None, rules: WorkRules::DEFAULT }]);
+        // Der erste Stand bleibt immer und gilt seit jeher.
+        s.set_rules(None, part, None);
+        assert_eq!(s.work, vec![RulesPeriod { from: None, rules: part }]);
+        let odd = Settings { work: vec![], ..Settings::default() }.sanitized();
+        assert_eq!(odd.work, Settings::default().work);
+        let late = Settings { work: vec![RulesPeriod { from: Some(date(5)), rules: part }], ..Settings::default() }.sanitized();
+        assert_eq!(late.work, vec![RulesPeriod { from: None, rules: part }]);
+    }
+
+    #[test]
+    fn earlier_days_keep_their_rules() {
+        // Mo–Mi 39 Std./5 Tage, ab Donnerstag 32 Std./4 Tage (Mo–Do), Rahmen ab 8 Uhr,
+        // Mindestpause 30 Min.
+        let mut s = Settings::default();
+        let part = WorkRules { weekly_target: h(32, 0), workdays: 0b0_1111, frame_from: h(8, 0), min_pause: 30 * 60, ..WorkRules::DEFAULT };
+        s.set_rules(Some(date(19)), part, None);
+        let mut days = Vec::new();
+        for d in 16..=20 {
+            let mut day = Day::new(date(d));
+            // 7:30 bis 16:00 mit 20 Min. Sperre am Mittag
+            day.add_period(h(7, 30), h(12, 0));
+            day.add_period(h(12, 20), h(16, 0));
+            days.push(day);
+        }
+        let rec = |d: u32| days.iter().find(|x| x.date == date(d)).unwrap().record(&s).unwrap();
+        // Mittwoch: alter Rahmen (ab 7 Uhr) und alte Mindestpause (20 Min. sind eine Pause).
+        assert_eq!((rec(18).work_secs, rec(18).pause_secs()), (h(8, 10), h(0, 20)));
+        // Donnerstag: ab 8 Uhr, die 20 Min. zählen zur Arbeitszeit.
+        assert_eq!((rec(19).work_secs, rec(19).pause_secs()), (h(8, 0), 0));
+        // Soll der Woche: 3 × 7:48 + 8:00 (Freitag frei).
+        let (work, target) = balance(&days, date(16), date(22), date(23), &s);
+        assert_eq!(target, 3 * h(7, 48) + h(8, 0));
+        assert_eq!(work, 3 * h(8, 10) + 2 * h(8, 0));
+        // Ein ganz fehlender Arbeitstag zählt mit dem Soll, das an ihm galt.
+        let missing: Vec<Day> = days.iter().filter(|d| d.date != date(17) && d.date != date(19)).cloned().collect();
+        let (_, t) = balance(&missing, date(16), date(22), date(23), &s);
+        assert_eq!(t, 3 * h(7, 48) + h(8, 0));
+        // Hinweis „außerhalb des Rahmens“ nur, wo der Rahmen es sagt.
+        assert!(day_warnings(&days, date(18), &s).iter().all(|w| !matches!(w, Warning::OutsideFrame { .. })));
+        assert!(day_warnings(&days, date(19), &s).contains(&Warning::OutsideFrame {
+            spans: vec![Span::new(h(7, 30), h(8, 0))],
+            frame: "08:00–22:00 Uhr".to_string()
+        }));
+        // Fußzeilen: je Stand ein Absatz, sonst einer.
+        assert_eq!(s.summary_between(date(16), date(18)), vec![WorkRules::DEFAULT.summary()]);
+        assert_eq!(s.target_basis(date(19), date(22)), "32 Std./Woche, Mo, Di, Mi, Do");
+        let parts = s.summary_between(date(16), date(22));
+        assert_eq!(parts.len(), 2);
+        assert!(parts[0].starts_with("Bis 18.11.2026: Arbeitszeitrahmen 07:00"), "{}", parts[0]);
+        assert!(parts[1].starts_with("Ab 19.11.2026: Arbeitszeitrahmen 08:00"), "{}", parts[1]);
+        s.set_rules(Some(date(21)), WorkRules::DEFAULT, None);
+        assert!(s.summary_between(date(16), date(22))[1].starts_with("19.11.2026 bis 20.11.2026: "));
     }
 
     #[test]
@@ -741,7 +961,7 @@ mod tests {
 
         let w = day_warnings(&days, date(17), &s);
         assert!(w.contains(&Warning::Rest { rest: h(9, 0) }), "{w:?}");
-        let outside = Warning::OutsideFrame { spans: vec![Span::new(h(6, 30), h(7, 0))], frame: s.frame_text() };
+        let outside = Warning::OutsideFrame { spans: vec![Span::new(h(6, 30), h(7, 0))], frame: s.rules(date(17)).frame_text() };
         assert!(w.contains(&outside), "{w:?}");
         assert_eq!(
             outside.text(),
@@ -786,7 +1006,7 @@ mod tests {
         );
         // Mindestpause 5 Min.: Eine Unterbrechung von 10 Min. ist keine Pause nach dem Gesetz –
         // die Arbeit davor und danach zählt zusammen (ohne die Unterbrechung).
-        let short = Settings { min_pause: 5 * 60, min_work: 5 * 60, ..s };
+        let short = Settings { min_work: 5 * 60, ..s.clone() }.with_rules(WorkRules { min_pause: 5 * 60, ..WorkRules::DEFAULT });
         let split = day(&[(h(7, 0), h(10, 0)), (h(10, 10), h(13, 30)), (h(14, 0), h(15, 0))]);
         assert_eq!(day_warnings(&[split], date(18), &short), vec![Warning::LongStretch { work: h(6, 20) }]);
     }
@@ -809,12 +1029,12 @@ mod tests {
         );
         let two = Warning::OutsideFrame {
             spans: vec![Span::new(h(6, 30), h(7, 0)), Span::new(h(22, 0), DAY_END)],
-            frame: s.frame_text(),
+            frame: WorkRules::DEFAULT.frame_text(),
         };
         assert!(two.text().starts_with("06:30–07:00 und 22:00–24:00 Uhr außerhalb"), "{}", two.text());
-        let many = Warning::OutsideFrame { spans: vec![Span::new(0, 600); 4], frame: s.frame_text() };
+        let many = Warning::OutsideFrame { spans: vec![Span::new(0, 600); 4], frame: WorkRules::DEFAULT.frame_text() };
         assert!(many.text().starts_with("4 Zeiträume (0:40 Std.) außerhalb"), "{}", many.text());
-        let late = Warning::OutsideFrame { spans: vec![Span::new(h(23, 22) + 34, DAY_END - 1)], frame: s.frame_text() };
+        let late = Warning::OutsideFrame { spans: vec![Span::new(h(23, 22) + 34, DAY_END - 1)], frame: WorkRules::DEFAULT.frame_text() };
         assert!(late.text().starts_with("23:23–24:00 Uhr außerhalb"), "{}", late.text());
     }
 
@@ -866,28 +1086,30 @@ mod tests {
     #[test]
     fn workdays_spread_the_weekly_target() {
         let s = Settings::default();
-        assert_eq!((s.workday_count(), s.workdays_text(), s.week_text()), (5, "Mo–Fr".to_string(), "5-Tage-Woche".to_string()));
+        let d = WorkRules::DEFAULT;
+        assert_eq!((d.workday_count(), d.workdays_text(), d.week_text()), (5, "Mo–Fr".to_string(), "5-Tage-Woche".to_string()));
         // 4-Tage-Woche ohne Freitag: 32 Std. sind 8 Std. an Mo–Do, freitags kein Soll.
-        let four = Settings { workdays: 0b0_1111, weekly_target: h(32, 0), ..s };
-        assert_eq!((four.workday_count(), four.workdays_text(), four.week_text()), (4, "Mo, Di, Mi, Do".to_string(), "4-Tage-Woche".to_string()));
+        let r4 = WorkRules { workdays: 0b0_1111, weekly_target: h(32, 0), ..d };
+        let four = s.clone().with_rules(r4);
+        assert_eq!((r4.workday_count(), r4.workdays_text(), r4.week_text()), (4, "Mo, Di, Mi, Do".to_string(), "4-Tage-Woche".to_string()));
         assert_eq!(four.daily_target(date(16)), h(8, 0)); // Montag
         assert_eq!(four.daily_target(date(20)), 0); // Freitag
         assert!(four.is_workday(date(19)) && !four.is_workday(date(20)) && !four.is_workday(date(21)));
-        assert_eq!(four.summary(), "Arbeitszeitrahmen 07:00–22:00 Uhr  ·  Regelarbeitszeit 32 Std./Woche (Mo, Di, Mi, Do)  ·  Pausen ab 15 Min.");
+        assert_eq!(r4.summary(), "Arbeitszeitrahmen 07:00–22:00 Uhr  ·  Regelarbeitszeit 32 Std./Woche (Mo, Di, Mi, Do)  ·  Pausen ab 15 Min.");
         // Arbeit am freien Freitag ist Mehrarbeit, aber kein Hinweis wie am Wochenende.
         let mut fri = Day::new(date(20));
         fri.add_period(h(9, 0), h(11, 0));
         assert!(day_warnings(&[fri.clone()], date(20), &four).is_empty());
         assert_eq!(balance(&[fri], date(16), date(22), date(23), &four), (h(2, 0), 0));
         // Ungültige Angaben: ohne Arbeitstag wieder Mo–Fr, Samstag und Sonntag gibt es nicht.
-        assert_eq!(Settings { workdays: 0, ..s }.sanitized().workdays, ALL_WORKDAYS);
-        assert_eq!(Settings { workdays: 0b110_0001, ..s }.sanitized().workdays, 0b0_0001);
-        assert_eq!(Settings { workdays: 0b0_0100, weekly_target: h(8, 0), ..s }.daily_target(date(18)), h(8, 0));
+        assert_eq!(WorkRules { workdays: 0, ..d }.sanitized().workdays, ALL_WORKDAYS);
+        assert_eq!(WorkRules { workdays: 0b110_0001, ..d }.sanitized().workdays, 0b0_0001);
+        assert_eq!(s.clone().with_rules(WorkRules { workdays: 0b0_0100, weekly_target: h(8, 0), ..d }).daily_target(date(18)), h(8, 0));
         // Inaktivität: aus oder in Grenzen.
-        assert_eq!(Settings { idle_secs: -5, ..s }.sanitized().idle_secs, 0);
-        assert_eq!(Settings { idle_secs: 10, ..s }.sanitized().idle_secs, IDLE_RANGE.0);
-        assert_eq!(Settings { min_pause: h(0, 45), ..s }.ask_after(), h(0, 45));
-        assert_eq!(s.ask_after(), ASK_AFTER_LOCK);
+        assert_eq!(Settings { idle_secs: -5, ..s.clone() }.sanitized().idle_secs, 0);
+        assert_eq!(Settings { idle_secs: 10, ..s.clone() }.sanitized().idle_secs, IDLE_RANGE.0);
+        assert_eq!(s.clone().with_rules(WorkRules { min_pause: h(0, 45), ..d }).ask_after(date(16)), h(0, 45));
+        assert_eq!(s.ask_after(date(16)), ASK_AFTER_LOCK);
     }
 
     #[test]
@@ -957,7 +1179,7 @@ mod tests {
         // Stand an einem früheren Tag: spätere Tage zählen noch nicht.
         assert_eq!(account(&days, date(16), &s), h(1, 12));
         // Ab Dienstag, mit 5 Std. Übertrag aus der Zeit davor.
-        let from_tue = Settings { account_from: Some(date(17)), account_carry: h(5, 0), ..s };
+        let from_tue = Settings { account_from: Some(date(17)), account_carry: h(5, 0), ..s.clone() };
         assert_eq!(account(&days, date(22), &from_tue), h(5, 0) - h(0, 48) + h(1, 0));
         let minus = Settings { account_carry: -h(2, 0), ..s };
         assert_eq!(fmt_balance(account(&days, date(22), &minus)), "−0:36 h");
