@@ -767,6 +767,21 @@ impl Day {
         out
     }
 
+    /// Arbeitsabschnitte samt der Zeit außerhalb des Arbeitszeitrahmens (gezählt wird davon nur,
+    /// was in [`Day::spans`] liegt). Ein manueller Beginn bzw. Feierabend schneidet auch hier ab.
+    pub fn unclipped_spans(&self, s: &Settings) -> Vec<Span> {
+        self.unframed_spans(s.rules(self.date).min_pause)
+    }
+
+    /// Erstes Entsperren und letztes Sperren des Tages, auch außerhalb des Arbeitszeitrahmens
+    /// (ohne manuelle Angaben; kurze Sperren zählen wie überall zur Arbeitszeit). Wurde über
+    /// Mitternacht gearbeitet, beginnt der Tag um 00:00 Uhr. An einem freien Tag ohne „Heute
+    /// erfassen“ keines.
+    pub fn auto_bounds(&self, s: &Settings) -> Option<(i64, i64)> {
+        let spans = fill_gaps(self.counted_periods(), s.rules(self.date).min_pause);
+        Some((spans.first()?.from, spans.last()?.to))
+    }
+
     /// Erstes Entsperren und letztes Sperren im Arbeitszeitrahmen (ohne manuelle Angaben;
     /// kurze Sperren zählen wie überall zur Arbeitszeit). An einem freien Tag ohne „Heute
     /// erfassen“ keines.
@@ -1125,6 +1140,8 @@ mod tests {
             vec![Span::new(h(6, 0), h(7, 0)), Span::new(h(22, 0), h(23, 30))]
         );
         assert_eq!(d.auto_bounds_in_frame(&st()), Some((h(7, 0), h(22, 0))));
+        assert_eq!(d.auto_bounds(&st()), Some((h(6, 0), h(23, 30))));
+        assert_eq!(d.unclipped_spans(&st()), vec![Span::new(h(6, 0), h(8, 0)), Span::new(h(21, 0), h(23, 30))]);
         // nur außerhalb: weder Arbeit noch Pause
         let mut late = Day::new(d.date);
         late.add_period(h(22, 30), h(23, 30));

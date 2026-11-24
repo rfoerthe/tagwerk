@@ -585,7 +585,7 @@ dependencies = [
 
 [[package]]
 name = "tagwerk"
-version = "1.9.0"
+version = "1.9.1"
 dependencies = [
  "block2",
  "chrono",

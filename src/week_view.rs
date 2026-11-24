@@ -334,13 +334,15 @@ fn column(days: &[Day], snap: &Snapshot, date: NaiveDate) -> Column {
 }
 
 /// Arbeitsbeginn und Feierabend aus den Abschnitten, die zählen (`work`, in Reihenfolge),
-/// samt den Werten ohne manuelle Angabe.
+/// samt den Werten ohne manuelle Angabe. Diese reichen auch über den Arbeitszeitrahmen hinaus
+/// (über Mitternacht gearbeitet: 00:00 Uhr): Ein Beginn am ersten Entsperren im Rahmen lässt
+/// die Zeit davor entfallen und ist damit eine Angabe, kein Zurücksetzen.
 fn edges(day: &Day, s: &Settings, work: &[Block]) -> Option<Edges> {
     let (first, last) = (work.first()?, work.last()?);
     let without = |f: fn(&mut Day)| {
         let mut d = day.clone();
         f(&mut d);
-        d.spans(s)
+        d.unclipped_spans(s)
     };
     Some(Edges {
         start: first.from,
@@ -1703,6 +1705,15 @@ fn show_bound_dialog(date: NaiveDate, bound: Bound) {
         ),
     };
     let mut info = format!("{}: {text}", fmt_day(date));
+    // Wann das war – liegt es außerhalb des Arbeitszeitrahmens (etwa ab 00:00 Uhr, über
+    // Mitternacht gearbeitet), steht im Feld ein anderer Wert.
+    match (bound, e.get(bound).1) {
+        (Bound::Start, Some(a)) => info.push_str(&format!(" Erstes Entsperren an diesem Tag: {} Uhr.", fmt_clock(a))),
+        (Bound::End, Some(a)) if !e.running => {
+            info.push_str(&format!(" Letztes Sperren an diesem Tag: {} Uhr.", fmt_clock(a)))
+        }
+        _ => {}
+    }
     if today && bound == Bound::End {
         info.push_str(" Mit Feierabend wird heute nichts mehr erfasst.");
     }
@@ -3862,6 +3873,34 @@ mod tests {
         today.add_period(h(8, 0), h(9, 30));
         let cols = columns(&snap(vec![today], date(2026, 11, 17).and_hms_opt(9, 30, 0).unwrap(), true), date(2026, 11, 16));
         assert!(cols[1].edges.unwrap().running);
+    }
+
+    #[test]
+    fn start_in_frame_drops_work_after_midnight() {
+        // Bis 00:14 Uhr vom Vortag weitergearbeitet, dann ab 09:08 Uhr.
+        let day = date(2026, 11, 17);
+        let mut d = Day::new(day);
+        d.add_period(0, h(0, 14));
+        d.add_period(h(9, 8), h(10, 13));
+        let now = date(2026, 11, 18).and_hms_opt(9, 0, 0).unwrap();
+        let cols = columns(&snap(vec![d.clone()], now, false), date(2026, 11, 16));
+        let e = cols[1].edges.unwrap();
+        // Gezählt wird ab 09:08 Uhr, ohne Angabe beginnt der Tag aber um 00:00 Uhr.
+        assert_eq!((e.start, e.auto_start, e.manual_start), (h(9, 8), Some(0), false));
+        // 09:08 Uhr festzulegen ist also eine Änderung, kein Zurücksetzen …
+        let s = &WorkRules::DEFAULT;
+        assert_eq!(dialog_result(&e, Bound::Start, h(9, 8), s, Some(DAY_END)), Ok(Some(Some(h(9, 8)))));
+        assert_eq!(drag_result(&e, Bound::Start, h(9, 8)), Some(Some(h(9, 8))));
+        // … und lässt die Zeit nach Mitternacht entfallen.
+        let settings = Settings::default();
+        assert!(!d.outside_frame_spans(&settings).is_empty());
+        d.set_start(Some(h(9, 8)));
+        assert!(d.outside_frame_spans(&settings).is_empty());
+        let cols = columns(&snap(vec![d], now, false), date(2026, 11, 16));
+        let e = cols[1].edges.unwrap();
+        assert_eq!((e.start, e.auto_start, e.manual_start), (h(9, 8), Some(0), true));
+        // Zurücksetzen auf 00:00 Uhr geht wie gewohnt.
+        assert_eq!(dialog_result(&e, Bound::Start, 0, s, Some(DAY_END)), Ok(Some(None)));
     }
 
     #[test]
