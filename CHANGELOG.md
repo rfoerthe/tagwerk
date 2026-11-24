@@ -6,6 +6,22 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt
+- Updates aus der App: Tagwerk sucht kurz nach dem Start, stündlich und beim Öffnen des Menüs
+  (höchstens alle 15 Minuten) in den GitHub-Releases nach einer neueren Version. Gibt es eine,
+  steht ganz oben im Menü „Auf Tagwerk … aktualisieren“, und eine Mitteilung meldet sie einmal.
+  Ein Klick zeigt die Neuigkeiten (aller übersprungenen Versionen), lädt das DMG, prüft Größe,
+  SHA-256 und Signatur (dieselbe Developer ID und Bundle-Kennung, Gatekeeper), tauscht die App
+  aus und startet neu – die laufende Erfassung wird vorher gesichert. Scheitert ein Schritt,
+  bleibt die bisherige App. Liegt sie in einem nicht beschreibbaren Ordner, fragt macOS nach
+  einem Administrator-Kennwort.
+- Einstellungen › Updates (neuer Reiter): automatisch suchen, Beta-Updates erhalten,
+  Neuigkeiten vor bzw. nach dem Update anzeigen, Stand der Suche mit „Jetzt suchen“ und
+  „Laden und installieren“. Die Schalter liegen in den Benutzereinstellungen von macOS;
+  „Standardwerte“ lässt sie unverändert.
+- `TAGWERK_SIMULATE_UPDATE=<Version>` täuscht ein verfügbares Update vor (für
+  `--settings-screenshot` mit `TAGWERK_SETTINGS_TAB=4` und `--menu-screenshot`).
+
 ## [1.8.0] - 2026-11-24
 
 ### Zusammenfassung

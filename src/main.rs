@@ -49,6 +49,8 @@ mod snapshot;
 mod store;
 mod tracker;
 #[cfg(target_os = "macos")]
+mod update;
+#[cfg(target_os = "macos")]
 mod week_view;
 
 use chrono::Local;
