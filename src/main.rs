@@ -18,9 +18,12 @@
 //!   Tagwerk --menu-screenshot <png>
 //!                                 Menüleisten-App starten, ihr Menü öffnen, Bild speichern,
 //!                                 beenden
+//!   Tagwerk --nach-neustart       (intern) Menüleisten-App nach einem Neustart durch Tagwerk
+//!                                 selbst: wartet, bis die alte Instanz beendet ist
 
 #[cfg(target_os = "macos")]
 mod about;
+mod crypt;
 mod day;
 #[cfg(target_os = "macos")]
 mod glyphs;

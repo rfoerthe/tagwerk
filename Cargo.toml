@@ -1,6 +1,6 @@
 [package]
 name = "tagwerk"
-version = "1.7.0"
+version = "1.8.0"
 edition = "2021"
 license = "MIT"
 description = "Tagwerk – erfasst die Arbeitszeit anhand der Zeit, in der der Mac entsperrt ist"
@@ -11,13 +11,14 @@ path = "src/main.rs"
 
 [dependencies]
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
-rusqlite = { version = "0.43.0", features = ["bundled"] }
+rusqlite = { version = "0.43.0", features = ["bundled-sqlcipher"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 objc2 = "0.6"
 objc2-foundation = "0.3"
 objc2-app-kit = "0.3"
 block2 = "0.6"
+security-framework = "3"
 objc2-user-notifications = { version = "0.3", default-features = false, features = [
     "std",
     "block2",

@@ -21,7 +21,14 @@
 //! Der Stand wird jedes Mal abgefragt, wenn das Fenster aktiv wird.
 //!
 //! Rechts in der Symbolleiste öffnet ein Ordner-Knopf den Datenordner im Finder.
+//!
+//! „Datenbank und Backups verschlüsseln“ (Reiter „Allgemein“) gilt ebenfalls nicht sofort:
+//! Nach einer Rückfrage merkt sich Tagwerk den Wunsch und startet neu; umgestellt wird vor dem
+//! ersten Öffnen der Datenbank (siehe [`crate::crypt`]). Der Haken zeigt immer den Zustand der
+//! Datei. Den Neustart kann nur die Menüleisten-App ([`set_relaunch`]) – im eigenständigen
+//! Fenster „Aufzeichnungen“ (`--records`) ist der Schalter deshalb gesperrt.
 
+use crate::crypt;
 use crate::day::{fmt_clock, parse_clock};
 use crate::glyphs;
 use crate::hotkey;
@@ -39,6 +46,15 @@ use objc2_foundation::{
     NSArray, NSCopying, NSDate, NSInteger, NSLocale, NSNotification, NSPoint, NSRect, NSSize, NSString, NSURL,
 };
 use std::cell::RefCell;
+use std::sync::OnceLock;
+
+/// Startet Tagwerk neu (von der Menüleisten-App gesetzt, siehe [`set_relaunch`]).
+static RELAUNCH: OnceLock<fn() -> Result<(), String>> = OnceLock::new();
+
+/// Wie sich Tagwerk neu starten lässt – Voraussetzung für das Umstellen der Verschlüsselung.
+pub fn set_relaunch(f: fn() -> Result<(), String>) {
+    let _ = RELAUNCH.set(f);
+}
 
 fn ns(s: &str) -> Retained<NSString> {
     NSString::from_str(s)
@@ -85,6 +101,9 @@ struct State {
     icon_preview: Vec<Retained<NSImageView>>,
     show_time: Retained<NSButton>,
     hotkeys: Retained<NSButton>,
+    /// Datenbank verschlüsselt? (Zustand der Datei, siehe [`confirm_encryption`].)
+    encrypt: Retained<NSButton>,
+    recovery: Retained<NSButton>,
     account_check: Retained<NSButton>,
     account_date: Retained<NSDatePicker>,
     carry: Retained<NSTextField>,
@@ -530,6 +549,26 @@ define_class!(
         fn reset_defaults(&self, _sender: Option<&AnyObject>) {
             confirm_reset();
         }
+
+        /// Ver- oder entschlüsseln: Der Haken bleibt, wie die Datei ist, bis nach Rückfrage
+        /// und Neustart umgestellt ist (siehe [`confirm_encryption`]).
+        #[unsafe(method(encryptChanged:))]
+        fn encrypt_changed(&self, _sender: Option<&AnyObject>) {
+            let encrypted = store::db_encrypted();
+            with_state(|s| s.encrypt.setState(if encrypted { NSControlStateValueOn } else { NSControlStateValueOff }));
+            confirm_encryption(!encrypted);
+        }
+
+        #[unsafe(method(showRecoveryKey:))]
+        fn show_recovery_key(&self, _sender: Option<&AnyObject>) {
+            show_recovery_key();
+        }
+
+        /// „In die Zwischenablage kopieren“ in den Dialogen mit dem Wiederherstellungsschlüssel.
+        #[unsafe(method(copyRecoveryKey:))]
+        fn copy_recovery_key(&self, sender: Option<&NSButton>) {
+            copy_recovery_key(sender);
+        }
     }
 );
 
@@ -578,6 +617,10 @@ impl State {
         }
         self.show_time.setState(state(s.show_time));
         self.hotkeys.setState(state(s.hotkeys));
+        let encrypted = store::db_encrypted();
+        self.encrypt.setState(state(encrypted));
+        self.encrypt.setEnabled(RELAUNCH.get().is_some());
+        self.recovery.setEnabled(encrypted);
     }
 
     /// „Bearbeiten …“ und „Löschen“ nach der Auswahl in der Liste (der erste Stand bleibt).
@@ -1104,6 +1147,164 @@ fn ask_note(s: &Settings, today: NaiveDate) -> String {
     )
 }
 
+/// Wiederherstellungsschlüssel zum Abschreiben: zwei Zeilen zu je vier Gruppen, auswählbar.
+/// Darunter „In die Zwischenablage kopieren“ – im Inhalt des Dialogs, weil dessen Knöpfe ihn
+/// schließen würden. Was der Knopf kopiert, steht in [`KEY_TEXT`].
+fn key_view(key: &crypt::Key) -> Option<Retained<NSStackView>> {
+    let controller = with_state(|s| s._controller.clone())?;
+    let text = key.recovery_text();
+    // 4 Gruppen à 8 Zeichen plus Bindestrich
+    let (first, second) = text.split_at(4 * 9);
+    let field = NSTextField::labelWithString(&ns(&format!("{first}\n{second}")), mtm());
+    field.setFont(Some(&NSFont::monospacedSystemFontOfSize_weight(13.0, unsafe { NSFontWeightRegular })));
+    field.setSelectable(true);
+    let copy = unsafe {
+        NSButton::buttonWithTitle_target_action(
+            &ns(COPY_TITLE),
+            Some(&*controller),
+            Some(sel!(copyRecoveryKey:)),
+            mtm(),
+        )
+    };
+    copy.setControlSize(NSControlSize::Small);
+    copy.setFont(Some(&NSFont::systemFontOfSize(NSFont::smallSystemFontSize())));
+    let stack = NSStackView::new(mtm());
+    stack.setOrientation(NSUserInterfaceLayoutOrientation::Vertical);
+    stack.setAlignment(NSLayoutAttribute::Leading);
+    stack.setSpacing(8.0);
+    stack.addArrangedSubview(&field);
+    stack.addArrangedSubview(&copy);
+    stack.setFrameSize(stack.fittingSize());
+    KEY_TEXT.with(|t| *t.borrow_mut() = text);
+    Some(stack)
+}
+
+const COPY_TITLE: &str = "In die Zwischenablage kopieren";
+
+thread_local! {
+    /// Wiederherstellungsschlüssel des offenen Dialogs (für „In die Zwischenablage kopieren“).
+    static KEY_TEXT: RefCell<String> = const { RefCell::new(String::new()) };
+}
+
+/// Legt den Wiederherstellungsschlüssel des offenen Dialogs in die Zwischenablage.
+fn copy_recovery_key(button: Option<&NSButton>) {
+    let text = KEY_TEXT.with(|t| t.borrow().clone());
+    if text.is_empty() {
+        return;
+    }
+    let pb = NSPasteboard::generalPasteboard();
+    pb.clearContents();
+    pb.setString_forType(&ns(&text), unsafe { NSPasteboardTypeString });
+    if let Some(button) = button {
+        button.setTitle(&ns("Kopiert ✓"));
+    }
+}
+
+/// Nach dem Dialog: Den Schlüssel nicht länger als nötig im Speicher halten.
+fn forget_key_text() {
+    KEY_TEXT.with(|t| t.borrow_mut().clear());
+}
+
+/// Nachfragen und dann ver- (`on`) oder entschlüsseln: Den Schlüssel legt Tagwerk vorher im
+/// Schlüsselbund ab, merkt sich den Wunsch und startet neu (siehe [`crypt::apply_pending`]).
+fn confirm_encryption(on: bool) {
+    let Some(window) = with_state(|s| s.window.clone()) else {
+        return;
+    };
+    if window.attachedSheet().is_some() {
+        return;
+    }
+    let dir = store::data_dir();
+    // Ein Schlüssel aus einem früheren Durchgang (etwa für Backups, die sich nicht entschlüsseln
+    // ließen) bleibt – sonst wären sie nicht mehr zu öffnen.
+    let key = if on {
+        match crypt::stored_key(&dir).or_else(|_| crypt::Key::generate()) {
+            Ok(key) => Some(key),
+            Err(e) => {
+                with_state(|s| s.show_error(&format!("Es ließ sich kein Schlüssel erzeugen: {e}")));
+                return;
+            }
+        }
+    } else {
+        None
+    };
+    let alert = NSAlert::new(mtm());
+    if let Some(key) = &key {
+        alert.setMessageText(&ns("Datenbank verschlüsseln?"));
+        alert.setInformativeText(&ns(
+            "Tagwerk verschlüsselt die Datenbank und ihre Backups und legt den Schlüssel im \
+             Schlüsselbund ab – dafür startet Tagwerk neu.\n\n\
+             Den Wiederherstellungsschlüssel unten notieren und sicher aufbewahren: Fehlt der \
+             Eintrag im Schlüsselbund (etwa auf einem neuen Mac), lassen sich die Aufzeichnungen nur \
+             mit ihm wieder öffnen. Die Einstellungen zeigen ihn auch später.\n\n\
+             Ältere Tagwerk-Versionen können eine verschlüsselte Datenbank nicht öffnen.",
+        ));
+        let Some(view) = key_view(key) else { return };
+        alert.setAccessoryView(Some(&view));
+        alert.addButtonWithTitle(&ns("Verschlüsseln und neu starten"));
+    } else {
+        alert.setAlertStyle(NSAlertStyle::Warning);
+        alert.setMessageText(&ns("Verschlüsselung aufheben?"));
+        alert.setInformativeText(&ns(
+            "Tagwerk speichert die Datenbank und ihre Backups dann wieder unverschlüsselt und \
+             entfernt den Schlüssel aus dem Schlüsselbund – dafür startet Tagwerk neu.",
+        ));
+        alert.addButtonWithTitle(&ns("Entschlüsseln und neu starten"));
+    }
+    let cancel = alert.addButtonWithTitle(&ns("Abbrechen"));
+    cancel.setKeyEquivalent(&ns("\u{1b}"));
+    let handler = RcBlock::new(move |response: NSModalResponse| {
+        forget_key_text();
+        if response != NSAlertFirstButtonReturn {
+            return;
+        }
+        let dir = store::data_dir();
+        let result = key
+            .as_ref()
+            .map_or(Ok(()), |key| {
+                crypt::store_key(&dir, key)
+                    .map_err(|e| format!("Der Schlüssel ließ sich nicht im Schlüsselbund ablegen: {e}"))
+            })
+            .and_then(|()| crypt::request(&dir, on).map_err(|e| format!("Umstellen nicht möglich: {e}")))
+            .and_then(|()| match RELAUNCH.get() {
+                Some(relaunch) => relaunch(),
+                None => Err("Tagwerk lässt sich von hier nicht neu starten.".to_string()),
+            });
+        if let Err(e) = result {
+            with_state(|s| s.show_error(&e));
+        }
+    });
+    alert.beginSheetModalForWindow_completionHandler(&window, Some(&handler));
+}
+
+/// Zeigt den Wiederherstellungsschlüssel (aus dem Schlüsselbund) zum Abschreiben oder Kopieren.
+fn show_recovery_key() {
+    let Some(window) = with_state(|s| s.window.clone()) else {
+        return;
+    };
+    if window.attachedSheet().is_some() {
+        return;
+    }
+    let key = match crypt::stored_key(&store::data_dir()) {
+        Ok(key) => key,
+        Err(e) => {
+            with_state(|s| s.show_error(&e.to_string()));
+            return;
+        }
+    };
+    let alert = NSAlert::new(mtm());
+    alert.setMessageText(&ns("Wiederherstellungsschlüssel"));
+    alert.setInformativeText(&ns(
+        "Damit lassen sich die Aufzeichnungen öffnen, wenn der Eintrag im Schlüsselbund fehlt – \
+         etwa auf einem neuen Mac. Sicher aufbewahren, z. B. in einem Passwortmanager.",
+    ));
+    let Some(view) = key_view(&key) else { return };
+    alert.setAccessoryView(Some(&view));
+    alert.addButtonWithTitle(&ns("Fertig"));
+    let handler = RcBlock::new(move |_response: NSModalResponse| forget_key_text());
+    alert.beginSheetModalForWindow_completionHandler(&window, Some(&handler));
+}
+
 /// Speichern, Felder angleichen und die App benachrichtigen.
 fn save() {
     let notify = with_state(|s| {
@@ -1591,6 +1792,15 @@ fn build(on_change: fn()) -> State {
     rules_new.setToolTip(Some(&ns("Neuen Stand der Arbeitszeitregeln anlegen, gültig ab einem Datum")));
     let rules_edit = button("Bearbeiten …", sel!(editRules:));
     let rules_delete = button("Löschen", sel!(deleteRules:));
+    let encrypt = checkbox("Datenbank und Backups verschlüsseln", sel!(encryptChanged:));
+    if RELAUNCH.get().is_none() {
+        encrypt.setToolTip(Some(&ns("Lässt sich nur in der Menüleisten-App umstellen")));
+    }
+    let recovery = button("Wiederherstellungsschlüssel …", sel!(showRecoveryKey:));
+    recovery.setControlSize(NSControlSize::Small);
+    recovery.setFont(Some(&NSFont::systemFontOfSize(NSFont::smallSystemFontSize())));
+    let encrypt_row = hstack(&[&encrypt, &recovery]);
+    encrypt_row.setSpacing(14.0);
     rules_delete.setToolTip(Some(&ns("Ab dem Datum gilt wieder der Stand davor")));
     let sheet = build_sheet(target);
     let work = number_field(target, sel!(workChanged:));
@@ -1650,8 +1860,13 @@ fn build(on_change: fn()) -> State {
                 ),
                 row(Some("Kurzbefehle:"), &hotkeys),
                 row(None, &caption(&hotkey::summary())),
+                row(Some("Datenschutz:"), &encrypt_row),
+                row(
+                    None,
+                    &caption("Der Schlüssel liegt im Schlüsselbund. Zum Umstellen startet Tagwerk neu."),
+                ),
             ],
-            vec![1, 4],
+            vec![1, 4, 6],
             Some(2),
         ),
         (
@@ -1851,6 +2066,8 @@ fn build(on_change: fn()) -> State {
         icon_preview,
         show_time,
         hotkeys,
+        encrypt,
+        recovery,
         account_check,
         account_date,
         carry,
@@ -1908,9 +2125,12 @@ pub fn show(on_change: fn()) {
 /// über `TAGWERK_ICON_SET=0|1|2`, Erscheinungsbild über `TAGWERK_APPEARANCE=dark`, Stand der
 /// Mitteilungen über `TAGWERK_NOTIFICATIONS=allowed|denied|hidden|undetermined`; mit
 /// `TAGWERK_SETTINGS_SHEET=new|first|<Zeile>` stattdessen das Blatt „Arbeitszeit ändern“ für
-/// einen neuen Stand, den ersten oder den in der Zeile der Liste).
+/// einen neuen Stand, den ersten oder den in der Zeile der Liste; mit `encrypt` die Rückfrage
+/// „Datenbank verschlüsseln?“ mit einem neuen Wiederherstellungsschlüssel).
 /// Es wird nichts gespeichert.
 pub fn screenshot(path: &std::path::Path) -> Result<(), String> {
+    // Der Schalter für die Verschlüsselung erscheint wie in der Menüleisten-App (es wird nichts gespeichert).
+    set_relaunch(|| Ok(()));
     let mtm = MainThreadMarker::new().ok_or("Das Fenster muss im Hauptthread laufen.")?;
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
@@ -1941,7 +2161,9 @@ pub fn screenshot(path: &std::path::Path) -> Result<(), String> {
         s.window.orderFront(None);
     });
     let sheet = std::env::var("TAGWERK_SETTINGS_SHEET").ok();
-    if let Some(which) = &sheet {
+    if sheet.as_deref() == Some("encrypt") {
+        confirm_encryption(true);
+    } else if let Some(which) = &sheet {
         let editing = match which.as_str() {
             "new" => None,
             "first" => Some(None),
@@ -1949,8 +2171,13 @@ pub fn screenshot(path: &std::path::Path) -> Result<(), String> {
         };
         open_sheet(editing);
     }
-    let window = with_state(|s| if sheet.is_some() { s.sheet.window.clone() } else { s.window.clone() })
-        .ok_or("kein Fenster")?;
+    let window = with_state(|s| match sheet.as_deref() {
+        Some("encrypt") => s.window.attachedSheet(),
+        Some(_) => Some(s.sheet.window.clone()),
+        None => Some(s.window.clone()),
+    })
+    .flatten()
+    .ok_or("kein Fenster")?;
     // Das Fenster, wie es auf dem Bildschirm steht (mit Reiterleiste) – dafür muss es erst
     // einmal gezeichnet sein. Nur wenn macOS das nicht liefert, die Ansicht selbst gezeichnet.
     objc2_foundation::NSRunLoop::mainRunLoop().runUntilDate(&NSDate::dateWithTimeIntervalSinceNow(0.8));
