@@ -68,9 +68,10 @@ grün im Plus und rot im Minus, hier wie im Fenster „Aufzeichnungen“. An ein
 bietet das Menü zunächst nur **Heute erfassen** an (siehe unten). Diese Zeilen sind
 reine Anzeige und lassen sich nicht anklicken. Lange Hinweise brechen um, damit das Menü schmal bleibt.
 
-- **Update verfügbar** – gibt es eine neue Version, steht ganz oben im Menü „Auf Tagwerk
-  1.10.0 aktualisieren …“ (siehe [Updates](#updates)). Ein Klick zeigt die Neuigkeiten,
-  lädt das Update und startet Tagwerk neu; solange es lädt, steht dort der Fortschritt.
+- **Update verfügbar** – gibt es eine neue Version, steht ganz oben im Menü ein farbiges
+  Banner „Update verfügbar“ mit der Version und „Aktualisieren“ (bei einer Beta orange; siehe
+  [Updates](#updates)). Ein Klick zeigt die Neuigkeiten, lädt das Update und startet Tagwerk
+  neu; solange es lädt, steht dort der Fortschritt.
 - **Mitteilungen zu Pause und Höchstarbeitszeit** – über die Mitteilungszentrale von macOS:
   bei **5:45** und **6 Std.** Arbeit am Stück die Erinnerung an die Pause („Noch 15 Min.
   bis 6 Std. ohne Pause“), bei **9:45** und **10 Std.** Arbeit am Tag die an die
@@ -598,7 +599,7 @@ muss bereits gepusht sein.
 Tagwerk sucht kurz nach dem Start und danach stündlich in den
 [Releases auf GitHub](https://github.com/rfoerthe/tagwerk/releases) nach einer neueren
 Version, außerdem beim Öffnen des Menüs, wenn die letzte Suche länger als 15 Minuten her
-ist. Eine neue Version meldet eine Mitteilung (einmal je Version) und ein Eintrag ganz oben
+ist. Eine neue Version meldet eine Mitteilung (einmal je Version) und ein Banner ganz oben
 im Menü; installiert wird sie von dort oder unter Einstellungen › Updates mit „Laden und
 installieren“. Beta-Versionen (Vorabversionen wie `1.10.0-beta.1`) gibt es nur mit „Beta-Updates
 erhalten“. Wer Versionen überspringt, sieht die Neuigkeiten aller dazwischen.

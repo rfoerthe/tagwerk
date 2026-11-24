@@ -25,7 +25,8 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication,
+    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication, NSAutoresizingMaskOptions, NSBezierPath, NSEvent,
+    NSImageView, NSResponder,
     NSApplicationActivationPolicy, NSAttributedStringAttachmentConveniences, NSColor, NSControlStateValueOff,
     NSControlStateValueOn, NSDatePicker,
     NSDatePickerElementFlags, NSDatePickerStyle, NSFont, NSFontAttributeName, NSFontWeightRegular,
@@ -39,7 +40,7 @@ use objc2_foundation::{
     NSNotification, NSNotificationCenter, NSPoint, NSRange, NSRect, NSRunLoop, NSRunLoopCommonModes, NSSize, NSString,
     NSTimer,
 };
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::time::Instant;
 
 /// Menü-Tag: Uhrzeit im Dialog wählen.
@@ -67,6 +68,8 @@ struct MenuItems {
     /// Ganz oben: „Auf Tagwerk 1.10.0 aktualisieren …“ bzw. der Fortschritt des Updates (sonst
     /// ausgeblendet, samt Trennlinie darunter).
     update: Retained<NSMenuItem>,
+    /// Ansicht des Eintrags `update`, solange ein Update bereitsteht (siehe [`Banner`]).
+    banner: Banner,
     update_sep: Retained<NSMenuItem>,
     status: InfoLine,
     worked: InfoLine,
@@ -564,49 +567,42 @@ fn update_changed() {
     });
 }
 
-/// Eintrag für das Update ganz oben im Menü: anklickbar, solange ein Update bereitsteht,
-/// sonst der Fortschritt (ausgegraut) oder ausgeblendet.
+/// Eintrag für das Update ganz oben im Menü: solange ein Update bereitsteht, ein Banner in
+/// Akzentfarbe (siehe [`Banner`]), sonst der Fortschritt (ausgegraut) oder ausgeblendet.
 fn show_update(items: &MenuItems) {
-    let (title, symbol, enabled, tip) = match update::state() {
+    let item = &items.update;
+    let (title, symbol) = match update::state() {
         update::State::Available(offer) => {
-            let dots = if update::notes_before() { " …" } else { "" };
-            (
-                format!("Auf Tagwerk {} aktualisieren{dots}", offer.version),
-                "arrow.down.circle.fill",
-                true,
-                format!(
-                    "Update verfügbar (installiert ist {}): Tagwerk lädt es, prüft die Signatur und startet neu.",
-                    update::CURRENT
-                ),
-            )
+            items.banner.show(&offer);
+            if item.view().is_none() {
+                item.setView(Some(&items.banner.view));
+            }
+            item.setEnabled(true);
+            item.setToolTip(None);
+            item.setHidden(false);
+            items.update_sep.setHidden(false);
+            return;
         }
         update::State::Downloading(Some(f)) => {
-            (format!("Update wird geladen … {} %", (f * 100.0) as i64), "arrow.down.circle", false, String::new())
+            (format!("Update wird geladen … {} %", (f * 100.0) as i64), "arrow.down.circle")
         }
-        update::State::Downloading(None) => ("Update wird geladen …".to_string(), "arrow.down.circle", false, String::new()),
-        update::State::Installing => {
-            ("Wird installiert und neu gestartet …".to_string(), "gearshape.2", false, String::new())
-        }
+        update::State::Downloading(None) => ("Update wird geladen …".to_string(), "arrow.down.circle"),
+        update::State::Installing => ("Wird installiert und neu gestartet …".to_string(), "gearshape.2"),
         _ => {
-            items.update.setHidden(true);
+            item.setHidden(true);
             items.update_sep.setHidden(true);
             return;
         }
     };
-    let item = &items.update;
+    if item.view().is_some() {
+        item.setView(None);
+    }
     if item.title().to_string() != title {
         item.setTitle(&ns(&title));
     }
-    // Das Angebot in Akzentfarbe (bei einer Beta orange), wie das Banner in Barforge.
-    let color = match update::state() {
-        update::State::Available(o) if o.beta => orange(),
-        update::State::Available(_) => NSColor::controlAccentColor(),
-        _ => NSColor::secondaryLabelColor(),
-    };
-    item.setImage(update_symbol(symbol, &color).as_deref());
-    item.setEnabled(enabled);
-    let tip = (!tip.is_empty()).then(|| ns(&tip));
-    item.setToolTip(tip.as_deref());
+    item.setImage(update_symbol(symbol, &NSColor::secondaryLabelColor()).as_deref());
+    item.setEnabled(false);
+    item.setToolTip(None);
     item.setHidden(false);
     items.update_sep.setHidden(false);
 }
@@ -620,6 +616,182 @@ fn update_symbol(name: &str, color: &NSColor) -> Option<Retained<NSImage>> {
     let image = image.imageWithSymbolConfiguration(&config)?;
     image.setTemplate(false);
     Some(image)
+}
+
+thread_local! {
+    /// Das Update ist eine Beta: Banner orange statt in Akzentfarbe (wie in Barforge).
+    static BANNER_BETA: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Farbe des Banners: Akzentfarbe, bei einer Beta orange.
+fn banner_tint() -> Retained<NSColor> {
+    if BANNER_BETA.with(Cell::get) {
+        NSColor::systemOrangeColor()
+    } else {
+        NSColor::controlAccentColor()
+    }
+}
+
+define_class!(
+    /// Fläche des Update-Banners: zeichnet die farbige Karte und die weiße Kapsel um
+    /// „Aktualisieren“; ein Klick schließt das Menü und startet das Update.
+    #[unsafe(super(NSView, NSResponder, NSObject))]
+    #[thread_kind = MainThreadOnly]
+    #[name = "TagwerkUpdateBanner"]
+    struct BannerView;
+
+    impl BannerView {
+        #[unsafe(method(drawRect:))]
+        fn draw_rect(&self, _dirty: NSRect) {
+            let bounds = self.bounds();
+            let card = NSRect::new(
+                NSPoint::new(Banner::INSET_X, Banner::INSET_Y),
+                NSSize::new(bounds.size.width - 2.0 * Banner::INSET_X, bounds.size.height - 2.0 * Banner::INSET_Y),
+            );
+            let mut tint = banner_tint();
+            // Unter der Maus (oder mit den Pfeiltasten gewählt) etwas dunkler.
+            if self.enclosingMenuItem().is_some_and(|i| i.isHighlighted()) {
+                if let Some(dark) = tint.blendedColorWithFraction_ofColor(0.18, &NSColor::blackColor()) {
+                    tint = dark;
+                }
+            }
+            tint.setFill();
+            NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(card, 10.0, 10.0).fill();
+            // Kapsel um die Beschriftung „Aktualisieren“ (das letzte Unterelement).
+            let label = self.subviews().iter().last().map(|v| v.frame());
+            if let Some(f) = label {
+                let pill = NSRect::new(
+                    NSPoint::new(f.origin.x - Banner::PILL_X, f.origin.y - Banner::PILL_Y),
+                    NSSize::new(f.size.width + 2.0 * Banner::PILL_X, f.size.height + 2.0 * Banner::PILL_Y),
+                );
+                let r = pill.size.height / 2.0;
+                NSColor::whiteColor().setFill();
+                NSBezierPath::bezierPathWithRoundedRect_xRadius_yRadius(pill, r, r).fill();
+            }
+        }
+
+        #[unsafe(method(mouseUp:))]
+        fn mouse_up(&self, _event: &NSEvent) {
+            let Some(item) = self.enclosingMenuItem() else { return };
+            if let Some(menu) = unsafe { item.menu() } {
+                menu.cancelTracking();
+            }
+            // Erst nach dem Schließen des Menüs: Das Update kann einen Dialog zeigen.
+            if let (Some(target), Some(action)) = (item.target(), item.action()) {
+                let none: Option<&AnyObject> = None;
+                let _: () = unsafe { msg_send![&*target, performSelector: action, withObject: none, afterDelay: 0.0f64] };
+            }
+        }
+    }
+);
+
+/// Update-Banner ganz oben im Menü, wie in Barforge: farbige Karte mit weißem Symbol,
+/// „Update verfügbar“, der Version und einer weißen Kapsel „Aktualisieren“. Eine eigene Ansicht
+/// statt eines Titels, damit das Angebot nicht zwischen den übrigen Einträgen untergeht.
+struct Banner {
+    view: Retained<BannerView>,
+    title: Retained<NSTextField>,
+    detail: Retained<NSTextField>,
+    action: Retained<NSTextField>,
+}
+
+impl Banner {
+    /// Abstand der Karte zum Rand des Menüs (wie die Markierung normaler Einträge).
+    const INSET_X: f64 = 6.0;
+    const INSET_Y: f64 = 3.0;
+    /// Innenabstand der Karte.
+    const PAD: f64 = 12.0;
+    const ICON: f64 = 20.0;
+    const CARD_HEIGHT: f64 = 42.0;
+    /// Innenabstand der Kapsel um „Aktualisieren“.
+    const PILL_X: f64 = 10.0;
+    const PILL_Y: f64 = 3.0;
+    /// Mindestabstand zwischen Text und Kapsel.
+    const GAP: f64 = 16.0;
+
+    fn new(mtm: MainThreadMarker) -> Self {
+        let height = Self::CARD_HEIGHT + 2.0 * Self::INSET_Y;
+        let view: Retained<BannerView> = unsafe {
+            msg_send![BannerView::alloc(mtm), initWithFrame: NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(0.0, height))]
+        };
+        // Das Menü zieht die Ansicht auf seine Breite.
+        view.setAutoresizingMask(NSAutoresizingMaskOptions::ViewWidthSizable);
+
+        let white = NSColor::whiteColor();
+        let icon = NSImageView::new(mtm);
+        // Als Vorlage, weiß eingefärbt: So bleibt der Pfeil im Kreis ausgespart (in einer
+        // Palettenfarbe wäre er eine volle weiße Scheibe).
+        let sized = NSImageSymbolConfiguration::configurationWithPointSize_weight(17.0, unsafe { NSFontWeightRegular });
+        let img = NSImage::imageWithSystemSymbolName_accessibilityDescription(&ns("arrow.down.circle.fill"), Some(&ns("Update")))
+            .and_then(|i| i.imageWithSymbolConfiguration(&sized));
+        icon.setImage(img.as_deref());
+        icon.setContentTintColor(Some(&white));
+        let title = NSTextField::labelWithString(&ns("Update verfügbar"), mtm);
+        title.setFont(Some(&NSFont::systemFontOfSize_weight(13.0, unsafe { NSFontWeightSemibold })));
+        title.setTextColor(Some(&white));
+        let detail = NSTextField::labelWithString(&ns(""), mtm);
+        detail.setFont(Some(&NSFont::systemFontOfSize(11.0)));
+        detail.setTextColor(Some(&white.colorWithAlphaComponent(0.85)));
+        let action = NSTextField::labelWithString(&ns("Aktualisieren"), mtm);
+        action.setFont(Some(&NSFont::systemFontOfSize_weight(11.5, unsafe { NSFontWeightSemibold })));
+        // Reihenfolge zählt: Die Kapsel liegt um das letzte Unterelement (siehe `drawRect:`).
+        for v in [&*icon as &NSView, &title, &detail, &action] {
+            view.addSubview(v);
+        }
+
+        let mid = height / 2.0;
+        let x = Self::INSET_X + Self::PAD;
+        icon.setFrame(NSRect::new(NSPoint::new(x, mid - Self::ICON / 2.0), NSSize::new(Self::ICON, Self::ICON)));
+        let text_x = x + Self::ICON + 9.0;
+        let t = title.fittingSize();
+        let d = NSSize::new(t.width, detail.fittingSize().height);
+        let bottom = (mid - (t.height + d.height) / 2.0).round();
+        detail.setFrame(NSRect::new(NSPoint::new(text_x, bottom), d));
+        title.setFrame(NSRect::new(NSPoint::new(text_x, bottom + d.height), t));
+        let a = action.fittingSize();
+        let width = text_x + t.width + Self::GAP + a.width + 2.0 * Self::PILL_X + Self::PAD + Self::INSET_X;
+        view.setFrameSize(NSSize::new(width.ceil(), height));
+        let right = width.ceil() - Self::INSET_X - Self::PAD - Self::PILL_X;
+        action.setFrame(NSRect::new(NSPoint::new(right - a.width, (mid - a.height / 2.0).round()), a));
+        // „Aktualisieren“ bleibt rechts, wenn das Menü breiter ist.
+        action.setAutoresizingMask(NSAutoresizingMaskOptions::ViewMinXMargin);
+
+        Self { view, title, detail, action }
+    }
+
+    /// Angebot `offer` anzeigen.
+    fn show(&self, offer: &update::Offer) {
+        BANNER_BETA.with(|b| b.set(offer.beta));
+        let beta = if offer.beta { " (Beta)" } else { "" };
+        let detail = format!("Tagwerk {}{beta}", offer.version);
+        self.detail.setStringValue(&ns(&detail));
+        // Die Breite der Unterzeile folgt der Version (die Titelzeile ist meist breiter).
+        let mut frame = self.detail.frame();
+        frame.size.width = self.detail.fittingSize().width;
+        self.detail.setFrame(frame);
+        self.action.setTextColor(Some(&banner_tint()));
+        let dots = if update::notes_before() { "Die Neuigkeiten erscheinen vorher; dann " } else { "" };
+        let tip = format!(
+            "Installiert ist {}. {dots}lädt Tagwerk das Update, prüft die Signatur und startet neu.",
+            update::CURRENT
+        );
+        self.view.setToolTip(Some(&ns(&tip)));
+        // Mindestens so breit, dass Text und Kapsel nicht überlappen (eine lange Beta-Version);
+        // ist das Menü breiter, zieht es die Ansicht ohnehin auf.
+        let text = self.title.frame().size.width.max(self.detail.frame().size.width);
+        let min = self.detail.frame().origin.x
+            + text
+            + Self::GAP
+            + self.action.frame().size.width
+            + 2.0 * Self::PILL_X
+            + Self::PAD
+            + Self::INSET_X;
+        let size = self.view.frame().size;
+        if size.width < min {
+            self.view.setFrameSize(NSSize::new(min.ceil(), size.height));
+        }
+        self.view.setNeedsDisplay(true);
+    }
 }
 
 /// Einstellungen wurden im Fenster „Einstellungen“ geändert.
@@ -1840,6 +2012,7 @@ pub fn run(screenshot: Option<std::path::PathBuf>) {
     update_sep.setHidden(true);
     let items = MenuItems {
         update: update_item,
+        banner: Banner::new(mtm),
         update_sep,
         // Status, Kennzahlen und Hinweise sind reine Anzeige (siehe `InfoLine`).
         status: InfoLine::new(mtm),
