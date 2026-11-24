@@ -6,6 +6,14 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+## [1.9.1] - 2026-11-24
+
+### Zusammenfassung
+Fehlerbehebung: Wer über Mitternacht gearbeitet hat, kann die Zeit nach 00:00 Uhr jetzt in der
+Wochenansicht entfallen lassen – den Arbeitsbeginn auf das erste Entsperren im
+Arbeitszeitrahmen legen, dann zählt sie auch für Ruhezeit und Höchstarbeitszeit nicht mehr.
+Ohne Angabe beginnt der Tag mit dem frühesten Entsperren, der Dialog nennt die Uhrzeit.
+
 ### Behoben
 - Wochenansicht: Wer über Mitternacht gearbeitet hat (oder vor bzw. nach dem
   Arbeitszeitrahmen entsperrt war), kann den Arbeitsbeginn jetzt auf das erste Entsperren im
@@ -707,7 +715,8 @@ als Markdown. Alle Daten bleiben lokal auf dem Mac.
   notarisiert es und installiert sie auf Wunsch nach `/Applications`.
 - `github-release.sh` veröffentlicht ein geprüftes DMG als Release auf GitHub.
 
-[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.9.0...HEAD
+[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.9.1...HEAD
+[1.9.1]: https://github.com/rfoerthe/tagwerk/compare/v1.9.0...v1.9.1
 [1.9.0]: https://github.com/rfoerthe/tagwerk/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/rfoerthe/tagwerk/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/rfoerthe/tagwerk/compare/v1.6.0...v1.7.0
