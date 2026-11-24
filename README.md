@@ -39,7 +39,8 @@ festlegen oder korrigieren.
 - ⚖️ **Regeln im Blick** – Pausen, Ruhezeit und Höchstarbeitszeit nach [Arbeitszeitgesetz](https://www.gesetze-im-internet.de/arbzg/BJNR117100994.html) werden geprüft.
 - 📊 **Soll, Saldo und Zeitkonto** – je Tag, Woche und Monat, auf Basis deiner Regelwochenarbeitszeit und deiner Arbeitstage; das Zeitkonto zählt fortlaufend.
 - 🗓️ **Wochenansicht** – jede Kalenderwoche übersichtlich wie in einem Kalender, direkt im Fenster „Aufzeichnungen“.
-- 🏠 **Lokal und privat** – alle Daten liegen in einer SQLite-Datenbank auf deinem Mac, nichts verlässt das Gerät.
+- 🏠 **Lokal und privat** – Datenbank und tägliche Backups liegen nur in deinem Benutzerordner auf dem Mac; kein Konto, keine Cloud, nichts verlässt das Gerät. [Mehr unter „Daten“](#daten)
+- 🔐 **Auf Wunsch verschlüsselt** – Datenbank und Backups lassen sich mit einem Haken in den Einstellungen verschlüsseln (AES-256, Schlüssel im Schlüsselbund).
 - 🦀 **Nativ** – in Rust geschrieben, mit AppKit-Oberfläche, Hell- und Dunkelmodus.
 
 ## Funktionen
@@ -352,7 +353,7 @@ Die Einstellungen stehen auf vier Reitern:
 |              | Menüleiste             | Symbolsatz für die Menüleiste, mit Vorschau aller Zustände              | Tagbogen        |
 |              | Arbeitszeit von heute zeigen | Arbeitszeit von heute neben dem Symbol in der Menüleiste          | aus             |
 |              | Kurzbefehle            | ⌃⌥⌘P und ⌃⌥⌘A wirken in jeder App, auch bei geschlossenem Menü           | aus             |
-|              | Datenschutz            | Datenbank und Backups verschlüsseln (siehe [Daten](#daten)); „Wiederherstellungsschlüssel …“ zeigt den Schlüssel zum Aufbewahren | aus |
+|              | Datenschutz            | Datenbank und Backups verschlüsseln (siehe [Verschlüsselung](#verschluesselung)); „Wiederherstellungsschlüssel …“ zeigt den Schlüssel zum Aufbewahren | aus |
 | Arbeitszeit  | Regeln (je Stand, gültig ab einem Datum): | | |
 |              | – Regelarbeitszeit     | Wochenarbeitszeit, daraus ergibt sich das Tagessoll                      | 39 Std.         |
 |              | – Arbeitstage          | Mo bis Fr einzeln wählbar; das Wochensoll verteilt sich gleichmäßig auf sie (angezeigt als „4-Tage-Woche · 9:45 Std. pro Arbeitstag“, bei ungeraden Wochenarbeitszeiten „9:37 bis 9:38 Std.“) | Mo–Fr |
@@ -603,23 +604,40 @@ Es läuft immer nur eine Instanz der Menüleisten-App.
 
 ## Daten
 
-Alle Daten liegen lokal in einer SQLite-Datenbank:
+> **Kurz gesagt:** Alle Aufzeichnungen bleiben bei dir. Tagwerk speichert sie in deinem
+> Benutzerordner auf dem Mac – kein Konto, kein Server, keine Cloud-Synchronisation, keine
+> Übertragung ins Netz. Die Datenbank und ihre Backups lassen sich auf Wunsch
+> [verschlüsseln](#verschluesselung).
+
+Datenbank und Backups liegen zusammen im Datenordner deines Benutzerkontos:
 
 ```text
-~/Library/Application Support/Tagwerk/tagwerk.db
+~/Library/Application Support/Tagwerk/
+├── tagwerk.db                     Datenbank (SQLite)
+└── backups/
+    └── tagwerk-JJJJ-MM-TT.db      tägliche Backups, die letzten 15
 ```
 
-Sie enthält die automatisch erfassten Perioden (Mac entsperrt), getrennt davon die
+Die Datenbank enthält die automatisch erfassten Perioden (Mac entsperrt), getrennt davon die
 manuellen Korrekturen (Arbeitsbeginn, Pausen, Arbeit ohne Mac, Feierabend, Abwesenheiten,
 „Heute erfassen“ an freien Tagen) sowie die Einstellungen. Die
 Perioden werden ungekürzt gespeichert; Mindestpause und Arbeitszeitrahmen wirken erst
 bei der Berechnung. Bearbeitet werden die Daten im Fenster „Aufzeichnungen“; Änderungen
 dort übernimmt die laufende App automatisch.
 
-**Backups:** Vor der ersten Änderung eines Tages wird die Datenbank unter
-`backups/tagwerk-JJJJ-MM-TT.db` gesichert; die letzten 15 Backups bleiben erhalten.
+### Backups
 
-**Verschlüsselung (optional):** „Datenbank und Backups verschlüsseln“ in den
+Vor der ersten Änderung eines Tages wird die Datenbank unter
+`backups/tagwerk-JJJJ-MM-TT.db` gesichert; die letzten 15 Backups bleiben erhalten. Auch
+die Backups bleiben im Datenordner auf dem Mac.
+
+<a id="verschluesselung"></a>
+
+### Verschlüsselung (optional)
+
+Standardmäßig ist die Datenbank nicht verschlüsselt; sie ist dann wie alle Dateien im
+Benutzerordner durch die Rechte des Benutzerkontos und gegebenenfalls FileVault geschützt.
+„Datenbank und Backups verschlüsseln“ in den
 Einstellungen (Reiter „Allgemein“) verschlüsselt `tagwerk.db` und alle Backups mit
 [SQLCipher](https://www.zetetic.net/sqlcipher/) (AES-256). Der Schlüssel ist zufällig und
 liegt im Schlüsselbund von macOS (Eintrag „Tagwerk – Schlüssel der Datenbank“), daher
@@ -673,7 +691,9 @@ nicht nach FIPS 140 oder anderen Normen zertifiziert.
 
 </details>
 
-**Ältere Versionen:** Die Markdown-Datei `tagwerk.md` früherer Versionen wird beim
+### Ältere Versionen
+
+Die Markdown-Datei `tagwerk.md` früherer Versionen wird beim
 ersten Start einmalig in die Datenbank übernommen und danach in `tagwerk.md.importiert`
 umbenannt. Ab Version 1.2.0 nutzt die Datenbank Schema 3; Tagwerk 1.1 und älter können
 sie danach nicht mehr öffnen – zurück geht es nur mit einem Backup aus `backups/` von
