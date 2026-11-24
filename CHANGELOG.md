@@ -6,6 +6,15 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Behoben
+- Wochenansicht: Wer über Mitternacht gearbeitet hat (oder vor bzw. nach dem
+  Arbeitszeitrahmen entsperrt war), kann den Arbeitsbeginn jetzt auf das erste Entsperren im
+  Rahmen legen, damit die Zeit davor entfällt. Bisher galt dieser Wert als „automatisch“ und
+  „Übernehmen“ bzw. Ziehen dorthin änderte nichts. Ohne Angabe beginnt der Tag mit dem
+  frühesten Entsperren – über Mitternacht gearbeitet: um 00:00 Uhr; der Dialog „Arbeitsbeginn
+  ändern“ nennt die Uhrzeit, ebenso „Zurücksetzen“ und „Erstes Entsperren verwenden“ im Menü.
+  Für den Feierabend gilt dasselbe am Ende des Tages.
+
 ## [1.9.0] - 2026-11-24
 
 ### Zusammenfassung

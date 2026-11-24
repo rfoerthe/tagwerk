@@ -105,7 +105,8 @@ pub struct TodayInfo {
     pub first_start: Option<i64>,
     /// Beginn wurde manuell festgelegt.
     pub start_manual: bool,
-    /// Erstes automatisches Entsperren heute im Arbeitszeitrahmen.
+    /// Erstes automatisches Entsperren heute, auch außerhalb des Arbeitszeitrahmens (über
+    /// Mitternacht gearbeitet: 00:00 Uhr) – ein Beginn danach lässt die Zeit davor entfallen.
     pub auto_first: Option<i64>,
     pub mode: Mode,
     /// Sollarbeitszeit heute.
@@ -465,7 +466,7 @@ impl Tracker {
         }
         info.stretch_secs = Day::current_stretch_secs(&d.spans(s));
         info.start_manual = d.start.is_some();
-        info.auto_first = d.auto_bounds_in_frame(s).map(|(first, _)| first);
+        info.auto_first = d.auto_bounds(s).map(|(first, _)| first);
         info.mode = d.mode();
         info.warnings = rules::day_warnings(&snap, date, s);
         info
@@ -985,7 +986,8 @@ mod tests {
         let info = t.today(dt(16, 8, 0));
         assert_eq!((info.work_secs, info.first_start), (hm(1, 0), Some(hm(7, 0))));
         assert!(matches!(&info.warnings[..], [Warning::OutsideFrame { spans, .. }] if spans.len() == 1));
-        assert_eq!(info.auto_first, Some(hm(7, 0)));
+        // Zurücksetzen heißt: ab dem ersten Entsperren, auch wenn es vor dem Rahmen liegt.
+        assert_eq!(info.auto_first, Some(hm(6, 30)));
     }
 
     #[test]
