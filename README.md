@@ -644,6 +644,35 @@ war. Gut zu wissen:
 - Die Markdown-Dateien früherer Versionen (`tagwerk.md.importiert`, `backups/*.md`)
   bleiben, wie sie sind; Tagwerk nennt sie nach dem Verschlüsseln.
 
+<details>
+<summary>Verfahren und Standards</summary>
+
+Tagwerk verschlüsselt nicht selbst, sondern nutzt [SQLCipher](https://www.zetetic.net/sqlcipher/design/)
+4.20 (über `rusqlite` mit `bundled-sqlcipher`) mit dessen Standardeinstellungen für
+SQLCipher 4; eigene `cipher_*`-Einstellungen setzt Tagwerk nicht. Die Kryptografie
+selbst kommt auf macOS aus CommonCrypto (Apple corecrypto), nicht aus OpenSSL.
+
+| Baustein                 | Verfahren                                                                                       | Standard                                   |
+|--------------------------|-------------------------------------------------------------------------------------------------|--------------------------------------------|
+| Schlüssel                | 256 Bit aus dem Zufallsgenerator von macOS (`SecRandomCopyBytes`)                               | –                                          |
+| Verschlüsselung          | AES-256 im CBC-Modus, jede Seite (4096 Byte) mit eigenem zufälligem 16-Byte-IV                  | FIPS 197 (AES), NIST SP 800-38A (CBC)      |
+| Integrität               | HMAC-SHA512 je Seite über Geheimtext, IV und Seitennummer (Encrypt-then-MAC)                    | FIPS 198-1 / RFC 2104 (HMAC), FIPS 180-4 (SHA-512) |
+| Schlüsselableitung       | keine für den AES-Schlüssel: Tagwerk übergibt ihn roh (`PRAGMA key = "x'…'"`). Den HMAC-Schlüssel leitet SQLCipher daraus mit PBKDF2-HMAC-SHA512 (2 Runden, eigenes Salz) ab | RFC 8018 / NIST SP 800-132 (PBKDF2) |
+| Salz                     | 16 Zufallsbytes am Anfang der Datei; der übrige Dateikopf ist mit verschlüsselt                 | –                                          |
+| Aufbewahrung             | generischer Kennworteintrag im Schlüsselbund von macOS (Dienst `de.foerther.tagwerk`)           | –                                          |
+
+Die 256 000 PBKDF2-Runden, die SQLCipher für Passwörter vorsieht, fallen weg: Ein
+zufälliger 256-Bit-Schlüssel lässt sich ohnehin nicht erraten, eine langsame Ableitung
+brächte nichts. Der Wiederherstellungsschlüssel ist derselbe Schlüssel in Hex-Schreibweise.
+
+Verschlüsselt sind alle Seiten der Datenbank, auch WAL und Backups. Eine veränderte oder
+beschädigte Seite fällt beim Lesen am HMAC auf. Nicht geschützt ist, was außerhalb der
+Datenbank liegt (Exporte, siehe oben) und was im Speicher der laufenden App steht; Tagwerk
+überschreibt seine Kopie des Schlüssels beim Freigeben mit Nullen. Tagwerk selbst ist
+nicht nach FIPS 140 oder anderen Normen zertifiziert.
+
+</details>
+
 **Ältere Versionen:** Die Markdown-Datei `tagwerk.md` früherer Versionen wird beim
 ersten Start einmalig in die Datenbank übernommen und danach in `tagwerk.md.importiert`
 umbenannt. Ab Version 1.2.0 nutzt die Datenbank Schema 3; Tagwerk 1.1 und älter können
