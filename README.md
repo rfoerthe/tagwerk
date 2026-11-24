@@ -5,7 +5,8 @@
 # Tagwerk
 
 **Automatische Arbeitszeiterfassung in der macOS-Menüleiste.**<br>
-Gezählt wird, solange dein Mac entsperrt ist – Pausen, Saldo und Arbeitszeitregeln inklusive.
+Gezählt wird, solange dein Mac entsperrt ist – Pausen, Saldo und Arbeitszeitregeln inklusive.<br>
+Deine Daten bleiben lokal auf deinem Mac – keine Cloud, auf Wunsch verschlüsselt.
 
 [![macOS 13+](https://img.shields.io/badge/macOS-13%2B-000000?logo=apple&logoColor=white)](#voraussetzungen)
 [![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-arm64-555555)](#voraussetzungen)
