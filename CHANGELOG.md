@@ -6,6 +6,25 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Hinzugefügt
+- Datenbank verschlüsseln (Einstellungen › Allgemein › „Datenbank und Backups
+  verschlüsseln“): `tagwerk.db` und alle Backups werden mit SQLCipher (AES-256)
+  verschlüsselt. Der Schlüssel liegt im Schlüsselbund, Tagwerk startet weiter ohne
+  Passwort. Vor dem Einschalten zeigt Tagwerk einen Wiederherstellungsschlüssel, später
+  auch über „Wiederherstellungsschlüssel …“. Fehlt der Schlüssel im Schlüsselbund, fragt
+  Tagwerk beim Start nach ihm. Das Ausschalten schreibt alles wieder unverschlüsselt und
+  entfernt den Schlüssel. Zum Umstellen startet Tagwerk neu.
+- Den Wiederherstellungsschlüssel legt „In die Zwischenablage kopieren“ direkt unter dem
+  Schlüssel in die Zwischenablage, ohne den Dialog zu schließen.
+- `--settings-screenshot`: `TAGWERK_SETTINGS_SHEET=encrypt` nimmt die Rückfrage „Datenbank
+  verschlüsseln?“ auf.
+
+### Geändert
+- Tagwerk nutzt SQLCipher statt SQLite. Unverschlüsselte Datenbanken öffnet es wie
+  bisher; ältere Versionen können eine verschlüsselte Datenbank nicht öffnen.
+- `testdata/testdb.sh --install` bricht ab, wenn die zentrale Datenbank verschlüsselt ist,
+  statt an `sqlite3` zu scheitern.
+
 ## [1.7.0] - 2026-11-21
 
 ### Zusammenfassung

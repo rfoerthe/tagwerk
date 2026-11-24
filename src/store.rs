@@ -22,6 +22,7 @@
 use crate::day::{
     self, fmt_clock, fmt_clock_s, parse_clock, Absence, AbsenceKind, Activity, Break, Day, FreeDay, Span, DAY_END,
 };
+use crate::crypt;
 use crate::rules::{self, Settings};
 use chrono::{Datelike, Duration, NaiveDate, NaiveDateTime, Weekday};
 use rusqlite::{params, Connection, TransactionBehavior};
@@ -146,6 +147,11 @@ pub fn data_dir() -> PathBuf {
     if let Some(dir) = std::env::var_os("TAGWERK_DIR") {
         return PathBuf::from(dir);
     }
+    default_data_dir()
+}
+
+/// `$HOME/Library/Application Support/Tagwerk` (ohne `TAGWERK_DIR`).
+pub fn default_data_dir() -> PathBuf {
     let home = std::env::var_os("HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|| PathBuf::from("."));
@@ -156,6 +162,11 @@ pub fn data_dir() -> PathBuf {
 
 pub fn db_file() -> PathBuf {
     data_dir().join(DB_FILE)
+}
+
+/// Ist die Datenbank verschlüsselt (siehe [`crypt`])?
+pub fn db_encrypted() -> bool {
+    crypt::is_encrypted(&db_file()).unwrap_or(false)
 }
 
 /// Kleine Statusdatei mit dem Zustand der Erfassung: Damit setzt die Menüleisten-App nach
@@ -185,10 +196,19 @@ impl Db {
         Self::open_in(&data_dir())
     }
 
+    /// Wie [`Db::open`] im Ordner `dir`; ist die Datenbank verschlüsselt, kommt der Schlüssel
+    /// aus dem Schlüsselbund (Fehler: [`crypt::KeyError`]).
     fn open_in(dir: &Path) -> Result<Db> {
+        let key = if crypt::is_encrypted(&dir.join(DB_FILE))? { Some(crypt::stored_key(dir)?) } else { None };
+        Self::open_with(dir, key.as_ref())
+    }
+
+    /// Öffnet die Datenbank im Ordner `dir` mit dem Schlüssel `key` (`None`: unverschlüsselt).
+    fn open_with(dir: &Path, key: Option<&crypt::Key>) -> Result<Db> {
         fs::create_dir_all(dir)?;
         let mut conn = Connection::open(dir.join(DB_FILE))?;
         conn.busy_timeout(std::time::Duration::from_secs(5))?;
+        crypt::unlock(&conn, key)?;
         conn.pragma_update_and_check(None, "journal_mode", "WAL", |r| r.get::<_, String>(0))?;
         conn.pragma_update(None, "synchronous", "NORMAL")?;
         init_schema(&mut conn, dir)?;
@@ -1734,6 +1754,33 @@ mod tests {
         let backup = Connection::open(bdir.join("tagwerk-2026-10-20.db")).unwrap();
         let n: i64 = backup.query_row("SELECT count(*) FROM periods", [], |r| r.get(0)).unwrap();
         assert_eq!(n, 19);
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn encrypted_database_and_its_backups() {
+        let dir = temp_dir("encrypted");
+        let mut d = Day::new(date(16));
+        d.add_period(h(8, 0), h(12, 0));
+        Db::open_in(&dir).unwrap().save_days(&[d], &[], now() - Duration::days(1)).unwrap();
+        let key = crypt::Key::generate().unwrap();
+        crypt::convert_dir(&dir, None, Some(&key)).unwrap();
+        // Ohne bekannten Schlüssel nicht zu öffnen …
+        let err = Db::open_with(&dir, None).err().expect("verschlüsselt");
+        assert_eq!(err.downcast_ref::<crypt::KeyError>(), Some(&crypt::KeyError::Missing));
+        // … mit ihm wie gewohnt; der Prozess merkt ihn sich (an Stelle des Schlüsselbunds).
+        crypt::remember(&dir, &key);
+        let mut db = Db::open_in(&dir).unwrap();
+        assert_eq!(db.load().unwrap().len(), 1);
+        let mut d = Day::new(date(17));
+        d.add_period(h(9, 0), h(10, 0));
+        db.save_days(&[d], &[], now()).unwrap();
+        assert_eq!(Db::open_in(&dir).unwrap().load().unwrap().len(), 2);
+        // Das tägliche Backup ist mit demselben Schlüssel verschlüsselt.
+        let backup = db.backup_dir().join("tagwerk-2026-11-17.db");
+        assert!(crypt::is_encrypted(&backup).unwrap());
+        assert!(crypt::key_fits(&backup, &key));
+        drop(db);
         let _ = fs::remove_dir_all(&dir);
     }
 

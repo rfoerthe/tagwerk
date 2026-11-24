@@ -67,6 +67,11 @@ seal() {
   rm -f "$db-wal" "$db-shm"
 }
 
+# Ist die Datei mit SQLCipher verschlüsselt (Tagwerk-Einstellungen)? sqlite3 kann sie nicht lesen.
+is_encrypted() {
+  [[ -s "$1" && "$(head -c 15 "$1")" != "SQLite format 3" ]]
+}
+
 # Enthält die Datei Testdaten?
 is_test_db() {
   [[ "$(sqlite3 "$1" 'PRAGMA application_id' 2>/dev/null)" == "$TEST_MARK" ]]
@@ -162,6 +167,9 @@ replace_central_db() {
 install_test_db() {
   [[ -f "$TEST_DB" ]] || fail "$TEST_DB fehlt."
   mkdir -p "$DATA_DIR"
+  if [[ -f "$CENTRAL_DB" ]] && is_encrypted "$CENTRAL_DB"; then
+    fail "Die zentrale Datenbank ist verschlüsselt – erst in Tagwerk (Einstellungen › Allgemein) die Verschlüsselung ausschalten."
+  fi
   stop_instances
   if [[ -f "$CENTRAL_DB" ]] && is_test_db "$CENTRAL_DB"; then
     step "Die zentrale Datenbank enthält schon Testdaten – keine neue Sicherung"

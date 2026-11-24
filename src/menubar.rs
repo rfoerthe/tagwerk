@@ -5,6 +5,7 @@
 //! eingestellten Mindestdauer).
 
 use crate::about;
+use crate::crypt;
 use crate::day::{self, fmt_clock, Activity, FreeDay, Mode, Span, WorkBlock};
 use crate::glyphs;
 use crate::hotkey;
@@ -23,7 +24,7 @@ use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
 use objc2::{define_class, msg_send, sel, MainThreadMarker, MainThreadOnly, Message};
 use objc2_app_kit::{
-    NSAlert, NSAlertFirstButtonReturn, NSApplication,
+    NSAlert, NSAlertFirstButtonReturn, NSAlertStyle, NSApplication,
     NSApplicationActivationPolicy, NSAttributedStringAttachmentConveniences, NSColor, NSControlStateValueOff,
     NSControlStateValueOn, NSDatePicker,
     NSDatePickerElementFlags, NSDatePickerStyle, NSFont, NSFontAttributeName, NSFontWeightRegular,
@@ -1532,8 +1533,12 @@ fn schedule_menu_screenshot(path: std::path::PathBuf) {
     after(0.8, &open);
 }
 
-/// Hält eine Sperrdatei, damit nur eine Instanz läuft.
-fn single_instance() -> Option<std::fs::File> {
+/// Argument für den Neustart durch [`relaunch`]: Die alte Instanz beendet sich gerade noch.
+pub const RESTART_ARG: &str = "--nach-neustart";
+
+/// Hält eine Sperrdatei, damit nur eine Instanz läuft. Mit `wait` (nach [`relaunch`]) wartet
+/// sie bis zu 15 Sekunden, bis die alte Instanz beendet ist.
+fn single_instance(wait: bool) -> Option<std::fs::File> {
     let _ = std::fs::create_dir_all(store::data_dir());
     let file = std::fs::OpenOptions::new()
         .create(true)
@@ -1541,10 +1546,139 @@ fn single_instance() -> Option<std::fs::File> {
         .write(true)
         .open(store::data_dir().join(".lock"))
         .ok()?;
-    match file.try_lock() {
-        Ok(()) => Some(file),
-        Err(_) => None,
+    let tries = if wait { 60 } else { 1 };
+    for i in 0..tries {
+        if file.try_lock().is_ok() {
+            return Some(file);
+        }
+        if i + 1 < tries {
+            std::thread::sleep(std::time::Duration::from_millis(250));
+        }
     }
+    None
+}
+
+/// Startet Tagwerk neu – zum Umstellen der Verschlüsselung (siehe [`crypt::apply_pending`]).
+/// Die neue Instanz wartet, bis diese beendet ist.
+fn relaunch() -> Result<(), String> {
+    let fail = |e: &dyn std::fmt::Display| {
+        format!("Tagwerk ließ sich nicht neu starten ({e}). Umgestellt wird beim nächsten Start.")
+    };
+    let exe = std::env::current_exe().map_err(|e| fail(&e))?;
+    if running_from_bundle() {
+        // …/Tagwerk.app/Contents/MacOS/Tagwerk
+        let bundle = exe.ancestors().nth(3).ok_or_else(|| fail(&"kein App-Bundle"))?;
+        let status = std::process::Command::new("/usr/bin/open")
+            .arg("-n")
+            .arg(bundle)
+            .args(["--args", RESTART_ARG])
+            .status()
+            .map_err(|e| fail(&e))?;
+        if !status.success() {
+            return Err(fail(&status));
+        }
+    } else {
+        std::process::Command::new(&exe).arg(RESTART_ARG).spawn().map_err(|e| fail(&e))?;
+    }
+    shutdown();
+    let mtm = MainThreadMarker::new().expect("main thread");
+    NSApplication::sharedApplication(mtm).terminate(None);
+    Ok(())
+}
+
+/// Öffnet die Datenbank. Ist sie verschlüsselt und der Schlüssel fehlt im Schlüsselbund (oder
+/// passt nicht), fragt Tagwerk nach dem Wiederherstellungsschlüssel und legt ihn wieder im
+/// Schlüsselbund ab. `None`: Beenden gewählt oder ein anderer Fehler (schon gemeldet).
+fn open_db(mtm: MainThreadMarker) -> Option<store::Db> {
+    loop {
+        match store::Db::open() {
+            Ok(db) => return Some(db),
+            Err(e) => match e.downcast_ref::<crypt::KeyError>() {
+                Some(err) => {
+                    if !ask_recovery_key(mtm, &err.to_string()) {
+                        return None;
+                    }
+                }
+                None => {
+                    show_fatal(
+                        mtm,
+                        &format!("Die Datenbank {} konnte nicht geöffnet werden.", store::db_file().display()),
+                        &e.to_string(),
+                    );
+                    return None;
+                }
+            },
+        }
+    }
+}
+
+/// Fragt nach dem Wiederherstellungsschlüssel, bis er passt. `false`: Beenden gewählt.
+fn ask_recovery_key(mtm: MainThreadMarker, reason: &str) -> bool {
+    let dir = store::data_dir();
+    let field = NSTextField::textFieldWithString(&ns(""), mtm);
+    field.setPlaceholderString(Some(&ns("XXXXXXXX-XXXXXXXX-XXXXXXXX-…")));
+    field.setFont(Some(&NSFont::monospacedSystemFontOfSize_weight(12.0, unsafe { NSFontWeightRegular })));
+    field.setFrameSize(NSSize::new(320.0, field.fittingSize().height));
+    let mut problem = reason.to_string();
+    loop {
+        let alert = NSAlert::new(mtm);
+        alert.setMessageText(&ns("Datenbank verschlüsselt"));
+        alert.setInformativeText(&ns(&format!(
+            "{problem}\n\nMit dem Wiederherstellungsschlüssel lässt sie sich öffnen; Tagwerk legt den \
+             Schlüssel dann wieder im Schlüsselbund ab."
+        )));
+        alert.addButtonWithTitle(&ns("Öffnen"));
+        alert.addButtonWithTitle(&ns("Beenden"));
+        alert.setAccessoryView(Some(&field));
+        alert.layout();
+        alert.window().setInitialFirstResponder(Some(&field));
+        activate_app(mtm);
+        if alert.runModal() != NSAlertFirstButtonReturn {
+            return false;
+        }
+        let Some(key) = crypt::Key::parse_recovery(&field.stringValue().to_string()) else {
+            problem = "Das ist kein Wiederherstellungsschlüssel: 64 Zeichen aus 0–9 und A–F \
+                       (Bindestriche und Leerzeichen zählen nicht)."
+                .to_string();
+            continue;
+        };
+        if !crypt::key_fits(&store::db_file(), &key) {
+            problem = "Dieser Wiederherstellungsschlüssel passt nicht zur Datenbank.".to_string();
+            continue;
+        }
+        if let Err(e) = crypt::store_key(&dir, &key) {
+            // Für diesmal reicht er; beim nächsten Start fragt Tagwerk wieder.
+            eprintln!("Tagwerk: Schlüssel ließ sich nicht im Schlüsselbund ablegen: {e}");
+            crypt::remember(&dir, &key);
+        }
+        return true;
+    }
+}
+
+/// Ergebnis einer Umstellung der Verschlüsselung beim Start (siehe [`crypt::apply_pending`]).
+fn show_switch_result(mtm: MainThreadMarker, result: &Result<crypt::Report, String>) {
+    let alert = NSAlert::new(mtm);
+    match result {
+        Ok(report) => {
+            alert.setMessageText(&ns(if report.encrypted {
+                "Datenbank verschlüsselt"
+            } else {
+                "Verschlüsselung aufgehoben"
+            }));
+            alert.setInformativeText(&ns(&report.text()));
+            if !report.failed.is_empty() {
+                alert.setAlertStyle(NSAlertStyle::Warning);
+            }
+        }
+        Err(e) => {
+            alert.setAlertStyle(NSAlertStyle::Warning);
+            alert.setMessageText(&ns("Umstellen fehlgeschlagen"));
+            alert.setInformativeText(&ns(e));
+        }
+    }
+    alert.addButtonWithTitle(&ns("OK"));
+    activate_app(mtm);
+    alert.runModal();
 }
 
 /// Startet die Menüleisten-App. Mit `screenshot` (zum Testen und für die Bilder im README:
@@ -1566,7 +1700,8 @@ pub fn run(screenshot: Option<std::path::PathBuf>) {
             }
         }
     }
-    let Some(_lock) = single_instance() else {
+    let restarted = std::env::args().any(|a| a == RESTART_ARG);
+    let Some(_lock) = single_instance(restarted) else {
         eprintln!("Tagwerk läuft bereits.");
         return;
     };
@@ -1685,13 +1820,16 @@ pub fn run(screenshot: Option<std::path::PathBuf>) {
     let status_item = NSStatusBar::systemStatusBar().statusItemWithLength(NSVariableStatusItemLength);
     status_item.setMenu(Some(&menu));
 
+    // Vorgemerktes Ver- oder Entschlüsseln: vor dem ersten Öffnen, solange niemand sonst die
+    // Datenbank offen hat.
+    let switched = if screenshot.is_none() { crypt::apply_pending(&store::data_dir()) } else { None };
+    if screenshot.is_none() {
+        settings_window::set_relaunch(relaunch);
+    }
+
     // Daten laden und – falls entsperrt und kein Feierabend – sofort starten.
-    let db = match store::Db::open() {
-        Ok(db) => db,
-        Err(e) => {
-            show_fatal(mtm, &format!("Die Datenbank {} konnte nicht geöffnet werden.", store::db_file().display()), &e.to_string());
-            return;
-        }
+    let Some(db) = open_db(mtm) else {
+        return;
     };
     // Lässt sich die Datenbank öffnen, aber nicht lesen, läuft Tagwerk mit leerem Stand weiter –
     // das steht dann im Menü, statt unbemerkt zu bleiben.
@@ -1757,6 +1895,9 @@ pub fn run(screenshot: Option<std::path::PathBuf>) {
     state.persist(t);
     state.refresh();
     STATE.with(|s| *s.borrow_mut() = Some(state));
+    if let Some(result) = &switched {
+        show_switch_result(mtm, result);
+    }
 
     // Erster Start der installierten App: automatisch bei Anmeldung starten.
     let marker = store::data_dir().join(".login-item-set");

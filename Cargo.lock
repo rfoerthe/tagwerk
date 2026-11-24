@@ -66,6 +66,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "core-foundation"
+version = "0.10.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2a6cd9ae233e7f62ba4e9353e81a88df7fc8a5987b8d445b4d90c879bd156f6"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
+]
+
+[[package]]
 name = "core-foundation-sys"
 version = "0.8.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -196,6 +206,7 @@ checksum = "b06e69070b7e12262b0cd90832f0a7396f142a2b330181255562decf9f0c6215"
 dependencies = [
  "cc",
  "pkg-config",
+ "sqlcipher-src",
  "vcpkg",
 ]
 
@@ -439,6 +450,29 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
 
 [[package]]
+name = "security-framework"
+version = "3.7.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b7f4bc775c73d9a02cde8bf7b2ec4c9d12743edf609006c7facc23998404cd1d"
+dependencies = [
+ "bitflags",
+ "core-foundation",
+ "core-foundation-sys",
+ "libc",
+ "security-framework-sys",
+]
+
+[[package]]
+name = "security-framework-sys"
+version = "2.17.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "6ce2691df843ecc5d231c0b14ece2acc3efb62c0a398c7e1d875f3983ce020e3"
+dependencies = [
+ "core-foundation-sys",
+ "libc",
+]
+
+[[package]]
 name = "shlex"
 version = "2.0.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -457,6 +491,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "149309498a5f7334b12ddae0cad8aba81ce785fe91755068867e017cf98fee46"
 
 [[package]]
+name = "sqlcipher-src"
+version = "420.0.0+sqlcipher-4.20.0-sqlite-3.54.1-libtomcrypt-1.18.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fd6b5280ed2593d07b2816ec531821c15c306903bcca224716f1fbcc2bbfedfe"
+
+[[package]]
 name = "sqlite-wasm-rs"
 version = "0.6.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -464,6 +504,7 @@ checksum = "a6cd504cecbfe7eef649988840f9a6cb768d11085efec138f8e99f160632d867"
 dependencies = [
  "cc",
  "rsqlite-vfs",
+ "sqlcipher-src",
 ]
 
 [[package]]
@@ -499,6 +540,7 @@ dependencies = [
  "objc2-foundation",
  "objc2-user-notifications",
  "rusqlite",
+ "security-framework",
 ]
 
 [[package]]

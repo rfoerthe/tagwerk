@@ -352,6 +352,7 @@ Die Einstellungen stehen auf vier Reitern:
 |              | Menüleiste             | Symbolsatz für die Menüleiste, mit Vorschau aller Zustände              | Tagbogen        |
 |              | Arbeitszeit von heute zeigen | Arbeitszeit von heute neben dem Symbol in der Menüleiste          | aus             |
 |              | Kurzbefehle            | ⌃⌥⌘P und ⌃⌥⌘A wirken in jeder App, auch bei geschlossenem Menü           | aus             |
+|              | Datenschutz            | Datenbank und Backups verschlüsseln (siehe [Daten](#daten)); „Wiederherstellungsschlüssel …“ zeigt den Schlüssel zum Aufbewahren | aus |
 | Arbeitszeit  | Regeln (je Stand, gültig ab einem Datum): | | |
 |              | – Regelarbeitszeit     | Wochenarbeitszeit, daraus ergibt sich das Tagessoll                      | 39 Std.         |
 |              | – Arbeitstage          | Mo bis Fr einzeln wählbar; das Wochensoll verteilt sich gleichmäßig auf sie (angezeigt als „4-Tage-Woche · 9:45 Std. pro Arbeitstag“, bei ungeraden Wochenarbeitszeiten „9:37 bis 9:38 Std.“) | Mo–Fr |
@@ -618,6 +619,31 @@ dort übernimmt die laufende App automatisch.
 **Backups:** Vor der ersten Änderung eines Tages wird die Datenbank unter
 `backups/tagwerk-JJJJ-MM-TT.db` gesichert; die letzten 15 Backups bleiben erhalten.
 
+**Verschlüsselung (optional):** „Datenbank und Backups verschlüsseln“ in den
+Einstellungen (Reiter „Allgemein“) verschlüsselt `tagwerk.db` und alle Backups mit
+[SQLCipher](https://www.zetetic.net/sqlcipher/) (AES-256). Der Schlüssel ist zufällig und
+liegt im Schlüsselbund von macOS (Eintrag „Tagwerk – Schlüssel der Datenbank“), daher
+startet Tagwerk weiter ohne Passwort. Andere Programme fragen erst nach, bevor sie ihn
+lesen dürfen. Vor dem Einschalten zeigt Tagwerk den **Wiederherstellungsschlüssel**
+(64 Zeichen, auch später unter „Wiederherstellungsschlüssel …“). Fehlt der Eintrag im
+Schlüsselbund, etwa auf einem neuen Mac, fragt Tagwerk beim Start nach ihm. Ohne beides
+sind die Aufzeichnungen verloren. Entfernt man den Haken wieder, schreibt Tagwerk
+Datenbank und Backups unverschlüsselt zurück und löscht den Schlüssel.
+
+Zum Umstellen startet Tagwerk neu: SQLCipher kann eine Datei nicht an Ort und Stelle ver-
+oder entschlüsseln. Tagwerk schreibt deshalb vor dem ersten Öffnen eine neue Datei, prüft
+sie und ersetzt damit die alte. Dabei darf kein anderes Programm die Datenbank geöffnet
+haben (etwa `Tagwerk --records` oder ein Export im Terminal), sonst bleibt alles, wie es
+war. Gut zu wissen:
+
+- Ältere Tagwerk-Versionen (bis 1.7) und `sqlite3` können eine verschlüsselte Datenbank
+  nicht öffnen. Vor einem Wechsel zurück die Verschlüsselung ausschalten.
+- Exporte (Markdown, CSV, PDF) sind nicht verschlüsselt.
+- Was vorher unverschlüsselt war, kann noch in Time-Machine-Backups stehen. Auch die
+  ersetzte Datei ist auf der SSD nicht sicher gelöscht.
+- Die Markdown-Dateien früherer Versionen (`tagwerk.md.importiert`, `backups/*.md`)
+  bleiben, wie sie sind; Tagwerk nennt sie nach dem Verschlüsseln.
+
 **Ältere Versionen:** Die Markdown-Datei `tagwerk.md` früherer Versionen wird beim
 ersten Start einmalig in die Datenbank übernommen und danach in `tagwerk.md.importiert`
 umbenannt. Ab Version 1.2.0 nutzt die Datenbank Schema 3; Tagwerk 1.1 und älter können
@@ -640,6 +666,11 @@ umlenken:
 ```bash
 TAGWERK_DIR=/tmp/tagwerk-test cargo run
 ```
+
+Mit `TAGWERK_DIR` hat eine verschlüsselte Testdatenbank einen eigenen Eintrag im
+Schlüsselbund (mit dem Pfad im Namen). Bei jedem neuen Debug-Build fragt macOS, ob er ihn
+lesen darf: Die ad-hoc-Signatur ändert sich mit jedem Build. Den Test gegen den echten
+Schlüsselbund startet `cargo test -- --ignored keychain`.
 
 Das App-Symbol liegt als `assets/AppIcon.png` (1024 × 1024) im Projekt, die Vorlage
 dazu als `assets/AppIcon.svg`; `build.sh` erzeugt daraus `AppIcon.icns`. Die Symbole der
