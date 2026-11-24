@@ -5,7 +5,8 @@
 # Tagwerk
 
 **Automatische Arbeitszeiterfassung in der macOS-Menüleiste.**<br>
-Gezählt wird, solange dein Mac entsperrt ist – Pausen, Saldo und Arbeitszeitregeln inklusive.
+Gezählt wird, solange dein Mac entsperrt ist – Pausen, Saldo und Arbeitszeitregeln inklusive.<br>
+Deine Daten bleiben lokal auf deinem Mac – keine Cloud, auf Wunsch verschlüsselt.
 
 [![macOS 13+](https://img.shields.io/badge/macOS-13%2B-000000?logo=apple&logoColor=white)](#voraussetzungen)
 [![Apple Silicon](https://img.shields.io/badge/Apple%20Silicon-arm64-555555)](#voraussetzungen)
@@ -39,7 +40,8 @@ festlegen oder korrigieren.
 - ⚖️ **Regeln im Blick** – Pausen, Ruhezeit und Höchstarbeitszeit nach [Arbeitszeitgesetz](https://www.gesetze-im-internet.de/arbzg/BJNR117100994.html) werden geprüft.
 - 📊 **Soll, Saldo und Zeitkonto** – je Tag, Woche und Monat, auf Basis deiner Regelwochenarbeitszeit und deiner Arbeitstage; das Zeitkonto zählt fortlaufend.
 - 🗓️ **Wochenansicht** – jede Kalenderwoche übersichtlich wie in einem Kalender, direkt im Fenster „Aufzeichnungen“.
-- 🏠 **Lokal und privat** – alle Daten liegen in einer SQLite-Datenbank auf deinem Mac, nichts verlässt das Gerät.
+- 🏠 **Lokal und privat** – Datenbank und tägliche Backups liegen nur in deinem Benutzerordner auf dem Mac; kein Konto, keine Cloud, nichts verlässt das Gerät. [Mehr unter „Daten“](#daten)
+- 🔐 **Auf Wunsch verschlüsselt** – Datenbank und Backups lassen sich mit einem Haken in den Einstellungen verschlüsseln (AES-256, Schlüssel im Schlüsselbund).
 - 🦀 **Nativ** – in Rust geschrieben, mit AppKit-Oberfläche, Hell- und Dunkelmodus.
 
 ## Funktionen
@@ -352,7 +354,7 @@ Die Einstellungen stehen auf vier Reitern:
 |              | Menüleiste             | Symbolsatz für die Menüleiste, mit Vorschau aller Zustände              | Tagbogen        |
 |              | Arbeitszeit von heute zeigen | Arbeitszeit von heute neben dem Symbol in der Menüleiste          | aus             |
 |              | Kurzbefehle            | ⌃⌥⌘P und ⌃⌥⌘A wirken in jeder App, auch bei geschlossenem Menü           | aus             |
-|              | Datenschutz            | Datenbank und Backups verschlüsseln (siehe [Daten](#daten)); „Wiederherstellungsschlüssel …“ zeigt den Schlüssel zum Aufbewahren | aus |
+|              | Datenschutz            | Datenbank und Backups verschlüsseln (siehe [Verschlüsselung](#verschluesselung)); „Wiederherstellungsschlüssel …“ zeigt den Schlüssel zum Aufbewahren | aus |
 | Arbeitszeit  | Regeln (je Stand, gültig ab einem Datum): | | |
 |              | – Regelarbeitszeit     | Wochenarbeitszeit, daraus ergibt sich das Tagessoll                      | 39 Std.         |
 |              | – Arbeitstage          | Mo bis Fr einzeln wählbar; das Wochensoll verteilt sich gleichmäßig auf sie (angezeigt als „4-Tage-Woche · 9:45 Std. pro Arbeitstag“, bei ungeraden Wochenarbeitszeiten „9:37 bis 9:38 Std.“) | Mo–Fr |
@@ -603,23 +605,40 @@ Es läuft immer nur eine Instanz der Menüleisten-App.
 
 ## Daten
 
-Alle Daten liegen lokal in einer SQLite-Datenbank:
+> **Kurz gesagt:** Alle Aufzeichnungen bleiben bei dir. Tagwerk speichert sie in deinem
+> Benutzerordner auf dem Mac – kein Konto, kein Server, keine Cloud-Synchronisation, keine
+> Übertragung ins Netz. Die Datenbank und ihre Backups lassen sich auf Wunsch
+> [verschlüsseln](#verschluesselung).
+
+Datenbank und Backups liegen zusammen im Datenordner deines Benutzerkontos:
 
 ```text
-~/Library/Application Support/Tagwerk/tagwerk.db
+~/Library/Application Support/Tagwerk/
+├── tagwerk.db                     Datenbank (SQLite)
+└── backups/
+    └── tagwerk-JJJJ-MM-TT.db      tägliche Backups, die letzten 15
 ```
 
-Sie enthält die automatisch erfassten Perioden (Mac entsperrt), getrennt davon die
+Die Datenbank enthält die automatisch erfassten Perioden (Mac entsperrt), getrennt davon die
 manuellen Korrekturen (Arbeitsbeginn, Pausen, Arbeit ohne Mac, Feierabend, Abwesenheiten,
 „Heute erfassen“ an freien Tagen) sowie die Einstellungen. Die
 Perioden werden ungekürzt gespeichert; Mindestpause und Arbeitszeitrahmen wirken erst
 bei der Berechnung. Bearbeitet werden die Daten im Fenster „Aufzeichnungen“; Änderungen
 dort übernimmt die laufende App automatisch.
 
-**Backups:** Vor der ersten Änderung eines Tages wird die Datenbank unter
-`backups/tagwerk-JJJJ-MM-TT.db` gesichert; die letzten 15 Backups bleiben erhalten.
+### Backups
 
-**Verschlüsselung (optional):** „Datenbank und Backups verschlüsseln“ in den
+Vor der ersten Änderung eines Tages wird die Datenbank unter
+`backups/tagwerk-JJJJ-MM-TT.db` gesichert; die letzten 15 Backups bleiben erhalten. Auch
+die Backups bleiben im Datenordner auf dem Mac.
+
+<a id="verschluesselung"></a>
+
+### Verschlüsselung (optional)
+
+Standardmäßig ist die Datenbank nicht verschlüsselt; sie ist dann wie alle Dateien im
+Benutzerordner durch die Rechte des Benutzerkontos und gegebenenfalls FileVault geschützt.
+„Datenbank und Backups verschlüsseln“ in den
 Einstellungen (Reiter „Allgemein“) verschlüsselt `tagwerk.db` und alle Backups mit
 [SQLCipher](https://www.zetetic.net/sqlcipher/) (AES-256). Der Schlüssel ist zufällig und
 liegt im Schlüsselbund von macOS (Eintrag „Tagwerk – Schlüssel der Datenbank“), daher
@@ -644,7 +663,38 @@ war. Gut zu wissen:
 - Die Markdown-Dateien früherer Versionen (`tagwerk.md.importiert`, `backups/*.md`)
   bleiben, wie sie sind; Tagwerk nennt sie nach dem Verschlüsseln.
 
-**Ältere Versionen:** Die Markdown-Datei `tagwerk.md` früherer Versionen wird beim
+<details>
+<summary>Verfahren und Standards</summary>
+
+Tagwerk verschlüsselt nicht selbst, sondern nutzt [SQLCipher](https://www.zetetic.net/sqlcipher/design/)
+4.20 (über `rusqlite` mit `bundled-sqlcipher`) mit dessen Standardeinstellungen für
+SQLCipher 4; eigene `cipher_*`-Einstellungen setzt Tagwerk nicht. Die Kryptografie
+selbst kommt auf macOS aus CommonCrypto (Apple corecrypto), nicht aus OpenSSL.
+
+| Baustein                 | Verfahren                                                                                       | Standard                                   |
+|--------------------------|-------------------------------------------------------------------------------------------------|--------------------------------------------|
+| Schlüssel                | 256 Bit aus dem Zufallsgenerator von macOS (`SecRandomCopyBytes`)                               | –                                          |
+| Verschlüsselung          | AES-256 im CBC-Modus, jede Seite (4096 Byte) mit eigenem zufälligem 16-Byte-IV                  | FIPS 197 (AES), NIST SP 800-38A (CBC)      |
+| Integrität               | HMAC-SHA512 je Seite über Geheimtext, IV und Seitennummer (Encrypt-then-MAC)                    | FIPS 198-1 / RFC 2104 (HMAC), FIPS 180-4 (SHA-512) |
+| Schlüsselableitung       | keine für den AES-Schlüssel: Tagwerk übergibt ihn roh (`PRAGMA key = "x'…'"`). Den HMAC-Schlüssel leitet SQLCipher daraus mit PBKDF2-HMAC-SHA512 (2 Runden, eigenes Salz) ab | RFC 8018 / NIST SP 800-132 (PBKDF2) |
+| Salz                     | 16 Zufallsbytes am Anfang der Datei; der übrige Dateikopf ist mit verschlüsselt                 | –                                          |
+| Aufbewahrung             | generischer Kennworteintrag im Schlüsselbund von macOS (Dienst `de.foerther.tagwerk`)           | –                                          |
+
+Die 256 000 PBKDF2-Runden, die SQLCipher für Passwörter vorsieht, fallen weg: Ein
+zufälliger 256-Bit-Schlüssel lässt sich ohnehin nicht erraten, eine langsame Ableitung
+brächte nichts. Der Wiederherstellungsschlüssel ist derselbe Schlüssel in Hex-Schreibweise.
+
+Verschlüsselt sind alle Seiten der Datenbank, auch WAL und Backups. Eine veränderte oder
+beschädigte Seite fällt beim Lesen am HMAC auf. Nicht geschützt ist, was außerhalb der
+Datenbank liegt (Exporte, siehe oben) und was im Speicher der laufenden App steht; Tagwerk
+überschreibt seine Kopie des Schlüssels beim Freigeben mit Nullen. Tagwerk selbst ist
+nicht nach FIPS 140 oder anderen Normen zertifiziert.
+
+</details>
+
+### Ältere Versionen
+
+Die Markdown-Datei `tagwerk.md` früherer Versionen wird beim
 ersten Start einmalig in die Datenbank übernommen und danach in `tagwerk.md.importiert`
 umbenannt. Ab Version 1.2.0 nutzt die Datenbank Schema 3; Tagwerk 1.1 und älter können
 sie danach nicht mehr öffnen – zurück geht es nur mit einem Backup aus `backups/` von
