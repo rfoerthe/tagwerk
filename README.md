@@ -40,8 +40,9 @@ festlegen oder korrigieren.
 - ⚖️ **Regeln im Blick** – Pausen, Ruhezeit und Höchstarbeitszeit nach [Arbeitszeitgesetz](https://www.gesetze-im-internet.de/arbzg/BJNR117100994.html) werden geprüft.
 - 📊 **Soll, Saldo und Zeitkonto** – je Tag, Woche und Monat, auf Basis deiner Regelwochenarbeitszeit und deiner Arbeitstage; das Zeitkonto zählt fortlaufend.
 - 🗓️ **Wochenansicht** – jede Kalenderwoche übersichtlich wie in einem Kalender, direkt im Fenster „Aufzeichnungen“.
-- 🏠 **Lokal und privat** – Datenbank und tägliche Backups liegen nur in deinem Benutzerordner auf dem Mac; kein Konto, keine Cloud, nichts verlässt das Gerät. [Mehr unter „Daten“](#daten)
+- 🏠 **Lokal und privat** – Datenbank und tägliche Backups liegen nur in deinem Benutzerordner auf dem Mac; kein Konto, keine Cloud, keine Aufzeichnung verlässt das Gerät. [Mehr unter „Daten“](#daten)
 - 🔐 **Auf Wunsch verschlüsselt** – Datenbank und Backups lassen sich mit einem Haken in den Einstellungen verschlüsseln (AES-256, Schlüssel im Schlüsselbund).
+- 🔄 **Updates aus der App** – neue Versionen erscheinen im Menü und lassen sich mit einem Klick installieren; Signatur und Prüfsumme werden vorher geprüft.
 - 🦀 **Nativ** – in Rust geschrieben, mit AppKit-Oberfläche, Hell- und Dunkelmodus.
 
 ## Funktionen
@@ -67,6 +68,9 @@ grün im Plus und rot im Minus, hier wie im Fenster „Aufzeichnungen“. An ein
 bietet das Menü zunächst nur **Heute erfassen** an (siehe unten). Diese Zeilen sind
 reine Anzeige und lassen sich nicht anklicken. Lange Hinweise brechen um, damit das Menü schmal bleibt.
 
+- **Update verfügbar** – gibt es eine neue Version, steht ganz oben im Menü „Auf Tagwerk
+  1.10.0 aktualisieren …“ (siehe [Updates](#updates)). Ein Klick zeigt die Neuigkeiten,
+  lädt das Update und startet Tagwerk neu; solange es lädt, steht dort der Fortschritt.
 - **Mitteilungen zu Pause und Höchstarbeitszeit** – über die Mitteilungszentrale von macOS:
   bei **5:45** und **6 Std.** Arbeit am Stück die Erinnerung an die Pause („Noch 15 Min.
   bis 6 Std. ohne Pause“), bei **9:45** und **10 Std.** Arbeit am Tag die an die
@@ -334,6 +338,10 @@ zu „Woche“ zeigt die Woche des ausgewählten Tags. In der Menüleisten-App e
     <td align="center"><img src="doc/screenshots/einstellungen-erfassung.png" alt="Einstellungen, Reiter „Erfassung“" width="400"><br><sub><b>Erfassung</b></sub></td>
     <td align="center"><img src="doc/screenshots/einstellungen-mitteilungen.png" alt="Einstellungen, Reiter „Mitteilungen“" width="400"><br><sub><b>Mitteilungen</b></sub></td>
   </tr>
+  <tr>
+    <td align="center"><img src="doc/screenshots/einstellungen-updates.png" alt="Einstellungen, Reiter „Updates“ mit verfügbarem Update" width="400"><br><sub><b>Updates</b></sub></td>
+    <td></td>
+  </tr>
 </table>
 
 Erreichbar über „Einstellungen …“ in der Menüleiste oder ⌘, im Fenster „Aufzeichnungen“.
@@ -343,10 +351,10 @@ Arbeitstage, Arbeitszeitrahmen, Mindestpause): Sie gelten ab einem Datum, damit 
 Titelleiste zeigt den Datenordner im Finder. **Standardwerte** setzt alle Einstellungen
 auf allen Reitern zurück, auch Zeitkonto und Übertrag; die Arbeitszeitregeln gelten ab
 heute wieder wie zu Beginn, frühere Tage behalten ihre Stände, geplante entfallen. Nur
-„Bei Anmeldung starten“ bleibt, wie es ist. Vorher fragt ein Dialog nach und nennt, was
+„Bei Anmeldung starten“ und die Einstellungen zu Updates bleiben, wie sie sind. Vorher fragt ein Dialog nach und nennt, was
 zurückgesetzt wird und was bleibt.
 
-Die Einstellungen stehen auf vier Reitern:
+Die Einstellungen stehen auf fünf Reitern:
 
 | Reiter       | Einstellung            | Bedeutung                                                               | Standard        |
 |--------------|------------------------|-------------------------------------------------------------------------|-----------------|
@@ -368,6 +376,9 @@ Die Einstellungen stehen auf vier Reitern:
 |              | Freie Tage             | Automatische Erfassung nur an Arbeitstagen als Arbeitszeit zählen; am Wochenende und an abgewählten Arbeitstagen erst nach „Heute erfassen“ | ein |
 | Mitteilungen | Mitteilungen           | Zeigt, ob Tagwerk Mitteilungen senden darf; wenn nicht, öffnet „Systemeinstellungen öffnen“ die Mitteilungseinstellungen von Tagwerk | – |
 |              | Erinnern an            | Höchstarbeitszeit (9:45 und 10 Std.) und Pause (5:45 und 6 Std. am Stück), einzeln abschaltbar | beides ein |
+| Updates      | Suche                  | Automatisch nach Updates suchen; „Beta-Updates erhalten“ bietet auch Vorabversionen an | ein; Beta aus (an, wenn eine Beta läuft) |
+|              | Neuigkeiten            | Vor dem Update anzeigen (mit „Jetzt aktualisieren“ / „Später“); nach dem Update anzeigen, wenn sie nicht schon davor zu sehen waren | beides ein |
+|              | Stand                  | Ergebnis der letzten Suche; „Jetzt suchen“, „Laden und installieren“, „Zuletzt gesucht“ | – |
 
 - **Allgemein** – unter der Auswahl des Symbolsatzes stehen seine vier Zustände als
   Vorschau: läuft, Pause, außerhalb des Arbeitszeitrahmens oder freier Tag, Feierabend.
@@ -412,6 +423,8 @@ Die Einstellungen stehen auf vier Reitern:
 - **Mitteilungen** – oben steht, ob macOS Mitteilungen von Tagwerk zulässt (erlaubt, nicht
   erlaubt, ausgeblendet oder nur in der installierten App). Die beiden Schalter gelten nur
   für die Erinnerungen; die Hinweise im Menü und im Fenster „Aufzeichnungen“ bleiben.
+- **Updates** – siehe [Updates](#updates). Die Schalter liegen in den Benutzereinstellungen
+  von macOS, nicht in der Datenbank.
 
 Neun Symbolsätze stehen zur Wahl. Sie werden von der App selbst gezeichnet und sind
 damit in jeder Höhe scharf:
@@ -580,6 +593,31 @@ aus dem passenden Eintrag in [CHANGELOG.md](CHANGELOG.md). Voraussetzung ist die
 [GitHub CLI](https://cli.github.com) (`brew install gh`, `gh auth login`); der Commit
 muss bereits gepusht sein.
 
+### Updates
+
+Tagwerk sucht kurz nach dem Start und danach stündlich in den
+[Releases auf GitHub](https://github.com/rfoerthe/tagwerk/releases) nach einer neueren
+Version, außerdem beim Öffnen des Menüs, wenn die letzte Suche länger als 15 Minuten her
+ist. Eine neue Version meldet eine Mitteilung (einmal je Version) und ein Eintrag ganz oben
+im Menü; installiert wird sie von dort oder unter Einstellungen › Updates mit „Laden und
+installieren“. Beta-Versionen (Vorabversionen wie `1.10.0-beta.1`) gibt es nur mit „Beta-Updates
+erhalten“. Wer Versionen überspringt, sieht die Neuigkeiten aller dazwischen.
+
+Beim Installieren lädt Tagwerk das DMG des Releases (nur über HTTPS von
+`github.com/rfoerthe/tagwerk`), prüft Größe und SHA-256 (`.sha256` des Releases) und beendet
+sich – die laufende Erfassung wird gesichert. Ein Skript prüft dann die Signatur von DMG und
+App (dieselbe Developer ID und Bundle-Kennung, Gatekeeper) und die Version, tauscht
+`Tagwerk.app` aus und startet Tagwerk neu. Scheitert ein Schritt, bleibt die bisherige App und
+startet wieder; beim nächsten Start meldet Tagwerk, woran es lag. Ist der Ordner der App nicht
+beschreibbar, fragt macOS nach einem Administrator-Kennwort.
+
+Die Suche überträgt nichts aus den Aufzeichnungen – nur die übliche Anfrage an die
+GitHub-API (mit der installierten Version im User-Agent). Sie lässt sich unter Einstellungen ›
+Updates abschalten. Installieren kann nur die signierte `Tagwerk.app` in der
+Menüleisten-App; bei einem ad hoc signierten Build (`./build.sh --no-sign`) oder `cargo run`
+wird nur gesucht, das Update lässt sich dann auf GitHub laden. Zum Ausprobieren der
+Oberfläche täuscht `TAGWERK_SIMULATE_UPDATE=1.10.0` ein verfügbares Update vor.
+
 ## Kommandozeile
 
 ```text
@@ -607,8 +645,9 @@ Es läuft immer nur eine Instanz der Menüleisten-App.
 
 > **Kurz gesagt:** Alle Aufzeichnungen bleiben bei dir. Tagwerk speichert sie in deinem
 > Benutzerordner auf dem Mac – kein Konto, kein Server, keine Cloud-Synchronisation, keine
-> Übertragung ins Netz. Die Datenbank und ihre Backups lassen sich auf Wunsch
-> [verschlüsseln](#verschluesselung).
+> Übertragung ins Netz. Die einzige Verbindung ist die abschaltbare
+> [Suche nach Updates](#updates) bei GitHub. Die Datenbank und ihre Backups lassen sich auf
+> Wunsch [verschlüsseln](#verschluesselung).
 
 Datenbank und Backups liegen zusammen im Datenordner deines Benutzerkontos:
 

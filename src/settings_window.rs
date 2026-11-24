@@ -1,11 +1,13 @@
 //! Fenster „Einstellungen“ nach den macOS Human Interface Guidelines: nicht modal,
 //! Änderungen gelten sofort, kein „OK“/„Abbrechen“.
 //!
-//! Vier Reiter: „Allgemein“ (Anmeldung, Menüleiste, Kurzbefehle), „Arbeitszeit“
+//! Fünf Reiter: „Allgemein“ (Anmeldung, Menüleiste, Kurzbefehle), „Arbeitszeit“
 //! (Arbeitszeitregeln je Stand, Zeitkonto), „Erfassung“ (Arbeit ohne Mac, Inaktivität,
-//! Nachfrage nach langer Sperre, freie Tage) und „Mitteilungen“ (Stand der Erlaubnis, woran
-//! Tagwerk erinnert). Gespeichert wird in der Datenbank; die jeweils andere
-//! Tagwerk-Instanz (Menüleiste bzw. Fenster „Aufzeichnungen“) übernimmt die Werte.
+//! Nachfrage nach langer Sperre, freie Tage), „Mitteilungen“ (Stand der Erlaubnis, woran
+//! Tagwerk erinnert) und „Updates“ (Suche nach neuen Versionen, siehe [`crate::update`]).
+//! Gespeichert wird in der Datenbank; die jeweils andere Tagwerk-Instanz (Menüleiste bzw.
+//! Fenster „Aufzeichnungen“) übernimmt die Werte. Die Einstellungen zu Updates betreffen die
+//! App und liegen in den Benutzereinstellungen von macOS; „Standardwerte“ lässt sie unverändert.
 //!
 //! Ausnahme vom sofortigen Gelten sind die Arbeitszeitregeln (Rahmen, Regelarbeitszeit,
 //! Arbeitstage, Mindestpause): Sie gelten ab einem Datum, damit eine Änderung frühere Tage
@@ -36,6 +38,7 @@ use crate::login_item;
 use crate::notify::{self, Permission};
 use crate::rules::{self, fmt_day, IconSet, Settings, WorkRules, IDLE_RANGE, MIN_PAUSE_RANGE, MIN_WORK_RANGE, WEEKLY_RANGE};
 use crate::store;
+use crate::update;
 use chrono::{DateTime, Datelike, Local, NaiveDate, TimeZone};
 use objc2::rc::Retained;
 use objc2::runtime::{AnyObject, NSObject, NSObjectProtocol, ProtocolObject, Sel};
@@ -117,6 +120,17 @@ struct State {
     free_days: Retained<NSButton>,
     notify_limit: Retained<NSButton>,
     notify_break: Retained<NSButton>,
+    /// Reiter „Updates“ (Stand aus [`update::state`], siehe [`State::fill_update`]).
+    upd_auto: Retained<NSButton>,
+    upd_beta: Retained<NSButton>,
+    upd_before: Retained<NSButton>,
+    upd_after: Retained<NSButton>,
+    upd_icon: Retained<NSImageView>,
+    upd_status: Retained<NSTextField>,
+    upd_check: Retained<NSButton>,
+    upd_install: Retained<NSButton>,
+    /// Zuletzt gesucht; warum sich ein Update hier nicht installieren lässt.
+    upd_note: Retained<NSTextField>,
     tabs: Retained<NSTabView>,
     error: Retained<NSTextField>,
     on_change: fn(),
@@ -569,6 +583,43 @@ define_class!(
         fn copy_recovery_key(&self, sender: Option<&NSButton>) {
             copy_recovery_key(sender);
         }
+
+        /// Schalter im Reiter „Updates“ (Benutzereinstellungen, nicht die Datenbank).
+        #[unsafe(method(updatePrefsChanged:))]
+        fn update_prefs_changed(&self, _sender: Option<&AnyObject>) {
+            let on = |b: &NSButton| b.state() == NSControlStateValueOn;
+            let Some((auto, beta, before, after)) =
+                with_state(|s| (on(&s.upd_auto), on(&s.upd_beta), on(&s.upd_before), on(&s.upd_after)))
+            else {
+                return;
+            };
+            // Außerhalb von `with_state`: Eine neue Suche meldet sich über `update_changed`.
+            update::set_notes_before(before);
+            update::set_notes_after(after);
+            if beta != update::include_beta() {
+                update::set_include_beta(beta);
+            }
+            if auto != update::auto_check() {
+                update::set_auto_check(auto);
+            }
+            with_state(|s| s.fill_update());
+        }
+
+        #[unsafe(method(checkForUpdates:))]
+        fn check_for_updates(&self, _sender: Option<&AnyObject>) {
+            update::check(true);
+        }
+
+        /// „Laden und installieren“ bzw. „Auf GitHub ansehen“, wenn sich das Update hier nicht
+        /// installieren lässt.
+        #[unsafe(method(installUpdate:))]
+        fn install_update(&self, _sender: Option<&AnyObject>) {
+            if update::install_blocker().is_some() {
+                update::open_release_page();
+            } else {
+                update::install();
+            }
+        }
     }
 );
 
@@ -621,6 +672,45 @@ impl State {
         self.encrypt.setState(state(encrypted));
         self.encrypt.setEnabled(RELAUNCH.get().is_some());
         self.recovery.setEnabled(encrypted);
+        self.fill_update();
+    }
+
+    /// Reiter „Updates“ nach den Einstellungen und dem Stand der Suche.
+    fn fill_update(&self) {
+        let state = |on: bool| if on { NSControlStateValueOn } else { NSControlStateValueOff };
+        self.upd_auto.setState(state(update::auto_check()));
+        self.upd_beta.setState(state(update::include_beta()));
+        self.upd_before.setState(state(update::notes_before()));
+        self.upd_after.setState(state(update::notes_after()));
+        let current = update::state();
+        match update::status(&current) {
+            Some((symbol, color, text)) => {
+                self.upd_icon
+                    .setImage(NSImage::imageWithSystemSymbolName_accessibilityDescription(&ns(symbol), Some(&ns(&text))).as_deref());
+                self.upd_icon.setContentTintColor(Some(&color));
+                self.upd_icon.setHidden(false);
+                self.upd_status.setStringValue(&ns(&text));
+            }
+            None => {
+                self.upd_icon.setHidden(true);
+                self.upd_status.setStringValue(&ns("Noch nicht gesucht."));
+            }
+        }
+        let working = matches!(
+            current,
+            update::State::Checking | update::State::Downloading(_) | update::State::Installing
+        );
+        self.upd_check.setEnabled(!working && !update::busy());
+        let available = matches!(current, update::State::Available(_));
+        self.upd_install.setHidden(!available);
+        let blocker = update::install_blocker();
+        self.upd_install.setTitle(&ns(if blocker.is_some() { "Auf GitHub ansehen" } else { "Laden und installieren" }));
+        let mut note: Vec<String> = update::last_checked_text().into_iter().collect();
+        if let (true, Some(b)) = (available, blocker) {
+            note.push(b.to_string());
+        }
+        self.upd_note.setStringValue(&ns(&note.join("\n")));
+        self.upd_note.setHidden(note.is_empty());
     }
 
     /// „Bearbeiten …“ und „Löschen“ nach der Auswahl in der Liste (der erste Stand bleibt).
@@ -745,6 +835,12 @@ impl State {
         self.error.setStringValue(&ns(text));
         self.error.setHidden(false);
     }
+}
+
+/// Der Stand der Updates hat sich geändert (Suche, Laden …). `try_with_state`: Die Änderung
+/// kann aus einer Aktion des Fensters kommen, während `STATE` geliehen ist.
+fn update_changed() {
+    try_with_state(|s| s.fill_update());
 }
 
 /// Stand der Mitteilungen abfragen und anzeigen (Antwort kommt später im Hauptthread).
@@ -1095,7 +1191,7 @@ fn reset_info(s: &Settings, today: NaiveDate) -> String {
         Some((last, rest)) => parts.push(format!("Die geplanten Stände ab {} und {last} entfallen.", rest.join(", "))),
     }
     parts.push(
-        "Es bleiben „Bei Anmeldung starten“, die Arbeitszeitregeln bis gestern und alle Aufzeichnungen."
+        "Es bleiben „Bei Anmeldung starten“, die Einstellungen zu Updates, die Arbeitszeitregeln bis gestern und alle Aufzeichnungen."
             .to_string(),
     );
     parts.join(" ")
@@ -1766,6 +1862,28 @@ fn build(on_change: fn()) -> State {
     let free_days = checkbox("Automatische Erfassung nur an Arbeitstagen zählen", sel!(switchChanged:));
     let notify_limit = checkbox("Höchstarbeitszeit (bei 9:45 und 10 Std. Arbeit)", sel!(switchChanged:));
     let notify_break = checkbox("Pause (bei 5:45 und 6 Std. Arbeit am Stück)", sel!(switchChanged:));
+    let upd_auto = checkbox("Automatisch nach Updates suchen", sel!(updatePrefsChanged:));
+    let upd_beta = checkbox("Beta-Updates erhalten", sel!(updatePrefsChanged:));
+    let upd_before = checkbox("Vor dem Update anzeigen", sel!(updatePrefsChanged:));
+    let upd_after = checkbox("Nach dem Update anzeigen", sel!(updatePrefsChanged:));
+    let upd_icon = NSImageView::new(mtm);
+    upd_icon.setImageScaling(NSImageScaling::ScaleNone);
+    // Umbricht wie ein Hinweis (Fehlermeldungen können lang sein), aber in normaler Schrift.
+    let upd_status = caption("");
+    upd_status.setFont(Some(&NSFont::systemFontOfSize(NSFont::systemFontSize())));
+    upd_status.setTextColor(Some(&NSColor::labelColor()));
+    let upd_check = unsafe {
+        NSButton::buttonWithTitle_target_action(&ns("Jetzt suchen"), Some(target), Some(sel!(checkForUpdates:)), mtm)
+    };
+    let upd_install = unsafe {
+        NSButton::buttonWithTitle_target_action(
+            &ns("Laden und installieren"),
+            Some(target),
+            Some(sel!(installUpdate:)),
+            mtm,
+        )
+    };
+    let upd_note = caption("Zuletzt gesucht\nInstallieren");
     let notify_icon = NSImageView::new(mtm);
     notify_icon.setImageScaling(NSImageScaling::ScaleNone);
     let notify_status = label("");
@@ -1825,6 +1943,8 @@ fn build(on_change: fn()) -> State {
         )
     };
 
+    let upd_status_row = hstack(&[&upd_icon, &upd_status]);
+    let upd_buttons = hstack(&[&upd_check, &upd_install]);
     let notify_row = hstack(&[&notify_icon, &notify_status, &notify_button]);
     notify_row.setCustomSpacing_afterView(10.0, &notify_status);
     let rules_buttons = hstack(&[&rules_new, &rules_edit, &rules_delete]);
@@ -1953,6 +2073,29 @@ fn build(on_change: fn()) -> State {
             vec![2],
             None,
         ),
+        (
+            "Updates",
+            vec![
+                row(Some("Installiert:"), &label(&format!("Tagwerk {}", update::CURRENT))),
+                row(Some("Suche:"), &upd_auto),
+                row(None, &upd_beta),
+                row(
+                    None,
+                    &caption(
+                        "Beta-Versionen enthalten neue Funktionen in Entwicklung und können instabil oder \
+                         unvollständig sein. Gesucht wird in den Releases auf GitHub.",
+                    ),
+                ),
+                row(Some("Neuigkeiten:"), &upd_before),
+                row(None, &upd_after),
+                row(None, &caption("Nach dem Update nur, wenn sie nicht schon davor zu sehen waren.")),
+                row(Some("Stand:"), &upd_status_row),
+                row(None, &upd_buttons),
+                row(None, &upd_note),
+            ],
+            vec![1, 4, 7],
+            None,
+        ),
     ];
 
     // Jeder Reiter ist ein Raster; alle Reiter sind so groß wie der größte.
@@ -2079,10 +2222,20 @@ fn build(on_change: fn()) -> State {
         free_days,
         notify_limit,
         notify_break,
+        upd_auto,
+        upd_beta,
+        upd_before,
+        upd_after,
+        upd_icon,
+        upd_status,
+        upd_check,
+        upd_install,
+        upd_note,
         tabs,
         error,
         on_change,
     };
+    update::subscribe(update_changed);
     // Bis zur Antwort der Mitteilungszentrale der letzte bekannte Stand (sonst leer).
     if let Some(p) = notify::last_permission() {
         state.set_permission(p);
@@ -2121,7 +2274,8 @@ pub fn show(on_change: fn()) {
 
 /// Zum Testen: Fenster „Einstellungen“ mit dem Stand der Datenbank öffnen, ein Bild
 /// speichern und beenden (`Tagwerk --settings-screenshot <png>`; Reiter über
-/// `TAGWERK_SETTINGS_TAB=0|1|2|3`, Symbolsatz zur Ansicht
+/// `TAGWERK_SETTINGS_TAB=0|1|2|3|4`, ein verfügbares Update über `TAGWERK_SIMULATE_UPDATE=<Version>`,
+/// Symbolsatz zur Ansicht
 /// über `TAGWERK_ICON_SET=0|1|2`, Erscheinungsbild über `TAGWERK_APPEARANCE=dark`, Stand der
 /// Mitteilungen über `TAGWERK_NOTIFICATIONS=allowed|denied|hidden|undetermined`; mit
 /// `TAGWERK_SETTINGS_SHEET=new|first|<Zeile>` stattdessen das Blatt „Arbeitszeit ändern“ für
@@ -2140,6 +2294,9 @@ pub fn screenshot(path: &std::path::Path) -> Result<(), String> {
     }
     let state = build(|| {});
     STATE.with(|s| *s.borrow_mut() = Some(state));
+    if std::env::var_os("TAGWERK_SIMULATE_UPDATE").is_some() {
+        update::check(true);
+    }
     with_state(|s| {
         if let Some(id) = std::env::var("TAGWERK_ICON_SET").ok().and_then(|v| v.parse().ok()) {
             s.settings.icon_set = IconSet::from_id(id);
@@ -2365,7 +2522,7 @@ mod tests {
             assert!(info.contains(part), "{info}");
         }
         assert!(
-            info.ends_with("Es bleiben „Bei Anmeldung starten“, die Arbeitszeitregeln bis gestern und alle Aufzeichnungen."),
+            info.ends_with("Es bleiben „Bei Anmeldung starten“, die Einstellungen zu Updates, die Arbeitszeitregeln bis gestern und alle Aufzeichnungen."),
             "{info}"
         );
         // Was der Text sagt, tut `with_defaults`.

@@ -6,6 +6,32 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+## [1.9.0] - 2026-11-24
+
+### Zusammenfassung
+Tagwerk hält sich jetzt selbst aktuell: Es sucht in den Releases auf GitHub nach neuen
+Versionen, meldet sie ganz oben im Menü und installiert sie auf Klick. Vorher prüft es
+Prüfsumme und Signatur; die laufende Erfassung bleibt erhalten. Einstellen lässt sich das im
+neuen Reiter Einstellungen › Updates, auch ganz abschalten. Die Suche überträgt nichts aus
+den Aufzeichnungen. Auf 1.9.0 selbst wird noch von Hand aktualisiert; ab dann geht es aus
+der App.
+
+### Hinzugefügt
+- Updates aus der App: Tagwerk sucht kurz nach dem Start, stündlich und beim Öffnen des Menüs
+  (höchstens alle 15 Minuten) in den GitHub-Releases nach einer neueren Version. Gibt es eine,
+  steht ganz oben im Menü „Auf Tagwerk … aktualisieren“, und eine Mitteilung meldet sie einmal.
+  Ein Klick zeigt die Neuigkeiten (aller übersprungenen Versionen), lädt das DMG, prüft Größe,
+  SHA-256 und Signatur (dieselbe Developer ID und Bundle-Kennung, Gatekeeper), tauscht die App
+  aus und startet neu – die laufende Erfassung wird vorher gesichert. Scheitert ein Schritt,
+  bleibt die bisherige App. Liegt sie in einem nicht beschreibbaren Ordner, fragt macOS nach
+  einem Administrator-Kennwort.
+- Einstellungen › Updates (neuer Reiter): automatisch suchen, Beta-Updates erhalten,
+  Neuigkeiten vor bzw. nach dem Update anzeigen, Stand der Suche mit „Jetzt suchen“ und
+  „Laden und installieren“. Die Schalter liegen in den Benutzereinstellungen von macOS;
+  „Standardwerte“ lässt sie unverändert.
+- `TAGWERK_SIMULATE_UPDATE=<Version>` täuscht ein verfügbares Update vor (für
+  `--settings-screenshot` mit `TAGWERK_SETTINGS_TAB=4` und `--menu-screenshot`).
+
 ## [1.8.0] - 2026-11-24
 
 ### Zusammenfassung
@@ -672,7 +698,8 @@ als Markdown. Alle Daten bleiben lokal auf dem Mac.
   notarisiert es und installiert sie auf Wunsch nach `/Applications`.
 - `github-release.sh` veröffentlicht ein geprüftes DMG als Release auf GitHub.
 
-[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.8.0...HEAD
+[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.9.0...HEAD
+[1.9.0]: https://github.com/rfoerthe/tagwerk/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/rfoerthe/tagwerk/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/rfoerthe/tagwerk/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/rfoerthe/tagwerk/compare/v1.5.0...v1.6.0

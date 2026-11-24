@@ -18,6 +18,7 @@ use crate::settings_window;
 use crate::snapshot;
 use crate::store;
 use crate::tracker::{PauseReason, Tracker};
+use crate::update;
 use crate::week_view;
 use chrono::{DateTime, Duration, Local, NaiveDate, NaiveDateTime, TimeZone};
 use objc2::rc::Retained;
@@ -63,6 +64,10 @@ fn ns(s: &str) -> Retained<NSString> {
 }
 
 struct MenuItems {
+    /// Ganz oben: „Auf Tagwerk 1.10.0 aktualisieren …“ bzw. der Fortschritt des Updates (sonst
+    /// ausgeblendet, samt Trennlinie darunter).
+    update: Retained<NSMenuItem>,
+    update_sep: Retained<NSMenuItem>,
     status: InfoLine,
     worked: InfoLine,
     pauses: InfoLine,
@@ -181,6 +186,8 @@ define_class!(
                 }
                 s.refresh();
             });
+            // Außerhalb von `with_state`: Die Suche meldet sich über `update_changed`.
+            update::check_if_stale();
         }
     }
 
@@ -308,6 +315,12 @@ define_class!(
         #[unsafe(method(showAbout:))]
         fn show_about(&self, _sender: Option<&AnyObject>) {
             about::show();
+        }
+
+        /// „Auf Tagwerk … aktualisieren“ (siehe [`update::install`]).
+        #[unsafe(method(installUpdate:))]
+        fn install_update(&self, _sender: Option<&AnyObject>) {
+            update::install();
         }
 
         #[unsafe(method(quit:))]
@@ -539,6 +552,76 @@ fn open_records() {
     }
 }
 
+/// Der Stand der Updates hat sich geändert. Nur, wenn `STATE` gerade frei ist – sonst zeigt
+/// ihn das nächste `refresh`.
+fn update_changed() {
+    STATE.with(|s| {
+        if let Ok(mut s) = s.try_borrow_mut() {
+            if let Some(s) = s.as_mut() {
+                show_update(&s.items);
+            }
+        }
+    });
+}
+
+/// Eintrag für das Update ganz oben im Menü: anklickbar, solange ein Update bereitsteht,
+/// sonst der Fortschritt (ausgegraut) oder ausgeblendet.
+fn show_update(items: &MenuItems) {
+    let (title, symbol, enabled, tip) = match update::state() {
+        update::State::Available(offer) => {
+            let dots = if update::notes_before() { " …" } else { "" };
+            (
+                format!("Auf Tagwerk {} aktualisieren{dots}", offer.version),
+                "arrow.down.circle.fill",
+                true,
+                format!(
+                    "Update verfügbar (installiert ist {}): Tagwerk lädt es, prüft die Signatur und startet neu.",
+                    update::CURRENT
+                ),
+            )
+        }
+        update::State::Downloading(Some(f)) => {
+            (format!("Update wird geladen … {} %", (f * 100.0) as i64), "arrow.down.circle", false, String::new())
+        }
+        update::State::Downloading(None) => ("Update wird geladen …".to_string(), "arrow.down.circle", false, String::new()),
+        update::State::Installing => {
+            ("Wird installiert und neu gestartet …".to_string(), "gearshape.2", false, String::new())
+        }
+        _ => {
+            items.update.setHidden(true);
+            items.update_sep.setHidden(true);
+            return;
+        }
+    };
+    let item = &items.update;
+    if item.title().to_string() != title {
+        item.setTitle(&ns(&title));
+    }
+    // Das Angebot in Akzentfarbe (bei einer Beta orange), wie das Banner in Barforge.
+    let color = match update::state() {
+        update::State::Available(o) if o.beta => orange(),
+        update::State::Available(_) => NSColor::controlAccentColor(),
+        _ => NSColor::secondaryLabelColor(),
+    };
+    item.setImage(update_symbol(symbol, &color).as_deref());
+    item.setEnabled(enabled);
+    let tip = (!tip.is_empty()).then(|| ns(&tip));
+    item.setToolTip(tip.as_deref());
+    item.setHidden(false);
+    items.update_sep.setHidden(false);
+}
+
+/// SF-Symbol in einer festen Farbe (nicht als Vorlage, sonst färbt das Menü es ein).
+fn update_symbol(name: &str, color: &NSColor) -> Option<Retained<NSImage>> {
+    let image = NSImage::imageWithSystemSymbolName_accessibilityDescription(&ns(name), Some(&ns("Update")))?;
+    let config = NSImageSymbolConfiguration::configurationWithPaletteColors(&NSArray::from_retained_slice(&[
+        color.retain(),
+    ]));
+    let image = image.imageWithSymbolConfiguration(&config)?;
+    image.setTemplate(false);
+    Some(image)
+}
+
 /// Einstellungen wurden im Fenster „Einstellungen“ geändert.
 fn settings_changed() {
     records_changed();
@@ -762,6 +845,7 @@ impl AppState {
         self.items.first.set(&rich(&parts));
         // Fehler und Hinweise brechen um, statt das Menü zu verbreitern: höchstens so breit wie
         // die breiteste Zeile mit Status und Kennzahlen.
+        show_update(&self.items);
         let items = &self.items;
         let wrap = [&items.status, &items.worked, &items.pauses, &items.first, &items.balance, &items.account]
             .iter()
@@ -1750,7 +1834,13 @@ pub fn run(screenshot: Option<std::path::PathBuf>) {
     count_pause.setSubmenu(Some(&count_pause_menu));
     count_pause.setHidden(true);
 
+    let update_item = menu_item(mtm, "", Some(sel!(installUpdate:)), "", &controller);
+    update_item.setHidden(true);
+    let update_sep = NSMenuItem::separatorItem(mtm);
+    update_sep.setHidden(true);
     let items = MenuItems {
+        update: update_item,
+        update_sep,
         // Status, Kennzahlen und Hinweise sind reine Anzeige (siehe `InfoLine`).
         status: InfoLine::new(mtm),
         worked: InfoLine::new(mtm),
@@ -1792,6 +1882,9 @@ pub fn run(screenshot: Option<std::path::PathBuf>) {
     ] {
         set_item_symbol(item, symbol, desc);
     }
+    // Ein Update steht ganz oben, getrennt vom Rest.
+    menu.addItem(&items.update);
+    menu.addItem(&items.update_sep);
     // Ein Fehler der Datenbank steht direkt unter dem Status, vor den Kennzahlen.
     for line in
         [&items.status, &items.error, &items.worked, &items.pauses, &items.first, &items.balance, &items.account]
@@ -1897,6 +1990,16 @@ pub fn run(screenshot: Option<std::path::PathBuf>) {
     STATE.with(|s| *s.borrow_mut() = Some(state));
     if let Some(result) = &switched {
         show_switch_result(mtm, result);
+    }
+
+    // Updates: suchen (und installieren) nur in der echten Menüleisten-App; für Bilder lässt
+    // sich ein Update mit `TAGWERK_SIMULATE_UPDATE` vortäuschen.
+    update::subscribe(update_changed);
+    if screenshot.is_none() {
+        update::allow_install();
+        update::start();
+    } else if std::env::var_os("TAGWERK_SIMULATE_UPDATE").is_some() {
+        update::start();
     }
 
     // Erster Start der installierten App: automatisch bei Anmeldung starten.
