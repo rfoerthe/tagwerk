@@ -6,6 +6,12 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+### Geändert
+- Menü: Ein verfügbares Update steht ganz oben jetzt als farbiges Banner (wie in Barforge) –
+  in Akzentfarbe, bei einer Beta orange, mit „Update verfügbar“, der Version und einer Kapsel
+  „Aktualisieren“. Bisher war es eine unauffällige Zeile „Auf Tagwerk … aktualisieren“, die
+  zwischen den übrigen Einträgen kaum auffiel.
+
 ## [1.9.1] - 2026-11-24
 
 ### Zusammenfassung
