@@ -6,6 +6,15 @@ folgen der [Semantischen Versionierung](https://semver.org/lang/de/).
 
 ## [Unveröffentlicht]
 
+## [1.8.0] - 2026-11-24
+
+### Zusammenfassung
+Die Datenbank lässt sich jetzt verschlüsseln – und jederzeit wieder entschlüsseln. Der
+Schlüssel liegt im Schlüsselbund von macOS, Tagwerk startet also weiter ohne Passwort. Den
+Wiederherstellungsschlüssel unbedingt aufbewahren: Ohne ihn und ohne den Eintrag im
+Schlüsselbund sind die Aufzeichnungen verloren. **Eine verschlüsselte Datenbank können
+ältere Versionen nicht öffnen** – vor einem Wechsel zurück die Verschlüsselung ausschalten.
+
 ### Hinzugefügt
 - Datenbank verschlüsseln (Einstellungen › Allgemein › „Datenbank und Backups
   verschlüsseln“): `tagwerk.db` und alle Backups werden mit SQLCipher (AES-256)
@@ -663,7 +672,8 @@ als Markdown. Alle Daten bleiben lokal auf dem Mac.
   notarisiert es und installiert sie auf Wunsch nach `/Applications`.
 - `github-release.sh` veröffentlicht ein geprüftes DMG als Release auf GitHub.
 
-[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.7.0...HEAD
+[Unveröffentlicht]: https://github.com/rfoerthe/tagwerk/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/rfoerthe/tagwerk/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/rfoerthe/tagwerk/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/rfoerthe/tagwerk/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/rfoerthe/tagwerk/compare/v1.4.0...v1.5.0
